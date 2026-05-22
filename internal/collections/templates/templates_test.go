@@ -531,6 +531,69 @@ func TestPhase2DiscoverTemplatesUseExpectedBands(t *testing.T) {
 	}
 }
 
+// TestPhase3FranchiseTemplatesUseExpectedBands pins the Phase-3 TMDB Collection
+// franchise templates to their documented sort-order band, source, and spec
+// shape. The placeholder template is allowed to ship with CollectionID == 0 (a
+// permitted sentinel — see validateTMDBCollection); every other franchise must
+// resolve to a real TMDB collection ID. Drift here would either silently
+// reorder the gallery or, worse, swap a curated franchise for the placeholder.
+func TestPhase3FranchiseTemplatesUseExpectedBands(t *testing.T) {
+	const (
+		franchisePrefix = "tmdb_franchise_"
+		placeholderID   = "tmdb_franchise_placeholder"
+	)
+
+	// Keep in lockstep with the entries added to builtin.go. If a franchise
+	// is added or skipped, update this number — the count assertion is the
+	// canary that catches accidental deletions.
+	const wantFranchiseTemplateCount = 11
+
+	var (
+		matched          int
+		sawPlaceholder   bool
+		curatedFranchise int
+	)
+	for _, tmpl := range List() {
+		if !strings.HasPrefix(tmpl.ID, franchisePrefix) {
+			continue
+		}
+		matched++
+
+		if tmpl.Source != SourceTMDBCollection {
+			t.Errorf("%s: Source = %q, want %q", tmpl.ID, tmpl.Source, SourceTMDBCollection)
+		}
+		if tmpl.MediaKind != MediaMovie {
+			t.Errorf("%s: MediaKind = %q, want %q", tmpl.ID, tmpl.MediaKind, MediaMovie)
+		}
+		if tmpl.DefaultSortOrder < 7000 || tmpl.DefaultSortOrder > 7999 {
+			t.Errorf("%s: DefaultSortOrder %d outside Franchises band [7000, 7999]", tmpl.ID, tmpl.DefaultSortOrder)
+		}
+		if tmpl.TMDBCollection == nil {
+			t.Fatalf("%s: TMDBCollection spec is nil", tmpl.ID)
+		}
+
+		if tmpl.ID == placeholderID {
+			sawPlaceholder = true
+			if tmpl.TMDBCollection.CollectionID != 0 {
+				t.Errorf("%s: placeholder CollectionID = %d, want 0", tmpl.ID, tmpl.TMDBCollection.CollectionID)
+			}
+		} else {
+			curatedFranchise++
+			if tmpl.TMDBCollection.CollectionID <= 0 {
+				t.Errorf("%s: CollectionID = %d, want > 0", tmpl.ID, tmpl.TMDBCollection.CollectionID)
+			}
+		}
+	}
+
+	if !sawPlaceholder {
+		t.Error("placeholder template tmdb_franchise_placeholder is missing")
+	}
+	if matched != wantFranchiseTemplateCount {
+		t.Errorf("franchise template count = %d, want %d (curated=%d + placeholder=1)",
+			matched, wantFranchiseTemplateCount, curatedFranchise)
+	}
+}
+
 // TestPhase1MDBListTemplatesHaveSortOrderInExpectedBands verifies that the
 // Phase-1 MDBList-backed templates land in the sort-order bands documented in
 // docs/superpowers/plans/2026-05-22-collection-templates-expansion.md. The
