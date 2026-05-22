@@ -455,6 +455,82 @@ func TestCategoryLabelKnowsAllBuiltinCategories(t *testing.T) {
 	}
 }
 
+// TestPhase2DiscoverTemplatesUseExpectedBands pins the Phase-2 TMDB Discover
+// genre matrix to its documented sort-order bands and TMDB query parameters.
+// Drift here would either reorder the gallery in surprising ways (band
+// regressions) or change what a "Popular Action" / "Top Rated Action" template
+// actually returns from TMDB (filter regressions) — both silent failures from
+// the operator's perspective, so make them loud.
+func TestPhase2DiscoverTemplatesUseExpectedBands(t *testing.T) {
+	const (
+		popularPrefix  = "tmdb_discover_popular_"
+		topRatedPrefix = "tmdb_discover_top_rated_"
+		kidsPrefix     = "tmdb_discover_kids_"
+	)
+	var popularCount, topRatedCount, kidsCount int
+	for _, tmpl := range List() {
+		switch {
+		case strings.HasPrefix(tmpl.ID, popularPrefix):
+			popularCount++
+			if tmpl.Source != SourceTMDBDiscover {
+				t.Errorf("%s: Source = %q, want %q", tmpl.ID, tmpl.Source, SourceTMDBDiscover)
+			}
+			if tmpl.TMDBDiscover == nil {
+				t.Fatalf("%s: TMDBDiscover spec is nil", tmpl.ID)
+			}
+			if tmpl.DefaultSortOrder < 5000 || tmpl.DefaultSortOrder > 5999 {
+				t.Errorf("%s: DefaultSortOrder %d outside Popular band [5000, 5999]", tmpl.ID, tmpl.DefaultSortOrder)
+			}
+			if tmpl.TMDBDiscover.SortBy != "popularity.desc" {
+				t.Errorf("%s: SortBy = %q, want popularity.desc", tmpl.ID, tmpl.TMDBDiscover.SortBy)
+			}
+			if tmpl.TMDBDiscover.VoteCountGte != 300 {
+				t.Errorf("%s: VoteCountGte = %d, want 300", tmpl.ID, tmpl.TMDBDiscover.VoteCountGte)
+			}
+		case strings.HasPrefix(tmpl.ID, topRatedPrefix):
+			topRatedCount++
+			if tmpl.Source != SourceTMDBDiscover {
+				t.Errorf("%s: Source = %q, want %q", tmpl.ID, tmpl.Source, SourceTMDBDiscover)
+			}
+			if tmpl.TMDBDiscover == nil {
+				t.Fatalf("%s: TMDBDiscover spec is nil", tmpl.ID)
+			}
+			if tmpl.DefaultSortOrder < 6000 || tmpl.DefaultSortOrder > 6999 {
+				t.Errorf("%s: DefaultSortOrder %d outside Top Rated band [6000, 6999]", tmpl.ID, tmpl.DefaultSortOrder)
+			}
+			if tmpl.TMDBDiscover.SortBy != "vote_average.desc" {
+				t.Errorf("%s: SortBy = %q, want vote_average.desc", tmpl.ID, tmpl.TMDBDiscover.SortBy)
+			}
+			if tmpl.TMDBDiscover.VoteCountGte != 1000 {
+				t.Errorf("%s: VoteCountGte = %d, want 1000", tmpl.ID, tmpl.TMDBDiscover.VoteCountGte)
+			}
+		case strings.HasPrefix(tmpl.ID, kidsPrefix):
+			kidsCount++
+			if tmpl.Source != SourceTMDBDiscover {
+				t.Errorf("%s: Source = %q, want %q", tmpl.ID, tmpl.Source, SourceTMDBDiscover)
+			}
+			if tmpl.TMDBDiscover == nil {
+				t.Fatalf("%s: TMDBDiscover spec is nil", tmpl.ID)
+			}
+			if tmpl.DefaultSortOrder < 9000 || tmpl.DefaultSortOrder > 9999 {
+				t.Errorf("%s: DefaultSortOrder %d outside Misc/Kids band [9000, 9999]", tmpl.ID, tmpl.DefaultSortOrder)
+			}
+			if tmpl.TMDBDiscover.CertificationLte != "PG" {
+				t.Errorf("%s: CertificationLte = %q, want PG", tmpl.ID, tmpl.TMDBDiscover.CertificationLte)
+			}
+		}
+	}
+	if popularCount != 18 {
+		t.Errorf("Popular by Genre count = %d, want 18", popularCount)
+	}
+	if topRatedCount != 18 {
+		t.Errorf("Top Rated by Genre count = %d, want 18", topRatedCount)
+	}
+	if kidsCount != 1 {
+		t.Errorf("Kids count = %d, want 1", kidsCount)
+	}
+}
+
 // TestPhase1MDBListTemplatesHaveSortOrderInExpectedBands verifies that the
 // Phase-1 MDBList-backed templates land in the sort-order bands documented in
 // docs/superpowers/plans/2026-05-22-collection-templates-expansion.md. The
