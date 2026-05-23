@@ -1,0 +1,360 @@
+package catalog
+
+import (
+	"context"
+	"fmt"
+	"slices"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/Silo-Server/silo-server/internal/models"
+)
+
+// LibraryItemRepository provides CRUD operations for the media_item_libraries
+// junction table.
+type LibraryItemRepository struct {
+	pool *pgxpool.Pool
+}
+
+// NewLibraryItemRepository creates a new LibraryItemRepository backed by the
+// given pool.
+func NewLibraryItemRepository(pool *pgxpool.Pool) *LibraryItemRepository {
+	return &LibraryItemRepository{pool: pool}
+}
+
+// libraryItemColumns is the list of columns returned by all SELECT queries on
+// media_item_libraries.
+const libraryItemColumns = `content_id, media_folder_id, first_seen_at`
+
+// scanLibraryItem scans a single row into a *models.MediaItemLibrary.
+func scanLibraryItem(row pgx.Row) (*models.MediaItemLibrary, error) {
+	var lib models.MediaItemLibrary
+	err := row.Scan(
+		&lib.ContentID,
+		&lib.MediaFolderID,
+		&lib.FirstSeenAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("scanning media item library: %w", err)
+	}
+	return &lib, nil
+}
+
+// scanLibraryItems scans multiple rows into a []*models.MediaItemLibrary slice.
+func scanLibraryItems(rows pgx.Rows) ([]*models.MediaItemLibrary, error) {
+	var items []*models.MediaItemLibrary
+	for rows.Next() {
+		var lib models.MediaItemLibrary
+		err := rows.Scan(
+			&lib.ContentID,
+			&lib.MediaFolderID,
+			&lib.FirstSeenAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("scanning media item library row: %w", err)
+		}
+		items = append(items, &lib)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating media item library rows: %w", err)
+	}
+	return items, nil
+}
+
+// Upsert inserts a junction record linking a media item to a media folder.
+// If the record already exists (same content_id and media_folder_id), the
+// operation is a no-op via ON CONFLICT DO NOTHING.
+func (r *LibraryItemRepository) Upsert(ctx context.Context, contentID string, folderID int, firstSeenAt time.Time) error {
+	query := `
+		INSERT INTO media_item_libraries (content_id, media_folder_id, first_seen_at)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (content_id, media_folder_id) DO NOTHING`
+
+	_, err := r.pool.Exec(ctx, query, contentID, folderID, firstSeenAt)
+	if err != nil {
+		return fmt.Errorf("upserting media item library: %w", err)
+	}
+
+	return nil
+}
+
+// GetByItem returns all library junction records for a given content ID.
+func (r *LibraryItemRepository) GetByItem(ctx context.Context, contentID string) ([]*models.MediaItemLibrary, error) {
+	query := `SELECT ` + libraryItemColumns + `
+		FROM media_item_libraries
+		WHERE content_id = $1
+		ORDER BY media_folder_id ASC`
+
+	rows, err := r.pool.Query(ctx, query, contentID)
+	if err != nil {
+		return nil, fmt.Errorf("getting library items by content: %w", err)
+	}
+	defer rows.Close()
+
+	return scanLibraryItems(rows)
+}
+
+// GetByFolder returns all library junction records for a given media folder ID.
+func (r *LibraryItemRepository) GetByFolder(ctx context.Context, folderID int) ([]*models.MediaItemLibrary, error) {
+	query := `SELECT ` + libraryItemColumns + `
+		FROM media_item_libraries
+		WHERE media_folder_id = $1
+		ORDER BY first_seen_at DESC`
+
+	rows, err := r.pool.Query(ctx, query, folderID)
+	if err != nil {
+		return nil, fmt.Errorf("getting library items by folder: %w", err)
+	}
+	defer rows.Close()
+
+	return scanLibraryItems(rows)
+}
+
+// GetItemsInFolder returns a membership map for the provided content IDs within
+// a single library folder.
+func (r *LibraryItemRepository) GetItemsInFolder(ctx context.Context, contentIDs []string, folderID int) (map[string]bool, error) {
+	result := make(map[string]bool, len(contentIDs))
+	if len(contentIDs) == 0 {
+		return result, nil
+	}
+
+	rows, err := r.pool.Query(ctx,
+		`SELECT req.content_id
+		FROM unnest($2::text[]) AS req(content_id)
+		WHERE EXISTS (
+			SELECT 1
+			FROM media_item_libraries mil
+			WHERE mil.media_folder_id = $1
+			  AND mil.content_id = req.content_id
+		)
+		OR EXISTS (
+			SELECT 1
+			FROM episode_libraries el
+			WHERE el.media_folder_id = $1
+			  AND el.episode_id = req.content_id
+		)`,
+		folderID, contentIDs,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("getting folder membership for items: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var contentID string
+		if err := rows.Scan(&contentID); err != nil {
+			return nil, fmt.Errorf("scanning folder membership row: %w", err)
+		}
+		result[contentID] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating folder membership rows: %w", err)
+	}
+
+	return result, nil
+}
+
+// GetItemsInFolders returns membership for the provided content IDs across
+// any of the supplied folders. Used by the user-collection sync service to
+// constrain imports to a chosen subset of libraries in one query rather than
+// looping GetItemsInFolder per library.
+func (r *LibraryItemRepository) GetItemsInFolders(ctx context.Context, contentIDs []string, folderIDs []int) (map[string]bool, error) {
+	result := make(map[string]bool, len(contentIDs))
+	if len(contentIDs) == 0 || len(folderIDs) == 0 {
+		return result, nil
+	}
+
+	rows, err := r.pool.Query(ctx,
+		`SELECT req.content_id
+		FROM unnest($2::text[]) AS req(content_id)
+		WHERE EXISTS (
+			SELECT 1
+			FROM media_item_libraries mil
+			WHERE mil.media_folder_id = ANY($1)
+			  AND mil.content_id = req.content_id
+		)
+		OR EXISTS (
+			SELECT 1
+			FROM episode_libraries el
+			WHERE el.media_folder_id = ANY($1)
+			  AND el.episode_id = req.content_id
+		)`,
+		folderIDs, contentIDs,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("getting multi-folder membership for items: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var contentID string
+		if err := rows.Scan(&contentID); err != nil {
+			return nil, fmt.Errorf("scanning multi-folder membership row: %w", err)
+		}
+		result[contentID] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating multi-folder membership rows: %w", err)
+	}
+	return result, nil
+}
+
+func (r *LibraryItemRepository) GetFolderIDsForItem(ctx context.Context, contentID string) ([]int, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT media_folder_id
+		FROM media_item_libraries
+		WHERE content_id = $1
+		ORDER BY media_folder_id ASC
+	`, contentID)
+	if err != nil {
+		return nil, fmt.Errorf("getting folder IDs for item: %w", err)
+	}
+	defer rows.Close()
+
+	var ids []int
+	for rows.Next() {
+		var id int
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scanning folder ID for item: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating folder IDs for item: %w", err)
+	}
+	return ids, nil
+}
+
+func (r *LibraryItemRepository) CountFoldersForItem(ctx context.Context, contentID string) (int, error) {
+	var count int
+	if err := r.pool.QueryRow(ctx, `
+		SELECT COUNT(*)
+		FROM media_item_libraries
+		WHERE content_id = $1
+	`, contentID).Scan(&count); err != nil {
+		return 0, fmt.Errorf("counting folders for item: %w", err)
+	}
+	return count, nil
+}
+
+func (r *LibraryItemRepository) GetDistinctMetadataLanguagesForItem(ctx context.Context, contentID string) ([]string, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT DISTINCT COALESCE(NULLIF(mf.metadata_language, ''), 'en') AS language
+		FROM media_item_libraries mil
+		JOIN media_folders mf ON mf.id = mil.media_folder_id
+		WHERE mil.content_id = $1
+		ORDER BY language ASC
+	`, contentID)
+	if err != nil {
+		return nil, fmt.Errorf("getting metadata languages for item: %w", err)
+	}
+	defer rows.Close()
+
+	var languages []string
+	for rows.Next() {
+		var language string
+		if err := rows.Scan(&language); err != nil {
+			return nil, fmt.Errorf("scanning metadata language for item: %w", err)
+		}
+		languages = append(languages, language)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating metadata languages for item: %w", err)
+	}
+	return slices.Compact(languages), nil
+}
+
+// Delete removes a junction record linking a media item to a media folder.
+func (r *LibraryItemRepository) Delete(ctx context.Context, contentID string, folderID int) error {
+	_, err := r.pool.Exec(ctx,
+		"DELETE FROM media_item_libraries WHERE content_id = $1 AND media_folder_id = $2",
+		contentID, folderID,
+	)
+	if err != nil {
+		return fmt.Errorf("deleting media item library: %w", err)
+	}
+
+	return nil
+}
+
+// ReconcileFolderMembership removes library memberships for content that no
+// longer has any non-missing files in the given folder. It also deletes orphaned
+// media items once they no longer belong to any library. Returns removed
+// membership count, deleted item count, orphaned S3 image dirs, and any error.
+func (r *LibraryItemRepository) ReconcileFolderMembership(ctx context.Context, folderID int) (int, int, []string, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return 0, 0, nil, fmt.Errorf("beginning membership reconciliation transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	rows, err := tx.Query(ctx, `
+		DELETE FROM media_item_libraries mil
+		WHERE mil.media_folder_id = $1
+		  AND NOT EXISTS (
+			SELECT 1
+			FROM media_files mf
+			WHERE mf.media_folder_id = mil.media_folder_id
+			  AND mf.content_id = mil.content_id
+			  AND mf.missing_since IS NULL
+		  )
+		RETURNING mil.content_id
+	`, folderID)
+	if err != nil {
+		return 0, 0, nil, fmt.Errorf("deleting stale folder memberships: %w", err)
+	}
+	defer rows.Close()
+
+	removedContentIDs := make([]string, 0)
+	for rows.Next() {
+		var contentID string
+		if err := rows.Scan(&contentID); err != nil {
+			return 0, 0, nil, fmt.Errorf("scanning removed folder membership: %w", err)
+		}
+		removedContentIDs = append(removedContentIDs, contentID)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, 0, nil, fmt.Errorf("iterating removed folder memberships: %w", err)
+	}
+	rows.Close()
+
+	deletedItems := 0
+	var orphanedImageDirs []string
+	if len(removedContentIDs) > 0 {
+		// Find items that will become orphaned (no remaining library memberships).
+		orphanIDs, err := collectOrphanIDs(ctx, tx, removedContentIDs)
+		if err != nil {
+			return 0, 0, nil, err
+		}
+
+		// Collect image paths before deletion.
+		if len(orphanIDs) > 0 {
+			orphanedImageDirs, err = collectImageDirs(ctx, tx, orphanIDs)
+			if err != nil {
+				return 0, 0, nil, err
+			}
+		}
+
+		tag, err := tx.Exec(ctx, `
+			DELETE FROM media_items mi
+			WHERE mi.content_id = ANY($1)
+			  AND NOT EXISTS (
+				SELECT 1
+				FROM media_item_libraries mil
+				WHERE mil.content_id = mi.content_id
+			  )
+		`, removedContentIDs)
+		if err != nil {
+			return 0, 0, nil, fmt.Errorf("deleting orphaned media items after folder reconciliation: %w", err)
+		}
+		deletedItems = int(tag.RowsAffected())
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return 0, 0, nil, fmt.Errorf("committing membership reconciliation transaction: %w", err)
+	}
+
+	return len(removedContentIDs), deletedItems, orphanedImageDirs, nil
+}

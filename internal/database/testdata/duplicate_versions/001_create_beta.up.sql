@@ -1,0 +1,3 @@
+CREATE TABLE beta (
+    id BIGSERIAL PRIMARY KEY
+);

@@ -1,0 +1,237 @@
+package handlers
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/url"
+	"sync"
+	"time"
+)
+
+// ThemeSettingsReader is the subset of ServerSettingsStore needed by ThemeHandler.
+type ThemeSettingsReader interface {
+	Get(ctx context.Context, key string) (string, error)
+}
+
+// ThemeHandler serves theme-related public endpoints.
+type ThemeHandler struct {
+	settings ThemeSettingsReader
+
+	// Catalog proxy cache.
+	catalogMu      sync.RWMutex
+	catalogCache   []byte
+	catalogFetched time.Time
+	httpClient     *http.Client
+}
+
+// NewThemeHandler creates a ThemeHandler.
+func NewThemeHandler(settings ThemeSettingsReader) *ThemeHandler {
+	return &ThemeHandler{
+		settings:   settings,
+		httpClient: &http.Client{Timeout: 10 * time.Second},
+	}
+}
+
+// adminCssResponse is returned by GET /theme/admin-css.
+type adminCssResponse struct {
+	Vars   string `json:"vars"`
+	RawCSS string `json:"raw_css"`
+}
+
+// HandleAdminCSS returns the server-wide admin theme overrides.
+// Public endpoint — no authentication required. This allows admin
+// branding to apply before login (white-label).
+func (h *ThemeHandler) HandleAdminCSS(w http.ResponseWriter, r *http.Request) {
+	vars, _ := h.settings.Get(r.Context(), "ui.admin_theme_vars")
+	rawCSS, _ := h.settings.Get(r.Context(), "ui.admin_custom_css")
+
+	w.Header().Set("Cache-Control", "public, max-age=60")
+	writeJSON(w, http.StatusOK, adminCssResponse{
+		Vars:   vars,
+		RawCSS: rawCSS,
+	})
+}
+
+// brandingResponse is returned by GET /theme/branding.
+type brandingResponse struct {
+	ServerName    string `json:"server_name"`
+	LoginSubtitle string `json:"login_subtitle"`
+}
+
+// HandleBranding returns the server branding settings.
+// Public endpoint — no authentication required so branding appears on the login page.
+func (h *ThemeHandler) HandleBranding(w http.ResponseWriter, r *http.Request) {
+	serverName, _ := h.settings.Get(r.Context(), "branding.server_name")
+	loginSubtitle, _ := h.settings.Get(r.Context(), "branding.login_subtitle")
+
+	w.Header().Set("Cache-Control", "public, max-age=60")
+	writeJSON(w, http.StatusOK, brandingResponse{
+		ServerName:    serverName,
+		LoginSubtitle: loginSubtitle,
+	})
+}
+
+// allowedDownloadHosts restricts which hosts the theme download proxy will fetch from.
+var allowedDownloadHosts = map[string]bool{
+	"raw.githubusercontent.com":     true,
+	"github.com":                    true,
+	"objects.githubusercontent.com": true,
+}
+
+// HandleDownload proxies a theme file download from an allowed host.
+// This prevents the browser from directly fetching arbitrary URLs (SSRF).
+func (h *ThemeHandler) HandleDownload(w http.ResponseWriter, r *http.Request) {
+	rawURL := r.URL.Query().Get("url")
+	if rawURL == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "Missing url parameter")
+		return
+	}
+
+	parsed, err := url.Parse(rawURL)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		writeError(w, http.StatusBadRequest, "bad_request", "Invalid URL")
+		return
+	}
+
+	if !allowedDownloadHosts[parsed.Hostname()] {
+		writeError(w, http.StatusForbidden, "host_not_allowed", "Theme downloads are only allowed from approved hosts")
+		return
+	}
+
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, rawURL, nil)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "Failed to create request")
+		return
+	}
+
+	resp, err := h.httpClient.Do(req)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "download_failed", "Failed to fetch theme file")
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		writeError(w, http.StatusBadGateway, "download_failed", "Theme file returned non-200")
+		return
+	}
+
+	// Limit to 256 KB to prevent abuse.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 256<<10))
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "download_failed", "Failed to read theme file")
+		return
+	}
+
+	if !json.Valid(body) {
+		writeError(w, http.StatusBadGateway, "download_invalid", "Theme file is not valid JSON")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
+}
+
+const (
+	defaultCatalogURL = "https://raw.githubusercontent.com/Silo-Server/silo-themes/main/catalog.json"
+	catalogCacheTTL   = 1 * time.Hour
+)
+
+// writeStaleCatalog serves a cached catalog response with the stale header.
+func writeStaleCatalog(w http.ResponseWriter, cached []byte) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Theme-Catalog-Stale", "true")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(cached)
+}
+
+// HandleCatalog proxies the theme catalog from a remote URL with caching.
+func (h *ThemeHandler) HandleCatalog(w http.ResponseWriter, r *http.Request) {
+	// Check cache first.
+	h.catalogMu.RLock()
+	cached := h.catalogCache
+	age := time.Since(h.catalogFetched)
+	h.catalogMu.RUnlock()
+
+	if cached != nil && age < catalogCacheTTL {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(cached)
+		return
+	}
+
+	// Determine catalog URL from server settings.
+	catalogURL, _ := h.settings.Get(r.Context(), "theme.catalog_url")
+	if catalogURL == "" {
+		catalogURL = defaultCatalogURL
+	}
+
+	// Fetch from upstream.
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, catalogURL, nil)
+	if err != nil {
+		if cached != nil {
+			writeStaleCatalog(w, cached)
+			return
+		}
+		writeError(w, http.StatusServiceUnavailable, "catalog_unavailable", "Theme catalog is unavailable")
+		return
+	}
+
+	resp, err := h.httpClient.Do(req)
+	if err != nil {
+		if cached != nil {
+			writeStaleCatalog(w, cached)
+			return
+		}
+		writeError(w, http.StatusServiceUnavailable, "catalog_unavailable", "Theme catalog is unavailable")
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		if cached != nil {
+			writeStaleCatalog(w, cached)
+			return
+		}
+		writeError(w, http.StatusServiceUnavailable, "catalog_unavailable", "Theme catalog returned non-200")
+		return
+	}
+
+	// Read body (limit to 1 MB).
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "catalog_read_error", "Failed to read catalog response")
+		return
+	}
+
+	// Validate JSON.
+	if !json.Valid(body) {
+		writeError(w, http.StatusBadGateway, "catalog_invalid", "Catalog response is not valid JSON")
+		return
+	}
+
+	// Cache the response.
+	h.catalogMu.Lock()
+	h.catalogCache = body
+	h.catalogFetched = time.Now()
+	h.catalogMu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "public, max-age=300")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
+}
+
+// HandleCatalogRefresh clears the cached catalog so the next request fetches fresh from upstream.
+func (h *ThemeHandler) HandleCatalogRefresh(w http.ResponseWriter, r *http.Request) {
+	h.catalogMu.Lock()
+	h.catalogCache = nil
+	h.catalogFetched = time.Time{}
+	h.catalogMu.Unlock()
+
+	// Immediately fetch fresh data so the caller gets the updated catalog.
+	h.HandleCatalog(w, r)
+}

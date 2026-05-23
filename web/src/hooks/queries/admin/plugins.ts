@@ -1,0 +1,307 @@
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
+
+import { api } from "@/api/client";
+import type {
+  ConnectionCheckResponse,
+  CreatePluginRepositoryRequest,
+  InstallPluginRequest,
+  PluginCatalogEntry,
+  PluginInstallation,
+  PluginRepository,
+  PluginTaskBindingUpdateResponse,
+  SavePluginAuthBindingRequest,
+  SavePluginConfigRequest,
+  SavePluginTaskBindingRequest,
+  UpdatePluginInstallationRequest,
+  UpdatePluginRepositoryRequest,
+} from "@/api/types";
+import { adminKeys } from "../keys";
+
+const ADMIN_STALE_TIME = 30_000;
+export const CHECK_PLUGIN_UPDATES_TASK_KEY = "check_plugin_updates";
+
+function invalidatePluginQueries(queryClient: ReturnType<typeof useQueryClient>) {
+  queryClient.invalidateQueries({ queryKey: adminKeys.pluginRepositories() });
+  queryClient.invalidateQueries({ queryKey: adminKeys.pluginCatalog() });
+  queryClient.invalidateQueries({ queryKey: adminKeys.pluginInstallations() });
+}
+
+// useAdminPluginInstallations is a slim hook for callers (e.g. AdminSidebar)
+// that only need the installations list. Shares its cache key with
+// useAdminPlugins() so triggering a refetch in either keeps both in sync.
+export function useAdminPluginInstallations() {
+  return useQuery({
+    queryKey: adminKeys.pluginInstallations(),
+    queryFn: () =>
+      api<PluginInstallation[]>("/admin/plugins/installations").then((data) => data ?? []),
+    staleTime: ADMIN_STALE_TIME,
+  });
+}
+
+export function useAdminPlugins() {
+  const repositoriesQuery = useQuery({
+    queryKey: adminKeys.pluginRepositories(),
+    queryFn: () =>
+      api<PluginRepository[]>("/admin/plugins/repositories").then((data) => data ?? []),
+    staleTime: ADMIN_STALE_TIME,
+  });
+
+  const catalogQuery = useQuery({
+    queryKey: adminKeys.pluginCatalog(),
+    queryFn: () => api<PluginCatalogEntry[]>("/admin/plugins/catalog").then((data) => data ?? []),
+    staleTime: ADMIN_STALE_TIME,
+  });
+
+  const installationsQuery = useQuery({
+    queryKey: adminKeys.pluginInstallations(),
+    queryFn: () =>
+      api<PluginInstallation[]>("/admin/plugins/installations").then((data) => data ?? []),
+    staleTime: ADMIN_STALE_TIME,
+  });
+
+  return {
+    repositories: repositoriesQuery.data ?? [],
+    catalog: catalogQuery.data ?? [],
+    installations: installationsQuery.data ?? [],
+    isLoading:
+      repositoriesQuery.isLoading || catalogQuery.isLoading || installationsQuery.isLoading,
+    isFetching:
+      repositoriesQuery.isFetching || catalogQuery.isFetching || installationsQuery.isFetching,
+  };
+}
+
+export function useCreatePluginRepository() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: CreatePluginRepositoryRequest) =>
+      api<PluginRepository>("/admin/plugins/repositories", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+    onSuccess: () => {
+      toast.success("Repository added");
+      invalidatePluginQueries(queryClient);
+    },
+    onError: (error) => {
+      toast.error(error instanceof Error ? error.message : "Failed to add repository");
+    },
+  });
+}
+
+export function useUpdatePluginRepository() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, body }: { id: number; body: UpdatePluginRepositoryRequest }) =>
+      api<PluginRepository>(`/admin/plugins/repositories/${id}`, {
+        method: "PUT",
+        body: JSON.stringify(body),
+      }),
+    onSuccess: () => {
+      toast.success("Repository updated");
+      invalidatePluginQueries(queryClient);
+    },
+    onError: (error) => {
+      toast.error(error instanceof Error ? error.message : "Failed to update repository");
+    },
+  });
+}
+
+export function useDeletePluginRepository() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: number) => api(`/admin/plugins/repositories/${id}`, { method: "DELETE" }),
+    onSuccess: () => {
+      toast.success("Repository removed");
+      invalidatePluginQueries(queryClient);
+    },
+    onError: (error) => {
+      toast.error(error instanceof Error ? error.message : "Failed to remove repository");
+    },
+  });
+}
+
+export function useInstallPlugin() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: InstallPluginRequest) =>
+      api<PluginInstallation>("/admin/plugins/installations", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+    onSuccess: () => {
+      toast.success("Plugin installed");
+      invalidatePluginQueries(queryClient);
+    },
+    onError: (error) => {
+      toast.error(error instanceof Error ? error.message : "Failed to install plugin");
+    },
+  });
+}
+
+export function useUploadPlugin() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (file: File) => {
+      const formData = new FormData();
+      formData.append("archive", file);
+      return api<PluginInstallation>("/admin/plugins/uploads", {
+        method: "POST",
+        body: formData,
+      });
+    },
+    onSuccess: () => {
+      toast.success("Plugin uploaded");
+      invalidatePluginQueries(queryClient);
+    },
+    onError: (error) => {
+      toast.error(error instanceof Error ? error.message : "Failed to upload plugin");
+    },
+  });
+}
+
+export function useUpdatePluginInstallation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, body }: { id: number; body: UpdatePluginInstallationRequest }) =>
+      api<PluginInstallation>(`/admin/plugins/installations/${id}`, {
+        method: "PUT",
+        body: JSON.stringify(body),
+      }),
+    onSuccess: () => {
+      toast.success("Plugin updated");
+      invalidatePluginQueries(queryClient);
+    },
+    onError: (error) => {
+      toast.error(error instanceof Error ? error.message : "Failed to update plugin");
+    },
+  });
+}
+
+export function useApplyPluginUpdate() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: number) =>
+      api<PluginInstallation>(`/admin/plugins/installations/${id}/update`, {
+        method: "POST",
+      }),
+    onSuccess: () => {
+      toast.success("Plugin updated");
+      invalidatePluginQueries(queryClient);
+    },
+    onError: (error) => {
+      toast.error(error instanceof Error ? error.message : "Failed to update plugin");
+    },
+  });
+}
+
+export function useDeletePluginInstallation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: number) => api(`/admin/plugins/installations/${id}`, { method: "DELETE" }),
+    onSuccess: () => {
+      toast.success("Plugin removed");
+      invalidatePluginQueries(queryClient);
+    },
+    onError: (error) => {
+      toast.error(error instanceof Error ? error.message : "Failed to remove plugin");
+    },
+  });
+}
+
+export function useCheckPluginUpdates() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () =>
+      api<{ status: string }>(
+        `/admin/tasks/${encodeURIComponent(CHECK_PLUGIN_UPDATES_TASK_KEY)}/run`,
+        {
+          method: "POST",
+        },
+      ),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: adminKeys.tasks() });
+      queryClient.invalidateQueries({ queryKey: adminKeys.task(CHECK_PLUGIN_UPDATES_TASK_KEY) });
+      invalidatePluginQueries(queryClient);
+      toast.success("Plugin update check started");
+    },
+    onError: (error) => {
+      toast.error(error instanceof Error ? error.message : "Failed to start plugin update check");
+    },
+  });
+}
+
+export function useSavePluginConfig() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, body }: { id: number; body: SavePluginConfigRequest }) =>
+      api(`/admin/plugins/installations/${id}/config`, {
+        method: "PUT",
+        body: JSON.stringify(body),
+      }),
+    onSuccess: () => {
+      toast.success("Plugin config saved");
+      invalidatePluginQueries(queryClient);
+    },
+    onError: (error) => {
+      toast.error(error instanceof Error ? error.message : "Failed to save plugin config");
+    },
+  });
+}
+
+export function useTestPluginConfig() {
+  return useMutation({
+    mutationFn: ({ id, body }: { id: number; body: SavePluginConfigRequest }) =>
+      api<ConnectionCheckResponse>(`/admin/plugins/installations/${id}/config/test`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+  });
+}
+
+export function useSavePluginAuthBinding() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, body }: { id: number; body: SavePluginAuthBindingRequest }) =>
+      api(`/admin/plugins/installations/${id}/auth-binding`, {
+        method: "PUT",
+        body: JSON.stringify(body),
+      }),
+    onSuccess: () => {
+      toast.success("Auth binding saved");
+      invalidatePluginQueries(queryClient);
+    },
+    onError: (error) => {
+      toast.error(error instanceof Error ? error.message : "Failed to save auth binding");
+    },
+  });
+}
+
+export function useSavePluginTaskBinding() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id,
+      capabilityId,
+      body,
+    }: {
+      id: number;
+      capabilityId: string;
+      body: SavePluginTaskBindingRequest;
+    }) =>
+      api<PluginTaskBindingUpdateResponse>(
+        `/admin/plugins/installations/${id}/task-bindings/${capabilityId}`,
+        {
+          method: "PUT",
+          body: JSON.stringify(body),
+        },
+      ),
+    onSuccess: () => {
+      toast.success("Task binding saved");
+      invalidatePluginQueries(queryClient);
+    },
+    onError: (error) => {
+      toast.error(error instanceof Error ? error.message : "Failed to save task binding");
+    },
+  });
+}

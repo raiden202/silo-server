@@ -1,0 +1,109 @@
+package clientip
+
+import (
+	"net"
+	"net/http"
+	"strings"
+	"sync"
+)
+
+// Resolver resolves the real client IP from an HTTP request, accounting for
+// trusted reverse proxies that set forwarding headers.
+type Resolver struct {
+	mu      sync.RWMutex
+	trusted []*net.IPNet
+}
+
+// NewResolver creates a Resolver with the given trusted proxy CIDRs.
+// If trusted is nil or empty, forwarding headers are never consulted.
+func NewResolver(trusted []*net.IPNet) *Resolver {
+	return &Resolver{trusted: trusted}
+}
+
+// ClientIP returns the resolved client IP address string.
+// The returned value is always normalized via net.ParseIP().String().
+func (r *Resolver) ClientIP(req *http.Request) string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	remoteIP := parseRemoteAddr(req.RemoteAddr)
+
+	// If the connecting IP is not a trusted proxy, ignore forwarding headers.
+	if !r.isTrusted(remoteIP) {
+		return normalize(remoteIP)
+	}
+
+	// Check X-Forwarded-For: walk right-to-left, return first untrusted IP.
+	if xff := req.Header.Get("X-Forwarded-For"); xff != "" {
+		ips := strings.Split(xff, ",")
+		for i := len(ips) - 1; i >= 0; i-- {
+			candidate := strings.TrimSpace(ips[i])
+			if candidate == "" {
+				continue
+			}
+			parsed := net.ParseIP(candidate)
+			if parsed == nil {
+				continue
+			}
+			if !r.isTrusted(parsed) {
+				return normalize(parsed)
+			}
+		}
+		// All IPs in chain are trusted — return leftmost
+		for _, raw := range ips {
+			candidate := strings.TrimSpace(raw)
+			if parsed := net.ParseIP(candidate); parsed != nil {
+				return normalize(parsed)
+			}
+		}
+	}
+
+	// Fallback: X-Real-IP
+	if realIP := req.Header.Get("X-Real-IP"); realIP != "" {
+		if parsed := net.ParseIP(realIP); parsed != nil {
+			return normalize(parsed)
+		}
+	}
+
+	return normalize(remoteIP)
+}
+
+// parseRemoteAddr extracts the IP from r.RemoteAddr using net.SplitHostPort.
+// Handles IPv4, IPv6 (bracket notation), and bare IPs without port.
+func parseRemoteAddr(addr string) net.IP {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		// No port — try parsing as bare IP
+		host = addr
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return net.IPv4zero
+	}
+	return ip
+}
+
+func (r *Resolver) isTrusted(ip net.IP) bool {
+	for _, cidr := range r.trusted {
+		if cidr.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// normalize returns the canonical string form of an IP.
+func normalize(ip net.IP) string {
+	if ip == nil {
+		return "0.0.0.0"
+	}
+	return ip.String()
+}
+
+// UpdateTrustedCIDRs updates the Resolver's trusted proxy list in place.
+// Safe to call concurrently with ClientIP — protected by RWMutex.
+func (r *Resolver) UpdateTrustedCIDRs(cidrs []*net.IPNet) {
+	r.mu.Lock()
+	r.trusted = cidrs
+	r.mu.Unlock()
+}

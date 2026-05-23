@@ -1,0 +1,199 @@
+package nodepool
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+const (
+	// NodeTypeProxy identifies a proxy stream node.
+	NodeTypeProxy = "proxy"
+	// NodeTypeTranscode identifies a transcode stream node.
+	NodeTypeTranscode = "transcode"
+)
+
+// Node represents a stream node in the database.
+type Node struct {
+	ID              int        `json:"id"`
+	Name            string     `json:"name"`
+	Type            string     `json:"type"`
+	URL             string     `json:"url"`
+	Enabled         bool       `json:"enabled"`
+	Healthy         bool       `json:"healthy"`
+	ActiveJobs      int        `json:"active_jobs"`
+	LastHealthCheck *time.Time `json:"last_health_check"`
+	CreatedAt       time.Time  `json:"created_at"`
+}
+
+// CreateNodeInput holds the fields for creating a new node.
+type CreateNodeInput struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
+	URL  string `json:"url"`
+}
+
+// Validate checks required fields and allowed values.
+func (i CreateNodeInput) Validate() error {
+	if i.Name == "" {
+		return errors.New("name is required")
+	}
+	if i.Type != NodeTypeProxy && i.Type != NodeTypeTranscode {
+		return fmt.Errorf("type must be %q or %q", NodeTypeProxy, NodeTypeTranscode)
+	}
+	if i.URL == "" {
+		return errors.New("url is required")
+	}
+	return nil
+}
+
+// UpdateNodeInput holds the fields for updating a node.
+type UpdateNodeInput struct {
+	Name    *string `json:"name,omitempty"`
+	URL     *string `json:"url,omitempty"`
+	Enabled *bool   `json:"enabled,omitempty"`
+}
+
+// Repository provides CRUD operations for stream nodes.
+type Repository struct {
+	pool *pgxpool.Pool
+}
+
+// NewRepository creates a new node repository.
+func NewRepository(pool *pgxpool.Pool) *Repository {
+	return &Repository{pool: pool}
+}
+
+const nodeColumns = `id, name, type, url, enabled, healthy, active_jobs, last_health_check, created_at`
+
+func scanNode(row pgx.Row) (*Node, error) {
+	var n Node
+	err := row.Scan(
+		&n.ID, &n.Name, &n.Type, &n.URL,
+		&n.Enabled, &n.Healthy, &n.ActiveJobs,
+		&n.LastHealthCheck, &n.CreatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &n, nil
+}
+
+func scanNodes(rows pgx.Rows) ([]*Node, error) {
+	var nodes []*Node
+	for rows.Next() {
+		var n Node
+		if err := rows.Scan(
+			&n.ID, &n.Name, &n.Type, &n.URL,
+			&n.Enabled, &n.Healthy, &n.ActiveJobs,
+			&n.LastHealthCheck, &n.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		nodes = append(nodes, &n)
+	}
+	return nodes, rows.Err()
+}
+
+// List returns all nodes ordered by type then name.
+func (r *Repository) List(ctx context.Context) ([]*Node, error) {
+	rows, err := r.pool.Query(ctx,
+		`SELECT `+nodeColumns+` FROM stream_nodes ORDER BY type, name`)
+	if err != nil {
+		return nil, fmt.Errorf("list nodes: %w", err)
+	}
+	defer rows.Close()
+	return scanNodes(rows)
+}
+
+// ListEnabled returns all enabled nodes of a given type.
+func (r *Repository) ListEnabled(ctx context.Context, nodeType string) ([]*Node, error) {
+	rows, err := r.pool.Query(ctx,
+		`SELECT `+nodeColumns+` FROM stream_nodes WHERE type = $1 AND enabled = true ORDER BY name`,
+		nodeType)
+	if err != nil {
+		return nil, fmt.Errorf("list enabled nodes: %w", err)
+	}
+	defer rows.Close()
+	return scanNodes(rows)
+}
+
+// GetByID returns a single node by ID.
+func (r *Repository) GetByID(ctx context.Context, id int) (*Node, error) {
+	row := r.pool.QueryRow(ctx,
+		`SELECT `+nodeColumns+` FROM stream_nodes WHERE id = $1`, id)
+	n, err := scanNode(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNodeNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get node: %w", err)
+	}
+	return n, nil
+}
+
+// Create inserts a new node and returns it.
+func (r *Repository) Create(ctx context.Context, input CreateNodeInput) (*Node, error) {
+	if err := input.Validate(); err != nil {
+		return nil, err
+	}
+	row := r.pool.QueryRow(ctx,
+		`INSERT INTO stream_nodes (name, type, url) VALUES ($1, $2, $3)
+		 RETURNING `+nodeColumns,
+		input.Name, input.Type, input.URL)
+	return scanNode(row)
+}
+
+// Update modifies a node's mutable fields.
+func (r *Repository) Update(ctx context.Context, id int, input UpdateNodeInput) (*Node, error) {
+	row := r.pool.QueryRow(ctx,
+		`UPDATE stream_nodes SET
+			name = COALESCE($2, name),
+			url = COALESCE($3, url),
+			enabled = COALESCE($4, enabled)
+		 WHERE id = $1
+		 RETURNING `+nodeColumns,
+		id, input.Name, input.URL, input.Enabled)
+	n, err := scanNode(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNodeNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("update node: %w", err)
+	}
+	return n, nil
+}
+
+// Delete removes a node by ID.
+func (r *Repository) Delete(ctx context.Context, id int) error {
+	tag, err := r.pool.Exec(ctx, `DELETE FROM stream_nodes WHERE id = $1`, id)
+	if err != nil {
+		return fmt.Errorf("delete node: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNodeNotFound
+	}
+	return nil
+}
+
+// UpdateHealth updates a node's health status and active job count.
+func (r *Repository) UpdateHealth(ctx context.Context, id int, healthy bool, activeJobs int) error {
+	tag, err := r.pool.Exec(ctx,
+		`UPDATE stream_nodes SET healthy = $2, active_jobs = $3, last_health_check = NOW()
+		 WHERE id = $1`,
+		id, healthy, activeJobs)
+	if err != nil {
+		return fmt.Errorf("update node health: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNodeNotFound
+	}
+	return nil
+}
+
+// Sentinel errors.
+var ErrNodeNotFound = errors.New("stream node not found")

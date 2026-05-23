@@ -1,0 +1,105 @@
+package historyimport
+
+import (
+	"context"
+	"strings"
+	"time"
+)
+
+type JellyfinProvider struct {
+	client *JellyfinClient
+	auth   jellyfinLocalAuth
+}
+
+func NewJellyfinProvider(client *JellyfinClient, auth jellyfinLocalAuth) *JellyfinProvider {
+	return &JellyfinProvider{client: client, auth: auth}
+}
+
+func (p *JellyfinProvider) Fetch(ctx context.Context) ([]Record, []string, error) {
+	played, err := p.client.FetchItems(ctx, p.auth, "IsPlayed")
+	if err != nil {
+		return nil, nil, err
+	}
+	resumable, err := p.client.FetchResumableItems(ctx, p.auth)
+	if err != nil {
+		return nil, nil, err
+	}
+	seriesMeta, err := p.fetchSeriesMetadata(ctx, append(played, resumable...))
+	if err != nil {
+		return nil, nil, err
+	}
+	merged := map[string]Record{}
+	for _, item := range append(played, resumable...) {
+		record := normalizeJellyfinItem(item, seriesMeta[item.SeriesID])
+		if record.ExternalID == "" {
+			record.ExternalID = item.ID
+		}
+		if existing, ok := merged[record.ExternalID]; ok {
+			merged[record.ExternalID] = mergeRecords(existing, record)
+		} else {
+			merged[record.ExternalID] = record
+		}
+	}
+	records := make([]Record, 0, len(merged))
+	for _, record := range merged {
+		records = append(records, record)
+	}
+	return records, nil, nil
+}
+
+func (p *JellyfinProvider) fetchSeriesMetadata(ctx context.Context, items []jellyfinItem) (map[string]jellyfinItem, error) {
+	seen := map[string]struct{}{}
+	ids := []string{}
+	for _, item := range items {
+		if strings.ToLower(item.Type) != "episode" || strings.TrimSpace(item.SeriesID) == "" {
+			continue
+		}
+		if _, ok := seen[item.SeriesID]; ok {
+			continue
+		}
+		seen[item.SeriesID] = struct{}{}
+		ids = append(ids, item.SeriesID)
+	}
+	if len(ids) == 0 {
+		return map[string]jellyfinItem{}, nil
+	}
+	seriesItems, err := p.client.FetchItemsByIDs(ctx, p.auth, ids, "Series")
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]jellyfinItem, len(seriesItems))
+	for _, item := range seriesItems {
+		result[item.ID] = item
+	}
+	return result, nil
+}
+
+func normalizeJellyfinItem(item jellyfinItem, series jellyfinItem) Record {
+	record := Record{ExternalID: item.ID, Title: item.Name, Year: item.ProductionYear, Played: item.UserData.Played, PlayCount: item.UserData.PlayCount, PositionSeconds: ticksToSeconds(item.UserData.PlaybackPositionTicks), DurationSeconds: ticksToSeconds(item.RunTimeTicks), UpdatedAt: time.Now().UTC()}
+	if item.UserData.LastPlayedDate != nil {
+		record.LastPlayedAt = item.UserData.LastPlayedDate
+		record.UpdatedAt = item.UserData.LastPlayedDate.UTC()
+	}
+	record.IMDbID = providerID(item.ProviderIDs, "imdb")
+	record.TMDBID = providerID(item.ProviderIDs, "tmdb")
+	record.TVDBID = providerID(item.ProviderIDs, "tvdb")
+	switch strings.ToLower(item.Type) {
+	case "movie":
+		record.Kind = KindMovie
+	case "episode":
+		record.Kind = KindEpisode
+		record.SeriesTitle = item.SeriesName
+		if record.SeriesTitle == "" {
+			record.SeriesTitle = series.Name
+		}
+		record.SeriesIMDbID = providerID(series.ProviderIDs, "imdb")
+		record.SeriesTMDBID = providerID(series.ProviderIDs, "tmdb")
+		record.SeriesTVDBID = providerID(series.ProviderIDs, "tvdb")
+		record.SeriesYear = series.ProductionYear
+		record.SeasonNumber = item.ParentIndexNumber
+		record.EpisodeNumber = item.IndexNumber
+	default:
+		record.Kind = strings.ToLower(item.Type)
+	}
+	return record
+}

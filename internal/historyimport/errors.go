@@ -1,0 +1,83 @@
+package historyimport
+
+import (
+	"context"
+	"crypto/x509"
+	"errors"
+	"net"
+	"net/url"
+	"strings"
+)
+
+// IsReachabilityError reports whether err indicates the upstream server could
+// not be reached due to URL, DNS, connection, timeout, or TLS issues.
+func IsReachabilityError(err error) bool {
+	if err == nil || UpstreamHTTPStatus(err) > 0 {
+		return false
+	}
+
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		if urlErr.Timeout() || urlErr.Op == "parse" {
+			return true
+		}
+	}
+
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return true
+	}
+
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return true
+	}
+
+	var addrErr *net.AddrError
+	if errors.As(err, &addrErr) {
+		return true
+	}
+
+	var invalidCertErr x509.CertificateInvalidError
+	if errors.As(err, &invalidCertErr) {
+		return true
+	}
+
+	var hostnameErr x509.HostnameError
+	if errors.As(err, &hostnameErr) {
+		return true
+	}
+
+	var unknownAuthorityErr x509.UnknownAuthorityError
+	if errors.As(err, &unknownAuthorityErr) {
+		return true
+	}
+
+	var systemRootsErr x509.SystemRootsError
+	if errors.As(err, &systemRootsErr) {
+		return true
+	}
+
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "connection refused") ||
+		strings.Contains(message, "no such host") ||
+		strings.Contains(message, "dial tcp") ||
+		strings.Contains(message, "lookup ") ||
+		strings.Contains(message, "server misbehaving") ||
+		strings.Contains(message, "missing protocol scheme") ||
+		strings.Contains(message, "unsupported protocol scheme") ||
+		strings.Contains(message, "certificate") ||
+		strings.Contains(message, "tls:") ||
+		strings.Contains(message, "x509:") ||
+		strings.Contains(message, "timeout") ||
+		strings.Contains(message, "no reachable server url")
+}

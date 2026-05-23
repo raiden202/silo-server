@@ -1,0 +1,472 @@
+package metadata
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"sort"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+// ChainEntry represents a single entry in a library's provider chain.
+type ChainEntry struct {
+	PluginInstallationID int
+	CapabilityID         string
+	CapabilityType       string // always "metadata_provider.v1" for now
+	ContentLevel         string // "movie", "series", "season", "episode", or "" (legacy)
+	Priority             int
+	Enabled              bool
+}
+
+// ChainRepository provides operations for the library_provider_chains table.
+type ChainRepository struct {
+	pool *pgxpool.Pool
+}
+
+// NewChainRepository creates a new ChainRepository.
+func NewChainRepository(pool *pgxpool.Pool) *ChainRepository {
+	return &ChainRepository{pool: pool}
+}
+
+// Pool returns the underlying connection pool.
+func (r *ChainRepository) Pool() *pgxpool.Pool {
+	return r.pool
+}
+
+// SetChain replaces the entire provider chain for a given media folder.
+func (r *ChainRepository) SetChain(ctx context.Context, folderID int, entries []ChainEntry) error {
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("beginning chain transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	_, err = tx.Exec(ctx, "DELETE FROM library_provider_chains WHERE media_folder_id = $1", folderID)
+	if err != nil {
+		return fmt.Errorf("deleting existing chain: %w", err)
+	}
+
+	for _, entry := range entries {
+		capType := entry.CapabilityType
+		if capType == "" {
+			capType = "metadata_provider.v1"
+		}
+		_, err = tx.Exec(ctx,
+			`INSERT INTO library_provider_chains (media_folder_id, plugin_installation_id, capability_id, capability_type, content_level, priority, enabled)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+			folderID, entry.PluginInstallationID, entry.CapabilityID, capType, entry.ContentLevel, entry.Priority, entry.Enabled,
+		)
+		if err != nil {
+			return fmt.Errorf("inserting chain entry (install=%d, cap=%s, level=%s, priority=%d): %w",
+				entry.PluginInstallationID, entry.CapabilityID, entry.ContentLevel, entry.Priority, err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("committing chain transaction: %w", err)
+	}
+	return nil
+}
+
+// GetChain returns entries for a specific content level. If no per-level entries
+// exist, falls back to legacy flat entries (content_level = ”).
+func (r *ChainRepository) GetChain(ctx context.Context, folderID int, contentLevel string) ([]ChainEntry, error) {
+	rows, err := r.pool.Query(ctx,
+		`SELECT plugin_installation_id, capability_id, capability_type, content_level, priority, enabled
+		 FROM library_provider_chains
+		 WHERE media_folder_id = $1 AND content_level = $2
+		 ORDER BY priority ASC`,
+		folderID, contentLevel,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("querying chain: %w", err)
+	}
+	defer rows.Close()
+
+	var entries []ChainEntry
+	for rows.Next() {
+		var e ChainEntry
+		if err := rows.Scan(&e.PluginInstallationID, &e.CapabilityID, &e.CapabilityType, &e.ContentLevel, &e.Priority, &e.Enabled); err != nil {
+			return nil, fmt.Errorf("scanning chain entry: %w", err)
+		}
+		entries = append(entries, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating chain rows: %w", err)
+	}
+
+	// Fall back to legacy flat chain if no per-level entries exist.
+	if len(entries) == 0 && contentLevel != "" {
+		return r.GetChain(ctx, folderID, "")
+	}
+
+	if entries == nil {
+		entries = []ChainEntry{}
+	}
+	return entries, nil
+}
+
+// GetAllChainEntries returns every chain entry for a folder, across all content levels.
+func (r *ChainRepository) GetAllChainEntries(ctx context.Context, folderID int) ([]ChainEntry, error) {
+	rows, err := r.pool.Query(ctx,
+		`SELECT plugin_installation_id, capability_id, capability_type, content_level, priority, enabled
+		 FROM library_provider_chains
+		 WHERE media_folder_id = $1
+		 ORDER BY content_level, priority ASC`,
+		folderID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("querying all chain entries: %w", err)
+	}
+	defer rows.Close()
+
+	var entries []ChainEntry
+	for rows.Next() {
+		var e ChainEntry
+		if err := rows.Scan(&e.PluginInstallationID, &e.CapabilityID, &e.CapabilityType, &e.ContentLevel, &e.Priority, &e.Enabled); err != nil {
+			return nil, fmt.Errorf("scanning chain entry: %w", err)
+		}
+		entries = append(entries, e)
+	}
+	return entries, rows.Err()
+}
+
+// DeleteChain removes all provider chain entries for a given media folder.
+func (r *ChainRepository) DeleteChain(ctx context.Context, folderID int) error {
+	_, err := r.pool.Exec(ctx, "DELETE FROM library_provider_chains WHERE media_folder_id = $1", folderID)
+	if err != nil {
+		return fmt.Errorf("deleting chain: %w", err)
+	}
+	return nil
+}
+
+// AppendProviderToAllChains adds a provider to every existing library chain
+// (per content level) that doesn't already include it. The defaultPriority
+// callback returns the plugin's declared priority for a content level (0 means
+// the plugin doesn't declare that level — the entry is still added but disabled).
+func (r *ChainRepository) AppendProviderToAllChains(
+	ctx context.Context,
+	pluginInstallationID int,
+	capabilityID string,
+	defaultPriority func(contentLevel string) int,
+) error {
+	// Find every distinct (folder, level) pair that has chain entries.
+	rows, err := r.pool.Query(ctx,
+		`SELECT DISTINCT media_folder_id, content_level
+		 FROM library_provider_chains`)
+	if err != nil {
+		return fmt.Errorf("listing chain groups: %w", err)
+	}
+	defer rows.Close()
+
+	type chainGroup struct {
+		folderID     int
+		contentLevel string
+	}
+	var groups []chainGroup
+	for rows.Next() {
+		var g chainGroup
+		if err := rows.Scan(&g.folderID, &g.contentLevel); err != nil {
+			return fmt.Errorf("scanning chain group: %w", err)
+		}
+		groups = append(groups, g)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterating chain groups: %w", err)
+	}
+
+	for _, g := range groups {
+		// Check if the provider is already in this chain.
+		var exists bool
+		err := r.pool.QueryRow(ctx,
+			`SELECT EXISTS(
+				SELECT 1 FROM library_provider_chains
+				WHERE media_folder_id = $1 AND content_level = $2
+				  AND plugin_installation_id = $3 AND capability_id = $4
+			)`, g.folderID, g.contentLevel, pluginInstallationID, capabilityID,
+		).Scan(&exists)
+		if err != nil {
+			return fmt.Errorf("checking chain membership: %w", err)
+		}
+		if exists {
+			continue
+		}
+
+		// Determine priority position (append after the last entry).
+		var maxPriority int
+		err = r.pool.QueryRow(ctx,
+			`SELECT COALESCE(MAX(priority), -1)
+			 FROM library_provider_chains
+			 WHERE media_folder_id = $1 AND content_level = $2`,
+			g.folderID, g.contentLevel,
+		).Scan(&maxPriority)
+		if err != nil {
+			return fmt.Errorf("getting max priority: %w", err)
+		}
+
+		dp := defaultPriority(g.contentLevel)
+		enabled := dp > 0
+
+		_, err = r.pool.Exec(ctx,
+			`INSERT INTO library_provider_chains (media_folder_id, plugin_installation_id, capability_id, capability_type, content_level, priority, enabled)
+			 VALUES ($1, $2, $3, 'metadata_provider.v1', $4, $5, $6)
+			 ON CONFLICT DO NOTHING`,
+			g.folderID, pluginInstallationID, capabilityID, g.contentLevel, maxPriority+1, enabled,
+		)
+		if err != nil {
+			return fmt.Errorf("appending provider (install=%d, cap=%s) to folder %d level %q: %w",
+				pluginInstallationID, capabilityID, g.folderID, g.contentLevel, err)
+		}
+	}
+
+	return nil
+}
+
+// ResolveChain builds the ordered list of Provider implementations for a given
+// media folder and content level. If the folder has custom chain entries, those
+// are used. Otherwise all enabled metadata provider capabilities are used,
+// ordered by their plugin manifest default_priority for the given content level.
+//
+// Providers whose underlying plugin installation is disabled are silently skipped.
+func ResolveChain(
+	ctx context.Context,
+	folderID int,
+	contentLevel string,
+	chainRepo *ChainRepository,
+	resolver pluginMetadataResolver,
+) ([]Provider, error) {
+	chainEntries, err := chainRepo.GetChain(ctx, folderID, contentLevel)
+	if err != nil {
+		return nil, fmt.Errorf("getting chain for folder %d: %w", folderID, err)
+	}
+
+	// Filter to only enabled entries.
+	var enabledEntries []ChainEntry
+	for _, e := range chainEntries {
+		if e.Enabled {
+			enabledEntries = append(enabledEntries, e)
+		}
+	}
+	chainEntries = enabledEntries
+
+	if len(chainEntries) > 0 {
+		return resolveChainEntries(ctx, chainEntries, resolver, chainRepo.pool), nil
+	}
+
+	providers, err := resolveEnabledProvidersByPriority(ctx, contentLevel, resolver, chainRepo.pool)
+	if err != nil {
+		return nil, err
+	}
+	return providers, nil
+}
+
+// CapabilityInfo holds the fields needed to construct a provider from plugin tables.
+type CapabilityInfo struct {
+	PluginInstallationID int
+	CapabilityID         string
+	DisplayName          string
+}
+
+// resolveEnabledProviders returns all enabled providers in installation ID order.
+// Used by callers that don't have a content-level context (e.g. person refresh).
+func resolveEnabledProviders(
+	ctx context.Context,
+	resolver pluginMetadataResolver,
+	pool *pgxpool.Pool,
+) ([]Provider, error) {
+	caps, err := ListEnabledMetadataCapabilities(ctx, pool)
+	if err != nil {
+		return nil, err
+	}
+	return buildProviders(ctx, caps, resolver, pool), nil
+}
+
+// resolveEnabledProvidersByPriority returns all enabled providers sorted by
+// their plugin manifest default_priority for the given content level. Providers
+// without a declared priority are placed last (sorted by installation ID as a tiebreaker).
+func resolveEnabledProvidersByPriority(
+	ctx context.Context,
+	contentLevel string,
+	resolver pluginMetadataResolver,
+	pool *pgxpool.Pool,
+) ([]Provider, error) {
+	caps, err := ListEnabledMetadataCapabilities(ctx, pool)
+	if err != nil {
+		return nil, err
+	}
+
+	type ranked struct {
+		cap      CapabilityInfo
+		priority int
+	}
+
+	items := make([]ranked, len(caps))
+	for i, c := range caps {
+		items[i] = ranked{cap: c, priority: LookupDefaultPriority(ctx, pool, c.PluginInstallationID, contentLevel)}
+	}
+
+	sort.SliceStable(items, func(i, j int) bool {
+		pi, pj := items[i].priority, items[j].priority
+		if (pi == 0) != (pj == 0) {
+			return pi != 0
+		}
+		if pi != pj {
+			return pi < pj
+		}
+		return items[i].cap.PluginInstallationID < items[j].cap.PluginInstallationID
+	})
+
+	sorted := make([]CapabilityInfo, len(items))
+	for i, item := range items {
+		sorted[i] = item.cap
+	}
+	return buildProviders(ctx, sorted, resolver, pool), nil
+}
+
+// LookupDefaultPriority queries plugin_capabilities for a provider's declared
+// default_priority at the given content level. Returns 0 if not found.
+func LookupDefaultPriority(ctx context.Context, pool *pgxpool.Pool, pluginInstallationID int, contentLevel string) int {
+	var metadataJSON []byte
+	err := pool.QueryRow(ctx,
+		`SELECT metadata FROM plugin_capabilities
+		 WHERE plugin_installation_id = $1 AND capability_type = 'metadata_provider.v1'
+		 LIMIT 1`,
+		pluginInstallationID,
+	).Scan(&metadataJSON)
+	if err != nil {
+		return 0
+	}
+
+	return extractDefaultPriority(metadataJSON, contentLevel)
+}
+
+// extractDefaultPriority parses the default_priority for a content level from
+// capability metadata JSON.
+func extractDefaultPriority(metadataJSON []byte, contentLevel string) int {
+	var meta map[string]json.RawMessage
+	if err := json.Unmarshal(metadataJSON, &meta); err != nil {
+		return 0
+	}
+	// default_priority may be at the top level or nested inside a "metadata" sub-object
+	// (plugin capability metadata wraps plugin-declared fields in a "metadata" envelope).
+	dpRaw, ok := meta["default_priority"]
+	if !ok {
+		if innerRaw, innerOK := meta["metadata"]; innerOK {
+			var inner map[string]json.RawMessage
+			if err := json.Unmarshal(innerRaw, &inner); err == nil {
+				dpRaw, ok = inner["default_priority"]
+			}
+		}
+		if !ok {
+			return 0
+		}
+	}
+	var dpMap map[string]float64
+	if err := json.Unmarshal(dpRaw, &dpMap); err != nil {
+		return 0
+	}
+	if v, ok := dpMap[contentLevel]; ok && v > 0 {
+		return int(v)
+	}
+	return 0
+}
+
+// ListEnabledMetadataCapabilities returns all metadata_provider.v1 capabilities
+// whose plugin installation is enabled.
+func ListEnabledMetadataCapabilities(ctx context.Context, pool *pgxpool.Pool) ([]CapabilityInfo, error) {
+	rows, err := pool.Query(ctx,
+		`SELECT pc.plugin_installation_id, pc.capability_id,
+		        COALESCE(pc.metadata->>'display_name', pc.capability_id)
+		 FROM plugin_capabilities pc
+		 JOIN plugin_installations pi ON pi.id = pc.plugin_installation_id
+		 WHERE pc.capability_type = 'metadata_provider.v1'
+		   AND pi.enabled = true
+		 ORDER BY pc.plugin_installation_id`)
+	if err != nil {
+		return nil, fmt.Errorf("listing enabled metadata capabilities: %w", err)
+	}
+	defer rows.Close()
+
+	var caps []CapabilityInfo
+	for rows.Next() {
+		var c CapabilityInfo
+		if err := rows.Scan(&c.PluginInstallationID, &c.CapabilityID, &c.DisplayName); err != nil {
+			return nil, fmt.Errorf("scanning capability: %w", err)
+		}
+		caps = append(caps, c)
+	}
+	return caps, rows.Err()
+}
+
+// resolveChainEntries builds Provider instances from explicit chain entries,
+// skipping providers whose plugin installation is disabled.
+func resolveChainEntries(
+	ctx context.Context,
+	entries []ChainEntry,
+	resolver pluginMetadataResolver,
+	pool *pgxpool.Pool,
+) []Provider {
+	caps := make([]CapabilityInfo, 0, len(entries))
+	for _, e := range entries {
+		displayName := lookupCapabilityDisplayName(ctx, pool, e.PluginInstallationID, e.CapabilityID)
+		caps = append(caps, CapabilityInfo{
+			PluginInstallationID: e.PluginInstallationID,
+			CapabilityID:         e.CapabilityID,
+			DisplayName:          displayName,
+		})
+	}
+	return buildProviders(ctx, caps, resolver, pool)
+}
+
+// buildProviders constructs Provider instances from capability info, skipping
+// providers whose plugin installation is disabled.
+func buildProviders(
+	ctx context.Context,
+	caps []CapabilityInfo,
+	resolver pluginMetadataResolver,
+	pool *pgxpool.Pool,
+) []Provider {
+	providers := make([]Provider, 0, len(caps))
+	for _, c := range caps {
+		var enabled bool
+		err := pool.QueryRow(ctx,
+			"SELECT enabled FROM plugin_installations WHERE id = $1",
+			c.PluginInstallationID,
+		).Scan(&enabled)
+		if err != nil || !enabled {
+			slog.Debug("skipping metadata provider: plugin installation disabled",
+				"installation_id", c.PluginInstallationID, "capability_id", c.CapabilityID)
+			continue
+		}
+
+		provider, err := NewPluginProviderFromCapability(c.PluginInstallationID, c.CapabilityID, c.DisplayName, resolver)
+		if err != nil {
+			slog.Warn("skipping metadata provider during chain resolution",
+				"installation_id", c.PluginInstallationID,
+				"capability_id", c.CapabilityID,
+				"error", err,
+			)
+			continue
+		}
+		providers = append(providers, provider)
+	}
+	return providers
+}
+
+// lookupCapabilityDisplayName retrieves the display name from plugin capability metadata.
+func lookupCapabilityDisplayName(ctx context.Context, pool *pgxpool.Pool, installationID int, capabilityID string) string {
+	var displayName string
+	err := pool.QueryRow(ctx,
+		`SELECT COALESCE(metadata->>'display_name', $2)
+		 FROM plugin_capabilities
+		 WHERE plugin_installation_id = $1 AND capability_id = $2 AND capability_type = 'metadata_provider.v1'`,
+		installationID, capabilityID,
+	).Scan(&displayName)
+	if err != nil {
+		return capabilityID
+	}
+	return displayName
+}

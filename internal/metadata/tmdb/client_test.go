@@ -1,0 +1,344 @@
+package tmdb
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+)
+
+func TestGetCollectionPresetTrending(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/trending/all/day" {
+			http.NotFound(w, r)
+			return
+		}
+		if got := r.URL.Query().Get("page"); got != "1" {
+			t.Fatalf("page query = %q, want 1", got)
+		}
+		if got := r.URL.Query().Get("api_key"); got != "test-key" {
+			t.Fatalf("api_key query = %q, want test-key", got)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"page": 1,
+			"total_pages": 1,
+			"total_results": 2,
+			"results": [
+				{"id": 10, "media_type": "movie", "title": "Movie Title"},
+				{"id": 20, "media_type": "tv", "name": "Series Title"}
+			]
+		}`))
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", 1000)
+	client.SetBaseURL(server.URL)
+
+	results, err := client.GetCollectionPreset(context.Background(), "trending", "all", "day", 10)
+	if err != nil {
+		t.Fatalf("GetCollectionPreset returned error: %v", err)
+	}
+
+	if len(results) != 2 {
+		t.Fatalf("len(results) = %d, want 2", len(results))
+	}
+	if results[0] != (CollectionResult{ID: 10, MediaType: "movie", Title: "Movie Title"}) {
+		t.Fatalf("results[0] = %+v", results[0])
+	}
+	if results[1] != (CollectionResult{ID: 20, MediaType: "tv", Title: "Series Title"}) {
+		t.Fatalf("results[1] = %+v", results[1])
+	}
+}
+
+func TestDiscoverMovieAppliesFilters(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/discover/movie" {
+			http.NotFound(w, r)
+			return
+		}
+		calls++
+		q := r.URL.Query()
+		if got := q.Get("sort_by"); got != "popularity.desc" {
+			t.Errorf("sort_by = %q, want popularity.desc", got)
+		}
+		if got := q.Get("with_genres"); got != "28,12" {
+			t.Errorf("with_genres = %q, want 28,12", got)
+		}
+		if got := q.Get("without_genres"); got != "99" {
+			t.Errorf("without_genres = %q, want 99", got)
+		}
+		if got := q.Get("vote_count.gte"); got != "300" {
+			t.Errorf("vote_count.gte = %q, want 300", got)
+		}
+		if got := q.Get("vote_average.gte"); got != "6.5" {
+			t.Errorf("vote_average.gte = %q, want 6.5", got)
+		}
+		if got := q.Get("primary_release_date.gte"); got != "2020-01-01" {
+			t.Errorf("primary_release_date.gte = %q, want 2020-01-01", got)
+		}
+		if got := q.Get("primary_release_date.lte"); got != "2025-12-31" {
+			t.Errorf("primary_release_date.lte = %q, want 2025-12-31", got)
+		}
+		if got := q.Get("certification_country"); got != "US" {
+			t.Errorf("certification_country = %q, want US", got)
+		}
+		if got := q.Get("certification"); got != "PG|PG-13" {
+			t.Errorf("certification = %q, want PG|PG-13", got)
+		}
+		if got := q.Get("with_runtime.gte"); got != "90" {
+			t.Errorf("with_runtime.gte = %q, want 90", got)
+		}
+		if got := q.Get("with_runtime.lte"); got != "180" {
+			t.Errorf("with_runtime.lte = %q, want 180", got)
+		}
+		if got := q.Get("with_original_language"); got != "en" {
+			t.Errorf("with_original_language = %q, want en", got)
+		}
+		if got := q.Get("api_key"); got != "test-key" {
+			t.Errorf("api_key = %q, want test-key", got)
+		}
+		if got := q.Get("page"); got != "1" {
+			t.Errorf("page = %q, want 1", got)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"page": 1,
+			"total_pages": 1,
+			"total_results": 2,
+			"results": [
+				{"id": 11, "title": "First Movie"},
+				{"id": 22, "title": "Second Movie"}
+			]
+		}`))
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", 1000)
+	client.SetBaseURL(server.URL)
+
+	results, err := client.Discover(context.Background(), "movie", DiscoverParams{
+		SortBy:           "popularity.desc",
+		WithGenres:       []int{28, 12},
+		WithoutGenres:    []int{99},
+		VoteCountGte:     300,
+		VoteAverageGte:   6.5,
+		ReleaseDateGte:   "2020-01-01",
+		ReleaseDateLte:   "2025-12-31",
+		Certifications:   []string{"PG", "PG-13"},
+		WithRuntimeGte:   90,
+		WithRuntimeLte:   180,
+		OriginalLanguage: "en",
+		Limit:            10,
+	})
+	if err != nil {
+		t.Fatalf("Discover returned error: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("expected 1 server call, got %d", calls)
+	}
+	if len(results) != 2 {
+		t.Fatalf("len(results) = %d, want 2", len(results))
+	}
+	if results[0] != (CollectionResult{ID: 11, MediaType: "movie", Title: "First Movie"}) {
+		t.Errorf("results[0] = %+v", results[0])
+	}
+	if results[1] != (CollectionResult{ID: 22, MediaType: "movie", Title: "Second Movie"}) {
+		t.Errorf("results[1] = %+v", results[1])
+	}
+}
+
+func TestDiscoverTVUsesFirstAirDate(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/discover/tv" {
+			http.NotFound(w, r)
+			return
+		}
+		q := r.URL.Query()
+		if got := q.Get("sort_by"); got != "vote_average.desc" {
+			t.Errorf("sort_by = %q, want vote_average.desc", got)
+		}
+		if got := q.Get("first_air_date.gte"); got != "2010-01-01" {
+			t.Errorf("first_air_date.gte = %q, want 2010-01-01", got)
+		}
+		if got := q.Get("first_air_date.lte"); got != "2020-01-01" {
+			t.Errorf("first_air_date.lte = %q, want 2020-01-01", got)
+		}
+		// TV requests must NOT carry primary_release_date.* params.
+		if got := q.Get("primary_release_date.gte"); got != "" {
+			t.Errorf("primary_release_date.gte should be empty for tv, got %q", got)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"page": 1,
+			"total_pages": 1,
+			"total_results": 1,
+			"results": [
+				{"id": 99, "name": "Some Show"}
+			]
+		}`))
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", 1000)
+	client.SetBaseURL(server.URL)
+
+	results, err := client.Discover(context.Background(), "tv", DiscoverParams{
+		SortBy:         "vote_average.desc",
+		ReleaseDateGte: "2010-01-01",
+		ReleaseDateLte: "2020-01-01",
+		Limit:          5,
+	})
+	if err != nil {
+		t.Fatalf("Discover tv: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("len(results) = %d, want 1", len(results))
+	}
+	if results[0] != (CollectionResult{ID: 99, MediaType: "tv", Title: "Some Show"}) {
+		t.Errorf("results[0] = %+v", results[0])
+	}
+}
+
+func TestDiscoverRejectsInvalidMediaType(t *testing.T) {
+	client := NewClient("test-key", 1000)
+	_, err := client.Discover(context.Background(), "all", DiscoverParams{SortBy: "popularity.desc"})
+	if err == nil {
+		t.Fatal("expected error for invalid media type")
+	}
+}
+
+func TestDiscoverRequiresSortBy(t *testing.T) {
+	client := NewClient("test-key", 1000)
+	_, err := client.Discover(context.Background(), "movie", DiscoverParams{})
+	if err == nil {
+		t.Fatal("expected error when sort_by is empty")
+	}
+}
+
+func TestGetCollection(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/collection/86311" {
+			http.NotFound(w, r)
+			return
+		}
+		if got := r.URL.Query().Get("api_key"); got != "test-key" {
+			t.Fatalf("api_key query = %q, want test-key", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		// Trimmed MCU-style payload — parts ordered chronologically by
+		// release date, with one part omitting media_type to exercise the
+		// "default to movie" branch.
+		_, _ = w.Write([]byte(`{
+			"id": 86311,
+			"name": "The Avengers Collection",
+			"parts": [
+				{"id": 24428, "media_type": "movie", "title": "The Avengers", "release_date": "2012-04-25"},
+				{"id": 99861, "media_type": "movie", "title": "Avengers: Age of Ultron", "release_date": "2015-04-22"},
+				{"id": 299536, "title": "Avengers: Infinity War", "release_date": "2018-04-25"}
+			]
+		}`))
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", 1000)
+	client.SetBaseURL(server.URL)
+
+	got, err := client.GetCollection(context.Background(), 86311)
+	if err != nil {
+		t.Fatalf("GetCollection: %v", err)
+	}
+	if got == nil {
+		t.Fatal("GetCollection returned nil")
+	}
+	if got.ID != 86311 {
+		t.Errorf("ID = %d, want 86311", got.ID)
+	}
+	if got.Name != "The Avengers Collection" {
+		t.Errorf("Name = %q, want The Avengers Collection", got.Name)
+	}
+	if len(got.Parts) != 3 {
+		t.Fatalf("len(parts) = %d, want 3", len(got.Parts))
+	}
+
+	// Order assertion: TMDB returns parts in curated order; the client
+	// preserves that order so downstream sync writes items consistently.
+	wantOrder := []int{24428, 99861, 299536}
+	for i, want := range wantOrder {
+		if got.Parts[i].ID != want {
+			t.Errorf("parts[%d].ID = %d, want %d", i, got.Parts[i].ID, want)
+		}
+	}
+
+	// Media type defaulting: third part omitted media_type in the wire
+	// payload; client must default to "movie" so the resolver doesn't see
+	// an empty string.
+	if got.Parts[0].MediaType != "movie" {
+		t.Errorf("parts[0].MediaType = %q, want movie", got.Parts[0].MediaType)
+	}
+	if got.Parts[2].MediaType != "movie" {
+		t.Errorf("parts[2].MediaType = %q (omitted in payload), want movie default", got.Parts[2].MediaType)
+	}
+
+	if got.Parts[0].Title != "The Avengers" {
+		t.Errorf("parts[0].Title = %q, want The Avengers", got.Parts[0].Title)
+	}
+	if got.Parts[0].ReleaseDate != "2012-04-25" {
+		t.Errorf("parts[0].ReleaseDate = %q, want 2012-04-25", got.Parts[0].ReleaseDate)
+	}
+}
+
+func TestGetCollectionRejectsNonPositiveID(t *testing.T) {
+	client := NewClient("test-key", 1000)
+	if _, err := client.GetCollection(context.Background(), 0); err == nil {
+		t.Fatal("expected error on id=0")
+	}
+	if _, err := client.GetCollection(context.Background(), -7); err == nil {
+		t.Fatal("expected error on negative id")
+	}
+}
+
+func TestGetExternalIDs(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/movie/123" {
+			http.NotFound(w, r)
+			return
+		}
+		if got := r.URL.Query().Get("append_to_response"); got != "external_ids" {
+			t.Fatalf("append_to_response = %q, want external_ids", got)
+		}
+		if got := r.URL.Query().Get("api_key"); got != "test-key" {
+			t.Fatalf("api_key query = %q, want test-key", got)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"external_ids": {
+				"imdb_id": "tt0133093",
+				"tvdb_id": 12345
+			}
+		}`))
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", 1000)
+	client.SetBaseURL(server.URL)
+
+	ids, err := client.GetExternalIDs(context.Background(), "movie", 123)
+	if err != nil {
+		t.Fatalf("GetExternalIDs returned error: %v", err)
+	}
+	if ids == nil {
+		t.Fatal("GetExternalIDs returned nil ids")
+	}
+	if ids.IMDbID != "tt0133093" {
+		t.Fatalf("IMDbID = %q, want tt0133093", ids.IMDbID)
+	}
+	if ids.TVDBID != 12345 {
+		t.Fatalf("TVDBID = %d, want 12345", ids.TVDBID)
+	}
+}

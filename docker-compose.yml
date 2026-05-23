@@ -1,0 +1,109 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg18
+    restart: unless-stopped
+    shm_size: 1gb
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-silo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-silo}
+      POSTGRES_DB: ${POSTGRES_DB:-silo}
+    ports:
+      - "5432:5432"
+    volumes:
+      - ${SILO_DATA_ROOT:-/opt/silo}/postgres:/var/lib/postgresql
+      - ./postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+    command: postgres -c config_file=/etc/postgresql/postgresql.conf
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-silo}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - ${SILO_DATA_ROOT:-/opt/silo}/redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  silo:
+    image: ${SILO_IMAGE:-ghcr.io/silo-server/silo-server:latest}
+    restart: unless-stopped
+    environment:
+      MODE: integrated
+      DATABASE_URL: postgres://${POSTGRES_USER:-silo}:${POSTGRES_PASSWORD:-silo}@postgres:5432/${POSTGRES_DB:-silo}?sslmode=disable
+      REDIS_URL: redis://redis:6379
+      SILO_PLUGIN_CACHE_DIR: /var/lib/silo/plugins
+    ports:
+      - "${PORT:-8090}:8080"
+      - "${JF_PORT:-8096}:8096"
+    volumes:
+      - ${MEDIA_ROOT:?Set MEDIA_ROOT in .env to the host media path}:${MEDIA_CONTAINER_ROOT:-/mnt/media}:ro
+      - ${SILO_DATA_ROOT:-/opt/silo}/plugins:/var/lib/silo/plugins
+      - ${SILO_DATA_ROOT:-/opt/silo}/transcode:/tmp/silo-transcode
+      - ${SILO_DATA_ROOT:-/opt/silo}/catalog-seeds:/catalog-seeds:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - path: .env
+        required: false
+
+  # Optional distributed-mode example. Most single-host installs should
+  # just use the integrated service above.
+  # silo-proxy:
+  #   image: ${SILO_IMAGE:-ghcr.io/silo-server/silo-server:latest}
+  #   restart: unless-stopped
+  #   profiles: [proxy]
+  #   environment:
+  #     MODE: proxy
+  #     DATABASE_URL: postgres://${POSTGRES_USER:-silo}:${POSTGRES_PASSWORD:-silo}@postgres:5432/${POSTGRES_DB:-silo}?sslmode=disable
+  #     REDIS_URL: redis://redis:6379
+  #     PORT: "8080"
+  #   ports:
+  #     - "${PROXY_PORT:-8083}:8080"
+  #   volumes:
+  #     - ${MEDIA_ROOT:?Set MEDIA_ROOT in .env to the host media path}:${MEDIA_CONTAINER_ROOT:-/mnt/media}:ro
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #     redis:
+  #       condition: service_healthy
+  #   env_file:
+  #     - path: .env
+  #       required: false
+
+  # Optional distributed-mode example. Most single-host installs should
+  # just use the integrated service above.
+  # silo-transcode:
+  #   image: ${SILO_IMAGE:-ghcr.io/silo-server/silo-server:latest}
+  #   restart: unless-stopped
+  #   profiles: [transcode]
+  #   environment:
+  #     MODE: transcode
+  #     DATABASE_URL: postgres://${POSTGRES_USER:-silo}:${POSTGRES_PASSWORD:-silo}@postgres:5432/${POSTGRES_DB:-silo}?sslmode=disable
+  #     REDIS_URL: redis://redis:6379
+  #     SILO_PLUGIN_CACHE_DIR: /var/lib/silo/plugins
+  #     PORT: "8080"
+  #   ports:
+  #     - "${TRANSCODE_PORT:-8082}:8080"
+  #   volumes:
+  #     - ${MEDIA_ROOT:?Set MEDIA_ROOT in .env to the host media path}:${MEDIA_CONTAINER_ROOT:-/mnt/media}:ro
+  #     - ${SILO_DATA_ROOT:-/opt/silo}/plugins:/var/lib/silo/plugins
+  #     - ${SILO_DATA_ROOT:-/opt/silo}/transcode:/tmp/silo-transcode
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #     redis:
+  #       condition: service_healthy
+  #   env_file:
+  #     - path: .env
+  #       required: false

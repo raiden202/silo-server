@@ -1,0 +1,5 @@
+SELECT pg_sleep(0.2);
+
+CREATE TABLE IF NOT EXISTS widgets (
+    id BIGSERIAL PRIMARY KEY
+);

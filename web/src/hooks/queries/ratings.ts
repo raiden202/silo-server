@@ -1,0 +1,71 @@
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { api } from "@/api/client";
+import type { ItemDetail } from "@/api/types";
+import { invalidateRatingSurfaceQueries } from "./ratingsSurfaceRefresh";
+import { updateCatalogItemDetail } from "./mediaSurfaceRefresh";
+
+export function useSetRating(itemId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (rating: number) =>
+      api(`/ratings/${itemId}`, {
+        method: "PUT",
+        body: JSON.stringify({ rating }),
+      }),
+    onMutate: async (rating: number) => {
+      await queryClient.cancelQueries({ queryKey: ["catalog", "items", itemId, "detail"] });
+      const previous = queryClient.getQueriesData<ItemDetail>({
+        predicate: (query) =>
+          Array.isArray(query.queryKey) &&
+          query.queryKey[0] === "catalog" &&
+          query.queryKey[1] === "items" &&
+          query.queryKey[2] === itemId &&
+          query.queryKey[3] === "detail",
+      });
+      updateCatalogItemDetail(queryClient, itemId, (detail) => ({
+        ...detail,
+        user_rating: rating,
+      }));
+      return { previous };
+    },
+    onError: (_err, _vars, context) => {
+      for (const [queryKey, value] of context?.previous ?? []) {
+        queryClient.setQueryData(queryKey, value);
+      }
+    },
+    onSettled: () => {
+      return invalidateRatingSurfaceQueries(queryClient, itemId);
+    },
+  });
+}
+
+export function useDeleteRating(itemId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => api(`/ratings/${itemId}`, { method: "DELETE" }),
+    onMutate: async () => {
+      await queryClient.cancelQueries({ queryKey: ["catalog", "items", itemId, "detail"] });
+      const previous = queryClient.getQueriesData<ItemDetail>({
+        predicate: (query) =>
+          Array.isArray(query.queryKey) &&
+          query.queryKey[0] === "catalog" &&
+          query.queryKey[1] === "items" &&
+          query.queryKey[2] === itemId &&
+          query.queryKey[3] === "detail",
+      });
+      updateCatalogItemDetail(queryClient, itemId, (detail) => ({
+        ...detail,
+        user_rating: null,
+      }));
+      return { previous };
+    },
+    onError: (_err, _vars, context) => {
+      for (const [queryKey, value] of context?.previous ?? []) {
+        queryClient.setQueryData(queryKey, value);
+      }
+    },
+    onSettled: () => {
+      return invalidateRatingSurfaceQueries(queryClient, itemId);
+    },
+  });
+}

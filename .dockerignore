@@ -1,0 +1,11 @@
+.git
+.env
+.env.*
+docs/
+node_modules
+web/node_modules
+web/dist
+silo
+streamapp
+*.md
+.playwright-cli/

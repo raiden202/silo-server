@@ -1,0 +1,32 @@
+package handlers
+
+import (
+	"context"
+	"log/slog"
+
+	evt "github.com/Silo-Server/silo-server/internal/events"
+	"github.com/Silo-Server/silo-server/internal/models"
+)
+
+func publishEventJob(ctx context.Context, hub *evt.Hub, eventName string, job *models.AdminJob) {
+	if hub == nil || job == nil {
+		return
+	}
+	if err := hub.PublishJSON(ctx, evt.ChannelJobs, eventName, job, evt.PublishOptions{
+		AdminOnly: true,
+	}); err != nil {
+		slog.Warn("events: failed to publish job event", "job_id", job.ID, "event", eventName, "error", err)
+	}
+}
+
+func publishEventMetadataUpdate(ctx context.Context, hub *evt.Hub, libraryID int, contentID string) {
+	if hub == nil {
+		return
+	}
+	if err := hub.PublishJSON(ctx, evt.ChannelCatalog, "metadata.updated", map[string]any{
+		"library_id": libraryID,
+		"content_id": contentID,
+	}, evt.PublishOptions{}); err != nil {
+		slog.Warn("events: failed to publish metadata update", "library_id", libraryID, "content_id", contentID, "error", err)
+	}
+}

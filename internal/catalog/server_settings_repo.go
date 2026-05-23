@@ -1,0 +1,68 @@
+package catalog
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+// ServerSettingsRepo provides CRUD access to the server_settings table.
+type ServerSettingsRepo struct {
+	pool *pgxpool.Pool
+}
+
+// NewServerSettingsRepo creates a new ServerSettingsRepo.
+func NewServerSettingsRepo(pool *pgxpool.Pool) *ServerSettingsRepo {
+	return &ServerSettingsRepo{pool: pool}
+}
+
+// Get retrieves a single setting by key. Returns empty string if not found.
+func (r *ServerSettingsRepo) Get(ctx context.Context, key string) (string, error) {
+	var value string
+	err := r.pool.QueryRow(ctx,
+		`SELECT value FROM server_settings WHERE key = $1`, key,
+	).Scan(&value)
+	if err != nil {
+		if err.Error() == "no rows in result set" {
+			return "", nil
+		}
+		return "", fmt.Errorf("server_settings get %q: %w", key, err)
+	}
+	return value, nil
+}
+
+// Set upserts a setting.
+func (r *ServerSettingsRepo) Set(ctx context.Context, key, value string) error {
+	_, err := r.pool.Exec(ctx,
+		`INSERT INTO server_settings (key, value) VALUES ($1, $2)
+		 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+		key, value,
+	)
+	if err != nil {
+		return fmt.Errorf("server_settings set %q: %w", key, err)
+	}
+	return nil
+}
+
+// GetAll retrieves all settings as a map.
+func (r *ServerSettingsRepo) GetAll(ctx context.Context) (map[string]string, error) {
+	rows, err := r.pool.Query(ctx, `SELECT key, value FROM server_settings`)
+	if err != nil {
+		return nil, fmt.Errorf("server_settings get all: %w", err)
+	}
+	defer rows.Close()
+
+	settings := make(map[string]string)
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			return nil, fmt.Errorf("server_settings scan: %w", err)
+		}
+		settings[k] = v
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("server_settings iterate: %w", err)
+	}
+	return settings, nil
+}

@@ -1,0 +1,517 @@
+import { useState, useEffect, useMemo } from "react";
+import type { FormEvent } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { ApiClientError, api } from "@/api/client";
+import type { ConnectionCheckResponse } from "@/api/types";
+import { ConnectionCheckAction } from "@/components/admin/ConnectionCheckAction";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
+import { Skeleton } from "@/components/ui/skeleton";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { ChevronRight } from "lucide-react";
+import { toast } from "sonner";
+import { useCheckAdminSettingsConnection } from "@/hooks/queries/admin/settings";
+import { useSettingsForm } from "@/hooks/useSettingsForm";
+import { SettingField } from "@/pages/admin-settings/SettingField";
+import { useWizardContext } from "../WizardContext";
+
+const SERVER_KEYS = [
+  "redis.url",
+  "playback.ffmpeg_path",
+  "playback.transcode_dir",
+  "playback.hw_accel",
+  "playback.transcode_enabled",
+  "jellyfin_compat.public_url",
+  "jellyfin_compat.server_name",
+];
+
+const PUBLIC_S3_KEYS = [
+  "s3.public_endpoint",
+  "s3.public_bucket",
+  "s3.public_key_prefix",
+  "s3.public_access_key",
+  "s3.public_secret_key",
+  "s3.public_url_auth",
+  "s3.public_read_endpoint",
+];
+
+const PRIVATE_S3_KEYS = [
+  "s3.private_endpoint",
+  "s3.private_bucket",
+  "s3.private_key_prefix",
+  "s3.private_access_key",
+  "s3.private_secret_key",
+];
+
+const META_KEYS = ["metadata.cache_images"];
+
+const ALL_KEYS = [...SERVER_KEYS, ...PUBLIC_S3_KEYS, ...PRIVATE_S3_KEYS, ...META_KEYS];
+
+async function fetchSettingValue(key: string): Promise<string | null> {
+  try {
+    const result = await api<{ key: string; value: string }>(
+      `/admin/settings/${encodeURIComponent(key)}`,
+    );
+    return result?.value ?? null;
+  } catch (err) {
+    if (err instanceof ApiClientError && err.status === 404) return null;
+    throw err;
+  }
+}
+
+function Section({
+  label,
+  description,
+  children,
+}: {
+  label: string;
+  description?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="border-foreground/[0.07] bg-foreground/[0.03] space-y-4 rounded-xl border px-4 py-4">
+      <div>
+        <p className="text-muted-foreground text-[11px] font-semibold tracking-[0.1em] uppercase">
+          {label}
+        </p>
+        {description && <p className="text-muted-foreground/70 mt-0.5 text-xs">{description}</p>}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function StorageBlock({
+  title,
+  expanded,
+  onToggle,
+  children,
+}: {
+  title: string;
+  expanded: boolean;
+  onToggle: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="border-foreground/[0.07] bg-foreground/[0.03] rounded-xl border px-4 py-4">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="text-muted-foreground hover:text-foreground flex w-full items-center gap-2 text-left transition-colors"
+      >
+        <ChevronRight
+          className={`h-3.5 w-3.5 transition-transform duration-200 ${expanded ? "rotate-90" : ""}`}
+        />
+        <span className="text-[11px] font-semibold tracking-[0.1em] uppercase">{title}</span>
+      </button>
+
+      {expanded && (
+        <div className="mt-4 animate-[fade-in_0.15s_ease-out] space-y-4">{children}</div>
+      )}
+    </div>
+  );
+}
+
+function KeyPrefixField({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+  return (
+    <div className="space-y-1.5">
+      <Label className="text-xs">Key Prefix</Label>
+      <Input value={value} onChange={(e) => onChange(e.target.value)} placeholder="silo/dev" />
+      <p className="text-muted-foreground/70 text-xs">
+        Optional. Stores all Silo objects under this folder inside the bucket. Leave blank to use
+        the bucket root.
+      </p>
+    </div>
+  );
+}
+
+export function ServerStorageStep() {
+  const { markDone } = useWizardContext();
+  const form = useSettingsForm({ keys: useMemo(() => ALL_KEYS, []) });
+  const redisConnectionCheck = useCheckAdminSettingsConnection();
+  const publicS3ConnectionCheck = useCheckAdminSettingsConnection();
+  const privateS3ConnectionCheck = useCheckAdminSettingsConnection();
+  const [submitting, setSubmitting] = useState(false);
+  const [publicExpanded, setPublicExpanded] = useState(true);
+  const [privateExpanded, setPrivateExpanded] = useState(false);
+  const [redisHydrated, setRedisHydrated] = useState(false);
+  const [redisConnectionResult, setRedisConnectionResult] =
+    useState<ConnectionCheckResponse | null>(null);
+  const [publicS3ConnectionResult, setPublicS3ConnectionResult] =
+    useState<ConnectionCheckResponse | null>(null);
+  const [privateS3ConnectionResult, setPrivateS3ConnectionResult] =
+    useState<ConnectionCheckResponse | null>(null);
+
+  const redisQuery = useQuery({
+    queryKey: ["setup-wizard", "setting", "redis.url"],
+    queryFn: () => fetchSettingValue("redis.url"),
+  });
+
+  useEffect(() => {
+    if (redisHydrated || !redisQuery.data) return;
+    setRedisHydrated(true);
+    form.setValue("redis.url", redisQuery.data);
+  }, [redisQuery.data, redisHydrated, form]);
+
+  async function handleSubmit(e: FormEvent) {
+    e.preventDefault();
+    if (form.dirtyCount === 0) {
+      markDone("server");
+      return;
+    }
+    setSubmitting(true);
+    try {
+      await form.save();
+      markDone("server");
+      toast.success("Server settings saved");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to save server settings");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  function handleSkip() {
+    markDone("server");
+  }
+
+  async function handleRedisCheck() {
+    try {
+      setRedisConnectionResult(
+        await redisConnectionCheck.mutateAsync({
+          kind: "redis",
+          body: form.buildConnectionCheckRequest(["redis.url"]),
+        }),
+      );
+    } catch (error) {
+      setRedisConnectionResult({
+        success: false,
+        message: error instanceof Error ? error.message : "Connection check failed.",
+      });
+    }
+  }
+
+  async function handlePublicS3Check() {
+    try {
+      setPublicS3ConnectionResult(
+        await publicS3ConnectionCheck.mutateAsync({
+          kind: "s3_public",
+          body: form.buildConnectionCheckRequest(PUBLIC_S3_KEYS),
+        }),
+      );
+    } catch (error) {
+      setPublicS3ConnectionResult({
+        success: false,
+        message: error instanceof Error ? error.message : "Connection check failed.",
+      });
+    }
+  }
+
+  async function handlePrivateS3Check() {
+    try {
+      setPrivateS3ConnectionResult(
+        await privateS3ConnectionCheck.mutateAsync({
+          kind: "s3_private",
+          body: form.buildConnectionCheckRequest(PRIVATE_S3_KEYS),
+        }),
+      );
+    } catch (error) {
+      setPrivateS3ConnectionResult({
+        success: false,
+        message: error instanceof Error ? error.message : "Connection check failed.",
+      });
+    }
+  }
+
+  if (form.isLoading) {
+    return (
+      <div className="space-y-3">
+        {Array.from({ length: 4 }).map((_, i) => (
+          <Skeleton key={i} className="h-24 w-full rounded-xl" />
+        ))}
+      </div>
+    );
+  }
+
+  const publicURLAuth = form.getValue("s3.public_url_auth") || "presigned";
+
+  return (
+    <form onSubmit={handleSubmit} className="space-y-3">
+      <Section label="Redis" description="Required for multi-node deployments.">
+        <Input
+          id="setup-redis-url"
+          type="password"
+          value={form.getValue("redis.url")}
+          onChange={(e) => form.setValue("redis.url", e.target.value)}
+          placeholder="redis://localhost:6379"
+        />
+        <ConnectionCheckAction
+          onClick={handleRedisCheck}
+          result={redisConnectionResult}
+          isPending={redisConnectionCheck.isPending}
+          disabled={submitting || form.isSaving}
+        />
+      </Section>
+
+      <Section label="Playback">
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div className="space-y-1.5">
+            <Label htmlFor="setup-ffmpeg-path" className="text-xs">
+              FFmpeg path
+            </Label>
+            <Input
+              id="setup-ffmpeg-path"
+              value={form.getValue("playback.ffmpeg_path")}
+              onChange={(e) => form.setValue("playback.ffmpeg_path", e.target.value)}
+              placeholder="/usr/lib/jellyfin-ffmpeg/ffmpeg"
+            />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="setup-transcode-dir" className="text-xs">
+              Transcode directory
+            </Label>
+            <Input
+              id="setup-transcode-dir"
+              value={form.getValue("playback.transcode_dir")}
+              onChange={(e) => form.setValue("playback.transcode_dir", e.target.value)}
+              placeholder="/tmp/silo-transcode"
+            />
+          </div>
+        </div>
+        <div className="flex flex-wrap items-end gap-x-6 gap-y-3">
+          <div className="space-y-1.5">
+            <Label htmlFor="setup-hw-accel" className="text-xs">
+              Hardware accel
+            </Label>
+            <Select
+              value={form.getValue("playback.hw_accel") || "auto"}
+              onValueChange={(v) => form.setValue("playback.hw_accel", v)}
+            >
+              <SelectTrigger id="setup-hw-accel" className="w-32">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="auto">Auto</SelectItem>
+                <SelectItem value="vaapi">VAAPI</SelectItem>
+                <SelectItem value="nvenc">NVENC</SelectItem>
+                <SelectItem value="qsv">QSV</SelectItem>
+                <SelectItem value="none">None</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="flex items-center gap-2 pb-1.5">
+            <Switch
+              id="setup-transcode-enabled"
+              checked={form.getValue("playback.transcode_enabled") !== "false"}
+              onCheckedChange={(v) =>
+                form.setValue("playback.transcode_enabled", v ? "true" : "false")
+              }
+            />
+            <Label htmlFor="setup-transcode-enabled" className="text-xs">
+              Transcoding
+            </Label>
+          </div>
+        </div>
+      </Section>
+
+      <Section
+        label="Jellyfin compatibility"
+        description="For VidHub, Findroid, Infuse, and other Jellyfin clients."
+      >
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div className="space-y-1.5">
+            <Label htmlFor="setup-jellyfin-url" className="text-xs">
+              Public URL
+            </Label>
+            <Input
+              id="setup-jellyfin-url"
+              value={form.getValue("jellyfin_compat.public_url")}
+              onChange={(e) => form.setValue("jellyfin_compat.public_url", e.target.value)}
+              placeholder="http://your-server:8096"
+            />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="setup-jellyfin-name" className="text-xs">
+              Server name
+            </Label>
+            <Input
+              id="setup-jellyfin-name"
+              value={form.getValue("jellyfin_compat.server_name")}
+              onChange={(e) => form.setValue("jellyfin_compat.server_name", e.target.value)}
+              placeholder="Silo"
+            />
+          </div>
+        </div>
+      </Section>
+
+      <StorageBlock
+        title="Public Assets Storage (S3)"
+        expanded={publicExpanded}
+        onToggle={() => setPublicExpanded((value) => !value)}
+      >
+        <p className="text-muted-foreground/80 text-xs leading-relaxed">
+          Stores client-facing assets such as artwork, chapter thumbnails, and subtitle files.
+          Private bucket + presigned URLs is fully supported. A public bucket is optional.
+        </p>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div className="space-y-1.5">
+            <Label className="text-xs">Endpoint</Label>
+            <Input
+              value={form.getValue("s3.public_endpoint")}
+              onChange={(e) => form.setValue("s3.public_endpoint", e.target.value)}
+              placeholder="https://s3.amazonaws.com"
+            />
+          </div>
+          <div className="space-y-1.5">
+            <Label className="text-xs">Bucket</Label>
+            <Input
+              value={form.getValue("s3.public_bucket")}
+              onChange={(e) => form.setValue("s3.public_bucket", e.target.value)}
+            />
+          </div>
+        </div>
+        <KeyPrefixField
+          value={form.getValue("s3.public_key_prefix")}
+          onChange={(v) => form.setValue("s3.public_key_prefix", v)}
+        />
+        <div className="grid gap-3 sm:grid-cols-2">
+          <SettingField
+            label="Access Key"
+            type="password"
+            value={form.getValue("s3.public_access_key")}
+            onChange={(v) => form.setValue("s3.public_access_key", v)}
+            sensitiveConfigured={form.sensitiveConfigured.includes("s3.public_access_key")}
+          />
+          <SettingField
+            label="Secret Key"
+            type="password"
+            value={form.getValue("s3.public_secret_key")}
+            onChange={(v) => form.setValue("s3.public_secret_key", v)}
+            sensitiveConfigured={form.sensitiveConfigured.includes("s3.public_secret_key")}
+          />
+        </div>
+        <div className="border-foreground/[0.06] border-t pt-3">
+          <SettingField
+            label="URL Auth Method"
+            type="select"
+            value={publicURLAuth}
+            onChange={(v) => form.setValue("s3.public_url_auth", v)}
+            options={[
+              { value: "presigned", label: "S3 Presigned URLs (Recommended)" },
+              { value: "public", label: "Public (no auth)" },
+              { value: "cloudflare_token", label: "Cloudflare Token Auth" },
+            ]}
+          />
+          {publicURLAuth !== "presigned" && (
+            <SettingField
+              label="Read Endpoint"
+              value={form.getValue("s3.public_read_endpoint")}
+              onChange={(v) => form.setValue("s3.public_read_endpoint", v)}
+              hint="https://cdn.example.com"
+            />
+          )}
+        </div>
+        <ConnectionCheckAction
+          onClick={handlePublicS3Check}
+          result={publicS3ConnectionResult}
+          isPending={publicS3ConnectionCheck.isPending}
+          disabled={submitting || form.isSaving}
+        />
+      </StorageBlock>
+
+      <StorageBlock
+        title="Private Internal Storage (S3)"
+        expanded={privateExpanded}
+        onToggle={() => setPrivateExpanded((value) => !value)}
+      >
+        <p className="text-muted-foreground/80 text-xs leading-relaxed">
+          Stores non-public Silo objects such as imports, exports, and internal artifacts.
+        </p>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div className="space-y-1.5">
+            <Label className="text-xs">Endpoint</Label>
+            <Input
+              value={form.getValue("s3.private_endpoint")}
+              onChange={(e) => form.setValue("s3.private_endpoint", e.target.value)}
+              placeholder="https://s3.amazonaws.com"
+            />
+          </div>
+          <div className="space-y-1.5">
+            <Label className="text-xs">Bucket</Label>
+            <Input
+              value={form.getValue("s3.private_bucket")}
+              onChange={(e) => form.setValue("s3.private_bucket", e.target.value)}
+            />
+          </div>
+        </div>
+        <KeyPrefixField
+          value={form.getValue("s3.private_key_prefix")}
+          onChange={(v) => form.setValue("s3.private_key_prefix", v)}
+        />
+        <div className="grid gap-3 sm:grid-cols-2">
+          <SettingField
+            label="Access Key"
+            type="password"
+            value={form.getValue("s3.private_access_key")}
+            onChange={(v) => form.setValue("s3.private_access_key", v)}
+            sensitiveConfigured={form.sensitiveConfigured.includes("s3.private_access_key")}
+          />
+          <SettingField
+            label="Secret Key"
+            type="password"
+            value={form.getValue("s3.private_secret_key")}
+            onChange={(v) => form.setValue("s3.private_secret_key", v)}
+            sensitiveConfigured={form.sensitiveConfigured.includes("s3.private_secret_key")}
+          />
+        </div>
+        <ConnectionCheckAction
+          onClick={handlePrivateS3Check}
+          result={privateS3ConnectionResult}
+          isPending={privateS3ConnectionCheck.isPending}
+          disabled={submitting || form.isSaving}
+        />
+      </StorageBlock>
+
+      <div className="border-foreground/[0.07] bg-foreground/[0.03] rounded-xl border px-4 py-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-muted-foreground text-[11px] font-semibold tracking-[0.1em] uppercase">
+              Image caching
+            </p>
+            <p className="text-muted-foreground/70 mt-0.5 text-xs">
+              Store artwork in public asset storage instead of proxying external URLs.
+            </p>
+          </div>
+          <Switch
+            id="setup-cache-images"
+            checked={form.getValue("metadata.cache_images") === "true"}
+            onCheckedChange={(v) => form.setValue("metadata.cache_images", v ? "true" : "false")}
+            className="ml-4 shrink-0"
+          />
+        </div>
+      </div>
+
+      <div className="flex gap-3 pt-4">
+        <Button type="submit" disabled={submitting || form.isSaving}>
+          {submitting || form.isSaving ? "Saving..." : "Save & continue"}
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          onClick={handleSkip}
+          disabled={submitting || form.isSaving}
+        >
+          Skip
+        </Button>
+      </div>
+    </form>
+  );
+}

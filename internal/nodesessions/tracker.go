@@ -1,0 +1,190 @@
+package nodesessions
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"log/slog"
+	"sync"
+	"time"
+
+	"github.com/redis/go-redis/v9"
+)
+
+const (
+	keyPrefix  = "silo:sessions:"
+	sessionTTL = 60 * time.Second
+	refreshInt = 30 * time.Second
+)
+
+// SessionInfo represents an active streaming session stored in Redis.
+type SessionInfo struct {
+	SessionID   string `json:"session_id"`
+	NodeURL     string `json:"node_url"`
+	NodeName    string `json:"node_name"`
+	UserID      string `json:"user_id,omitempty"`
+	MediaItemID string `json:"media_item_id,omitempty"`
+	MediaTitle  string `json:"media_title,omitempty"`
+	Type        string `json:"type"` // "direct_play", "remux", "transcode"
+	CodecVideo  string `json:"codec_video,omitempty"`
+	CodecAudio  string `json:"codec_audio,omitempty"`
+	Resolution  string `json:"resolution,omitempty"`
+	HWAccel     string `json:"hw_accel,omitempty"`
+	StartedAt   string `json:"started_at"`
+}
+
+// Tracker manages session lifecycle in Redis for a single node.
+type Tracker struct {
+	rdb      *redis.Client
+	nodeURL  string
+	nodeName string
+	nodeType string
+	nodeHash string // first 8 chars of SHA-256 of nodeURL
+
+	mu       sync.Mutex
+	sessions map[string]struct{} // set of active session IDs
+}
+
+// NewTracker creates a session tracker for the given node.
+// rdb may be nil, in which case all operations are no-ops.
+func NewTracker(rdb *redis.Client, nodeURL, nodeName, nodeType string) *Tracker {
+	h := sha256.Sum256([]byte(nodeURL))
+	return &Tracker{
+		rdb:      rdb,
+		nodeURL:  nodeURL,
+		nodeName: nodeName,
+		nodeType: nodeType,
+		nodeHash: hex.EncodeToString(h[:4]), // 8 hex chars
+		sessions: make(map[string]struct{}),
+	}
+}
+
+// redisKey returns the full Redis key for a session.
+func (tr *Tracker) redisKey(sessionID string) string {
+	return keyPrefix + tr.nodeHash + ":" + sessionID
+}
+
+// NodeHash returns the node's hash prefix used in Redis keys.
+func (tr *Tracker) NodeHash() string {
+	return tr.nodeHash
+}
+
+// NodeURL returns the node's URL.
+func (tr *Tracker) NodeURL() string {
+	return tr.nodeURL
+}
+
+// NodeName returns the node's display name.
+func (tr *Tracker) NodeName() string {
+	return tr.nodeName
+}
+
+// ActiveCount returns the number of active sessions tracked by this node.
+func (tr *Tracker) ActiveCount() int {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	return len(tr.sessions)
+}
+
+// Track registers an active session in Redis with a TTL.
+func (tr *Tracker) Track(ctx context.Context, info SessionInfo) {
+	if tr.rdb == nil {
+		return
+	}
+	data, err := json.Marshal(info)
+	if err != nil {
+		slog.Debug("session track marshal failed", "error", err)
+		return
+	}
+	key := tr.redisKey(info.SessionID)
+	if err := tr.rdb.Set(ctx, key, data, sessionTTL).Err(); err != nil {
+		slog.Debug("session track set failed", "error", err, "session", info.SessionID)
+		return
+	}
+
+	tr.mu.Lock()
+	tr.sessions[info.SessionID] = struct{}{}
+	tr.mu.Unlock()
+}
+
+// Remove deletes a session from Redis and the in-memory set.
+func (tr *Tracker) Remove(ctx context.Context, sessionID string) {
+	if tr.rdb == nil {
+		return
+	}
+	tr.mu.Lock()
+	delete(tr.sessions, sessionID)
+	tr.mu.Unlock()
+
+	if err := tr.rdb.Del(ctx, tr.redisKey(sessionID)).Err(); err != nil {
+		slog.Debug("session remove failed", "error", err, "session", sessionID)
+	}
+}
+
+// Cleanup deletes all session keys for this node. Called on graceful shutdown.
+func (tr *Tracker) Cleanup(ctx context.Context) {
+	if tr.rdb == nil {
+		return
+	}
+	tr.mu.Lock()
+	ids := make([]string, 0, len(tr.sessions))
+	for id := range tr.sessions {
+		ids = append(ids, id)
+	}
+	tr.sessions = make(map[string]struct{})
+	tr.mu.Unlock()
+
+	if len(ids) == 0 {
+		return
+	}
+
+	pipe := tr.rdb.Pipeline()
+	for _, id := range ids {
+		pipe.Del(ctx, tr.redisKey(id))
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		slog.Debug("session cleanup pipeline failed", "error", err)
+	}
+}
+
+// StartRefresh starts a background goroutine that refreshes TTLs for all
+// active sessions every 30 seconds. Stops when ctx is cancelled.
+func (tr *Tracker) StartRefresh(ctx context.Context) {
+	if tr.rdb == nil {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(refreshInt)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				tr.refreshAll(ctx)
+			}
+		}
+	}()
+}
+
+func (tr *Tracker) refreshAll(ctx context.Context) {
+	tr.mu.Lock()
+	ids := make([]string, 0, len(tr.sessions))
+	for id := range tr.sessions {
+		ids = append(ids, id)
+	}
+	tr.mu.Unlock()
+
+	if len(ids) == 0 {
+		return
+	}
+
+	pipe := tr.rdb.Pipeline()
+	for _, id := range ids {
+		pipe.Expire(ctx, tr.redisKey(id), sessionTTL)
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		slog.Debug("session refresh pipeline failed", "error", err)
+	}
+}

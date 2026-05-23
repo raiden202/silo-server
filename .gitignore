@@ -1,0 +1,62 @@
+# Binary
+/silo
+*.exe
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test
+*.test
+coverage.out
+coverage.html
+
+# Temp
+/tmp/
+*.tmp
+
+# Worktrees
+.worktrees/
+
+# Config with secrets
+silo.yaml
+.env
+.env.*
+!.env.example
+
+# Developer-specific make targets
+Makefile.local
+go.work
+go.work.sum
+
+# Local agent instructions (not synced)
+*.local.md
+
+# Frontend
+web/node_modules/
+web/dist/
+plugins/metadb/dist/
+web/*.tsbuildinfo
+
+docs/inspiration
+
+
+.agents/
+/.claude/
+.cursor/
+.superpowers/
+.codex/
+.worktrees/
+node_modules/
+logs/
+.playwright-mcp/
+demo/
+docker-compose.dev.yml
+.playwright-cli/
+output/

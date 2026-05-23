@@ -1,0 +1,3061 @@
+package handlers
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"slices"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+	"golang.org/x/sync/errgroup"
+
+	"log/slog"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/Silo-Server/silo-server/internal/access"
+	apimw "github.com/Silo-Server/silo-server/internal/api/middleware"
+	"github.com/Silo-Server/silo-server/internal/catalog"
+	"github.com/Silo-Server/silo-server/internal/collage"
+	"github.com/Silo-Server/silo-server/internal/collections/templates"
+	"github.com/Silo-Server/silo-server/internal/models"
+	"github.com/Silo-Server/silo-server/internal/s3client"
+	"github.com/Silo-Server/silo-server/internal/sections"
+	"github.com/Silo-Server/silo-server/internal/usercollections"
+)
+
+type LibraryCollectionHandler struct {
+	repo                *catalog.LibraryCollectionRepository
+	service             *catalog.LibraryCollectionService
+	itemRepo            *catalog.ItemRepository
+	Executor            *catalog.QueryExecutor
+	detailSvc           *catalog.DetailService
+	presignTTL          time.Duration
+	httpClient          *http.Client
+	s3GP                *s3client.Client
+	SectionRepo         *sections.Repository
+	UserCollectionPool  *pgxpool.Pool
+	GroupRepo           *catalog.LibraryCollectionGroupRepository
+	FolderRepo          *catalog.FolderRepository
+	TemplateRegistry    *templates.Registry
+	SmartCountRefresher *catalog.SmartCountRefresher
+}
+
+var errLibraryCollectionInUse = errors.New("collection is used by one or more sections")
+
+const (
+	templateBundleSyncConcurrency    = 4
+	templateBundleCollageConcurrency = 2
+	templateBundleCollageTimeout     = 5 * time.Minute
+
+	collectionManagementModeManual         = "manual"
+	collectionManagementModeSection        = "section"
+	collectionManagementModeTemplateBundle = "template_bundle"
+
+	// collectionSourceModeTMDBCollection is the `source_config.mode` value used
+	// for TMDB-franchise collections (curated `/collection/{id}` results).
+	collectionSourceModeTMDBCollection = "tmdb_collection"
+
+	// collectionSourceModeTMDBDiscover is the `source_config.mode` value used
+	// for TMDB discover collections (genre matrices, decade slices, etc.).
+	collectionSourceModeTMDBDiscover = "tmdb_discover"
+)
+
+func NewLibraryCollectionHandler(
+	repo *catalog.LibraryCollectionRepository,
+	service *catalog.LibraryCollectionService,
+	itemRepo *catalog.ItemRepository,
+	presignTTL time.Duration,
+	httpClient *http.Client,
+	s3GP *s3client.Client,
+) *LibraryCollectionHandler {
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+
+	return &LibraryCollectionHandler{
+		repo:             repo,
+		service:          service,
+		itemRepo:         itemRepo,
+		presignTTL:       presignTTL,
+		httpClient:       httpClient,
+		s3GP:             s3GP,
+		TemplateRegistry: templates.Default,
+	}
+}
+
+// SetDetailService configures the detail service for image URL resolution.
+func (h *LibraryCollectionHandler) SetDetailService(svc *catalog.DetailService) {
+	h.detailSvc = svc
+}
+
+// SetupCollage enables automatic poster collage generation for collections.
+// Must be called after SetDetailService.
+func (h *LibraryCollectionHandler) SetupCollage() {
+	if h.s3GP == nil || h.detailSvc == nil {
+		slog.Info("collage: auto-generation disabled", "s3_configured", h.s3GP != nil, "detail_svc_configured", h.detailSvc != nil)
+		return
+	}
+	h.service.CollageGen = h
+	slog.Info("collage: auto-generation enabled")
+}
+
+// GenerateCollectionPoster implements catalog.CollageGenerator.
+// It fetches item poster images, composes a collage, and stores the result.
+func (h *LibraryCollectionHandler) GenerateCollectionPoster(ctx context.Context, collectionID string) error {
+	const maxItems = 4
+
+	paths, err := h.repo.ListItemPosterPaths(ctx, collectionID, maxItems)
+	if err != nil {
+		return fmt.Errorf("listing item poster paths: %w", err)
+	}
+	if len(paths) == 0 {
+		return collage.ErrNotEnoughImages
+	}
+
+	slog.Info("collage: generating poster", "collection_id", collectionID, "item_poster_count", len(paths))
+
+	// Resolve poster paths to fetchable URLs.
+	resolved := h.detailSvc.PresignImageURLs(ctx, paths, "poster", "small")
+
+	// Fetch each image.
+	imageData := make([][]byte, 0, len(paths))
+	fetchFailed := 0
+	for _, path := range paths {
+		url := resolved[path]
+		if url == "" {
+			fetchFailed++
+			continue
+		}
+		data, err := h.fetchImageURL(ctx, url)
+		if err != nil {
+			slog.Debug("collage: failed to fetch poster image", "url", url, "error", err)
+			fetchFailed++
+			continue
+		}
+		imageData = append(imageData, data)
+	}
+	if fetchFailed > 0 && len(imageData) == 0 {
+		slog.Warn("collage: all poster image fetches failed",
+			"collection_id", collectionID, "total", len(paths), "failed", fetchFailed)
+	}
+
+	// Compose the collage.
+	composited, err := collage.ComposePoster(imageData)
+	if err != nil {
+		return err
+	}
+
+	// Delete any existing auto-generated images before uploading new ones.
+	if err := h.deleteCollectionImages(ctx, collectionID, "poster"); err != nil {
+		slog.Warn("collage: failed to clean up old poster images", "collection_id", collectionID, "error", err)
+	}
+
+	// Process through the standard image pipeline (generates WebP variants + thumbhash).
+	s3Path, thumbhash, err := h.processCollectionImage(ctx, collectionID, "poster", composited)
+	if err != nil {
+		return fmt.Errorf("processing collage image: %w", err)
+	}
+
+	autoGen := true
+	if err := h.repo.Update(ctx, catalog.UpdateLibraryCollectionInput{
+		ID:                  collectionID,
+		PosterURL:           &s3Path,
+		PosterThumbhash:     &thumbhash,
+		PosterAutoGenerated: &autoGen,
+	}); err != nil {
+		return fmt.Errorf("updating collection poster: %w", err)
+	}
+
+	slog.Info("collage: poster generated successfully", "collection_id", collectionID, "s3_path", s3Path)
+	return nil
+}
+
+// fetchImageURL downloads an image from a resolved URL.
+func (h *LibraryCollectionHandler) fetchImageURL(ctx context.Context, imageURL string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, imageURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	client := h.httpClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("image fetch returned status %d", resp.StatusCode)
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, collectionImageMaxBytes))
+}
+
+type libraryCollectionResponse struct {
+	ID                string          `json:"id"`
+	LibraryID         int             `json:"library_id"`
+	LibraryIDs        []int           `json:"library_ids"`
+	Slug              string          `json:"slug"`
+	Title             string          `json:"title"`
+	Description       string          `json:"description"`
+	CollectionType    string          `json:"collection_type"`
+	Visibility        string          `json:"visibility"`
+	SortOrder         int             `json:"sort_order"`
+	GroupID           *string         `json:"group_id"`
+	Featured          bool            `json:"featured"`
+	PosterURL         string          `json:"poster_url"`
+	BackdropURL       string          `json:"backdrop_url"`
+	PosterThumbhash   string          `json:"poster_thumbhash,omitempty"`
+	BackdropThumbhash string          `json:"backdrop_thumbhash,omitempty"`
+	SourceURL         string          `json:"source_url"`
+	QueryDefinition   json.RawMessage `json:"query_definition"`
+	SortConfig        json.RawMessage `json:"sort_config"`
+	SourceConfig      json.RawMessage `json:"source_config"`
+	ManagementMode    string          `json:"management_mode"`
+	ManagementSource  string          `json:"management_source"`
+	ManagementKey     string          `json:"management_key"`
+	LastSyncStatus    string          `json:"last_sync_status"`
+	LastSyncMessage   string          `json:"last_sync_message"`
+	LastSyncAt        string          `json:"last_sync_at,omitempty"`
+	SyncSchedule      string          `json:"sync_schedule,omitempty"`
+	NextSyncAt        string          `json:"next_sync_at,omitempty"`
+	ItemCount         int             `json:"item_count"`
+	CreatedAt         string          `json:"created_at"`
+	UpdatedAt         string          `json:"updated_at"`
+}
+
+type libraryCollectionGroupResponse struct {
+	ID              string `json:"id"`
+	LibraryID       int    `json:"library_id"`
+	Name            string `json:"name"`
+	Slug            string `json:"slug"`
+	Kind            string `json:"kind"`
+	DefaultSortMode string `json:"default_sort_mode"`
+	SortOrder       int    `json:"sort_order"`
+}
+
+type libraryCollectionGroupsListResponse struct {
+	Groups             []libraryCollectionGroupResponse `json:"groups"`
+	UngroupedSortOrder int                              `json:"ungrouped_sort_order"`
+}
+
+type createLibraryCollectionGroupRequest struct {
+	LibraryID       int    `json:"library_id"`
+	Name            string `json:"name"`
+	Slug            string `json:"slug"`
+	DefaultSortMode string `json:"default_sort_mode"`
+}
+
+type updateLibraryCollectionGroupRequest struct {
+	Name            *string `json:"name"`
+	Slug            *string `json:"slug"`
+	DefaultSortMode *string `json:"default_sort_mode"`
+}
+
+type reorderLibraryCollectionGroupsRequest struct {
+	LibraryID  int      `json:"library_id"`
+	OrderedIDs []string `json:"ordered_ids"`
+}
+
+type libraryCollectionsListResponse struct {
+	Collections []libraryCollectionResponse      `json:"collections"`
+	Groups      []libraryCollectionGroupResponse `json:"groups,omitempty"`
+}
+
+type createLibraryCollectionRequest struct {
+	LibraryID         int             `json:"library_id"`
+	LibraryIDs        []int           `json:"library_ids"`
+	Slug              string          `json:"slug"`
+	Title             string          `json:"title"`
+	Description       string          `json:"description"`
+	CollectionType    string          `json:"collection_type"`
+	Visibility        string          `json:"visibility"`
+	SortOrder         int             `json:"sort_order"`
+	GroupID           *string         `json:"group_id"`
+	Featured          bool            `json:"featured"`
+	PosterURL         string          `json:"poster_url"`
+	BackdropURL       string          `json:"backdrop_url"`
+	PosterSourceURL   string          `json:"poster_source_url"`
+	BackdropSourceURL string          `json:"backdrop_source_url"`
+	SourceURL         string          `json:"source_url"`
+	QueryDefinition   json.RawMessage `json:"query_definition"`
+	SortConfig        json.RawMessage `json:"sort_config"`
+	SourceConfig      json.RawMessage `json:"source_config"`
+	ManagementMode    string          `json:"management_mode"`
+	ManagementSource  string          `json:"management_source"`
+	ManagementKey     string          `json:"management_key"`
+	SyncSchedule      string          `json:"sync_schedule"`
+}
+
+type updateLibraryCollectionRequest struct {
+	LibraryIDs        *[]int                 `json:"library_ids"`
+	Slug              *string                `json:"slug"`
+	Title             *string                `json:"title"`
+	Description       *string                `json:"description"`
+	CollectionType    *string                `json:"collection_type"`
+	Visibility        *string                `json:"visibility"`
+	SortOrder         *int                   `json:"sort_order"`
+	GroupID           optionalNullableString `json:"group_id"`
+	Featured          *bool                  `json:"featured"`
+	PosterURL         *string                `json:"poster_url"`
+	BackdropURL       *string                `json:"backdrop_url"`
+	PosterSourceURL   *string                `json:"poster_source_url"`
+	BackdropSourceURL *string                `json:"backdrop_source_url"`
+	SourceURL         *string                `json:"source_url"`
+	QueryDefinition   json.RawMessage        `json:"query_definition"`
+	SortConfig        json.RawMessage        `json:"sort_config"`
+	SourceConfig      json.RawMessage        `json:"source_config"`
+	ManagementMode    *string                `json:"management_mode"`
+	ManagementSource  *string                `json:"management_source"`
+	ManagementKey     *string                `json:"management_key"`
+	SyncSchedule      *string                `json:"sync_schedule"`
+}
+
+type importMDBListRequest struct {
+	LibraryID         int    `json:"library_id"`
+	LibraryIDs        []int  `json:"library_ids"`
+	Title             string `json:"title"`
+	Description       string `json:"description"`
+	URL               string `json:"url"`
+	Limit             *int   `json:"limit,omitempty"`
+	Featured          bool   `json:"featured"`
+	PosterSourceURL   string `json:"poster_source_url"`
+	BackdropSourceURL string `json:"backdrop_source_url"`
+	SyncSchedule      string `json:"sync_schedule"`
+	ManagementMode    string `json:"management_mode,omitempty"`
+	ManagementSource  string `json:"management_source,omitempty"`
+	ManagementKey     string `json:"management_key,omitempty"`
+}
+
+type importTMDBRequest struct {
+	LibraryID         int    `json:"library_id"`
+	LibraryIDs        []int  `json:"library_ids"`
+	Title             string `json:"title"`
+	Description       string `json:"description"`
+	Preset            string `json:"preset"`
+	TimeWindow        string `json:"time_window"`
+	MediaType         string `json:"media_type"`
+	Limit             *int   `json:"limit,omitempty"`
+	Featured          bool   `json:"featured"`
+	PosterSourceURL   string `json:"poster_source_url"`
+	BackdropSourceURL string `json:"backdrop_source_url"`
+	SyncSchedule      string `json:"sync_schedule"`
+	ManagementMode    string `json:"management_mode,omitempty"`
+	ManagementSource  string `json:"management_source,omitempty"`
+	ManagementKey     string `json:"management_key,omitempty"`
+}
+
+// importTMDBFranchiseRequest is the request body for creating a collection
+// backed by a TMDB `/collection/{id}` franchise/saga. Naming distinguishes
+// this from the older importTMDBRequest, which targets TMDB preset listings
+// (popular, trending, etc.) — the two share the on-disk collection_type
+// "tmdb" but differ in source_config.mode (`tmdb_preset` vs `tmdb_collection`).
+type importTMDBFranchiseRequest struct {
+	LibraryID         int    `json:"library_id"`
+	LibraryIDs        []int  `json:"library_ids"`
+	Title             string `json:"title"`
+	Description       string `json:"description"`
+	CollectionID      int    `json:"collection_id"`
+	Limit             *int   `json:"limit,omitempty"`
+	Featured          bool   `json:"featured"`
+	PosterSourceURL   string `json:"poster_source_url"`
+	BackdropSourceURL string `json:"backdrop_source_url"`
+	SyncSchedule      string `json:"sync_schedule"`
+	ManagementMode    string `json:"management_mode,omitempty"`
+	ManagementSource  string `json:"management_source,omitempty"`
+	ManagementKey     string `json:"management_key,omitempty"`
+}
+
+// importTMDBDiscoverRequest is the request body for creating a collection
+// backed by TMDB `/discover/{movie,tv}`. The full discover filter set is
+// stored inline so the same shape can round-trip through source_config.
+//
+// The on-disk collection_type is "tmdb" — the discover specialization lives
+// entirely in source_config.mode = "tmdb_discover".
+type importTMDBDiscoverRequest struct {
+	LibraryID         int                        `json:"library_id"`
+	LibraryIDs        []int                      `json:"library_ids"`
+	Title             string                     `json:"title"`
+	Description       string                     `json:"description"`
+	MediaType         string                     `json:"media_type"`
+	Spec              importTMDBDiscoverSpecBody `json:"spec"`
+	Limit             *int                       `json:"limit,omitempty"`
+	Featured          bool                       `json:"featured"`
+	PosterSourceURL   string                     `json:"poster_source_url"`
+	BackdropSourceURL string                     `json:"backdrop_source_url"`
+	SyncSchedule      string                     `json:"sync_schedule"`
+	ManagementMode    string                     `json:"management_mode,omitempty"`
+	ManagementSource  string                     `json:"management_source,omitempty"`
+	ManagementKey     string                     `json:"management_key,omitempty"`
+}
+
+// importTMDBDiscoverSpecBody mirrors templates.TMDBDiscoverSpec without the
+// media_type field, which lives on the request envelope.
+type importTMDBDiscoverSpecBody struct {
+	WithGenres       []int    `json:"with_genres,omitempty"`
+	WithoutGenres    []int    `json:"without_genres,omitempty"`
+	SortBy           string   `json:"sort_by"`
+	VoteCountGte     int      `json:"vote_count_gte,omitempty"`
+	VoteAverageGte   float64  `json:"vote_average_gte,omitempty"`
+	ReleaseDateGte   string   `json:"release_date_gte,omitempty"`
+	ReleaseDateLte   string   `json:"release_date_lte,omitempty"`
+	Certifications   []string `json:"certifications,omitempty"`
+	CertificationLte string   `json:"certification_lte,omitempty"`
+	WithRuntimeGte   int      `json:"with_runtime_gte,omitempty"`
+	WithRuntimeLte   int      `json:"with_runtime_lte,omitempty"`
+	OriginalLanguage string   `json:"original_language,omitempty"`
+}
+
+type importTraktRequest struct {
+	LibraryID         int    `json:"library_id"`
+	LibraryIDs        []int  `json:"library_ids"`
+	Title             string `json:"title"`
+	Description       string `json:"description"`
+	Preset            string `json:"preset"`
+	MediaType         string `json:"media_type"`
+	ProfileID         string `json:"profile_id,omitempty"`
+	Limit             *int   `json:"limit,omitempty"`
+	Featured          bool   `json:"featured"`
+	PosterSourceURL   string `json:"poster_source_url"`
+	BackdropSourceURL string `json:"backdrop_source_url"`
+	SyncSchedule      string `json:"sync_schedule"`
+	ManagementMode    string `json:"management_mode,omitempty"`
+	ManagementSource  string `json:"management_source,omitempty"`
+	ManagementKey     string `json:"management_key,omitempty"`
+}
+
+type importCollectionResponse struct {
+	Collection libraryCollectionResponse        `json:"collection"`
+	SyncRun    *models.LibraryCollectionSyncRun `json:"sync_run,omitempty"`
+}
+
+type applyTemplateBundleRequest struct {
+	LibraryIDs     []int                          `json:"library_ids"`
+	DryRun         bool                           `json:"dry_run"`
+	DeleteExisting bool                           `json:"delete_existing"`
+	Featured       *templateBundleFeaturedRequest `json:"featured,omitempty"`
+}
+
+type templateBundleFeaturedRequest struct {
+	Home      *templateBundleFeaturedHome `json:"home,omitempty"`
+	Libraries map[int]string              `json:"libraries,omitempty"`
+}
+
+type templateBundleFeaturedHome struct {
+	LibraryID  int    `json:"library_id"`
+	TemplateID string `json:"template_id"`
+}
+
+type templateBundleApplyEntry struct {
+	TemplateID    string `json:"template_id"`
+	TemplateTitle string `json:"template_title"`
+	LibraryID     int    `json:"library_id"`
+	LibraryName   string `json:"library_name"`
+	CollectionID  string `json:"collection_id,omitempty"`
+	Reason        string `json:"reason,omitempty"`
+}
+
+type templateBundleCollectionEntry struct {
+	LibraryID       int    `json:"library_id"`
+	LibraryName     string `json:"library_name"`
+	CollectionID    string `json:"collection_id"`
+	CollectionTitle string `json:"collection_title"`
+	Reason          string `json:"reason,omitempty"`
+}
+
+type templateBundleFeaturedEntry struct {
+	Surface       string `json:"surface"`
+	LibraryID     int    `json:"library_id,omitempty"`
+	LibraryName   string `json:"library_name,omitempty"`
+	TemplateID    string `json:"template_id"`
+	TemplateTitle string `json:"template_title"`
+	CollectionID  string `json:"collection_id,omitempty"`
+	SectionID     string `json:"section_id,omitempty"`
+	Reason        string `json:"reason,omitempty"`
+}
+
+type applyTemplateBundleResponse struct {
+	BundleID       string                          `json:"bundle_id"`
+	DryRun         bool                            `json:"dry_run"`
+	DeleteExisting bool                            `json:"delete_existing"`
+	Deleted        []templateBundleCollectionEntry `json:"deleted"`
+	DeleteSkipped  []templateBundleCollectionEntry `json:"delete_skipped"`
+	DeleteFailed   []templateBundleCollectionEntry `json:"delete_failed"`
+	Created        []templateBundleApplyEntry      `json:"created"`
+	Skipped        []templateBundleApplyEntry      `json:"skipped"`
+	Failed         []templateBundleApplyEntry      `json:"failed"`
+	Featured       []templateBundleFeaturedEntry   `json:"featured"`
+	FeaturedFailed []templateBundleFeaturedEntry   `json:"featured_failed"`
+}
+
+type pendingTemplateBundleSync struct {
+	CollectionID string
+	Entry        templateBundleApplyEntry
+}
+
+type templateBundleCollectionRef struct {
+	CollectionID string
+	Template     templates.Template
+	Library      *models.MediaFolder
+}
+
+type templateBundleCollectionRefKey struct {
+	LibraryID  int
+	TemplateID string
+}
+
+type requestValidationError struct {
+	err error
+}
+
+func (e requestValidationError) Error() string { return e.err.Error() }
+func (e requestValidationError) Unwrap() error { return e.err }
+
+func hasLibrarySelection(libraryID int, libraryIDs []int) bool {
+	return libraryID > 0 || len(libraryIDs) > 0
+}
+
+func uniquePositiveInts(values []int) []int {
+	seen := make(map[int]struct{}, len(values))
+	out := make([]int, 0, len(values))
+	for _, value := range values {
+		if value <= 0 {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
+}
+
+func templateBundleManagementKey(bundleID, templateID string, libraryID int) string {
+	return fmt.Sprintf("%s:%s:library:%d", bundleID, templateID, libraryID)
+}
+
+func templateLimitPtr(tmpl templates.Template) *int {
+	if tmpl.DefaultLimit <= 0 {
+		return nil
+	}
+	limit := tmpl.DefaultLimit
+	return &limit
+}
+
+func templateBundleEntry(
+	tmpl templates.Template,
+	templateID string,
+	library *models.MediaFolder,
+	collectionID string,
+	reason string,
+) templateBundleApplyEntry {
+	title := tmpl.Title
+	if title == "" {
+		title = templateID
+	}
+	return templateBundleApplyEntry{
+		TemplateID:    templateID,
+		TemplateTitle: title,
+		LibraryID:     library.ID,
+		LibraryName:   library.Name,
+		CollectionID:  collectionID,
+		Reason:        reason,
+	}
+}
+
+func templateBundleCollectionEntryForLibrary(
+	collection *models.LibraryCollection,
+	library *models.MediaFolder,
+	reason string,
+) templateBundleCollectionEntry {
+	return templateBundleCollectionEntry{
+		LibraryID:       library.ID,
+		LibraryName:     library.Name,
+		CollectionID:    collection.ID,
+		CollectionTitle: collection.Title,
+		Reason:          reason,
+	}
+}
+
+func allCollectionLibrariesSelected(collection *models.LibraryCollection, selected map[int]struct{}) bool {
+	for _, libraryID := range collection.LibraryIDs {
+		if _, ok := selected[libraryID]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func templateEligibleForLibrary(tmpl templates.Template, library *models.MediaFolder) bool {
+	if library == nil {
+		return false
+	}
+	switch strings.TrimSpace(strings.ToLower(library.Type)) {
+	case "", "mixed":
+		return true
+	case "movie", "movies":
+		return tmpl.MediaKind == templates.MediaMovie || tmpl.MediaKind == templates.MediaMixed
+	case "series", "tv", "show", "shows", "tvshows":
+		return tmpl.MediaKind == templates.MediaTV || tmpl.MediaKind == templates.MediaMixed
+	default:
+		return true
+	}
+}
+
+type previewLibraryCollectionResponse struct {
+	Items []itemListResponse `json:"items"`
+	Total int                `json:"total"`
+}
+
+type serverUserCollectionsListResponse struct {
+	Collections []usercollections.ServerVisibleCollection `json:"collections"`
+}
+
+type libraryTabCollection struct {
+	ID               string  `json:"id"`
+	Title            string  `json:"title"`
+	PosterURL        string  `json:"poster_url"`
+	PosterThumbhash  string  `json:"poster_thumbhash,omitempty"`
+	ItemCount        int     `json:"item_count"`
+	Featured         bool    `json:"featured,omitempty"`
+	CreatorProfileID *string `json:"creator_profile_id,omitempty"`
+}
+
+type libraryTabGroup struct {
+	ID          string                            `json:"id"`
+	Name        string                            `json:"name"`
+	Kind        models.LibraryCollectionGroupKind `json:"kind"`
+	SortMode    models.GroupSortMode              `json:"sort_mode"`
+	SortOrder   int                               `json:"sort_order"`
+	Collections []libraryTabCollection            `json:"collections"`
+}
+
+type libraryTabUngrouped struct {
+	SortOrder   int                    `json:"sort_order"`
+	Collections []libraryTabCollection `json:"collections"`
+}
+
+type libraryTabResponse struct {
+	LibraryID   int                         `json:"library_id"`
+	Collections []libraryCollectionResponse `json:"collections,omitempty"`
+	Groups      []libraryTabGroup           `json:"groups"`
+	Ungrouped   *libraryTabUngrouped        `json:"ungrouped,omitempty"`
+}
+
+// HandleListLibraryUserCollections returns the viewer's own personal
+// collections that they've opted into their library Collections tab and whose
+// library scope matches the requested library. Personal collections are
+// private to their owner; this endpoint never reveals other users' rows.
+func (h *LibraryCollectionHandler) HandleListLibraryUserCollections(w http.ResponseWriter, r *http.Request) {
+	libraryID, ok := parsePathLibraryID(w, r)
+	if !ok {
+		return
+	}
+	if !requestCanAccessLibrary(r, libraryID) {
+		writeError(w, http.StatusNotFound, "not_found", "Library not found")
+		return
+	}
+	if h.UserCollectionPool == nil {
+		writeJSON(w, http.StatusOK, serverUserCollectionsListResponse{Collections: []usercollections.ServerVisibleCollection{}})
+		return
+	}
+
+	userID := apimw.GetUserID(r.Context())
+	collections, err := usercollections.ListServerVisibleByLibrary(r.Context(), h.UserCollectionPool, userID, libraryID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load user collections")
+		return
+	}
+
+	if collections == nil {
+		collections = []usercollections.ServerVisibleCollection{}
+	}
+	for i := range collections {
+		collections[i].PosterURL = h.presignGPURL(r, collections[i].PosterPath)
+	}
+	writeJSON(w, http.StatusOK, serverUserCollectionsListResponse{Collections: collections})
+}
+
+func (h *LibraryCollectionHandler) HandleListLibraryCollections(w http.ResponseWriter, r *http.Request) {
+	libraryID, ok := parsePathLibraryID(w, r)
+	if !ok {
+		return
+	}
+	if !requestCanAccessLibrary(r, libraryID) {
+		writeError(w, http.StatusNotFound, "not_found", "Library not found")
+		return
+	}
+
+	adminCollections, err := h.repo.ListByLibrary(r.Context(), libraryID, catalog.ListLibraryCollectionsOptions{})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load collections")
+		return
+	}
+	if h.GroupRepo == nil {
+		writeJSON(w, http.StatusOK, libraryCollectionsListResponse{
+			Collections: h.toLibraryCollectionResponses(r, adminCollections),
+		})
+		return
+	}
+
+	userID := apimw.GetUserID(r.Context())
+	groups, err := h.GroupRepo.ListByLibrary(r.Context(), libraryID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load groups")
+		return
+	}
+	adminCollectionsByGroup := groupLibraryTabCollections(adminCollections)
+
+	resp := libraryTabResponse{
+		LibraryID:   libraryID,
+		Collections: h.toLibraryCollectionResponses(r, adminCollections),
+		Groups:      []libraryTabGroup{},
+	}
+	var userCollections []usercollections.ServerVisibleCollection
+	userCollectionsLoaded := false
+	for _, g := range groups {
+		var colls []libraryTabCollection
+		switch g.Kind {
+		case models.GroupKindUserCollections:
+			if h.UserCollectionPool == nil || userID == 0 {
+				continue
+			}
+			if !userCollectionsLoaded {
+				loadedUserCollections, loadErr := usercollections.ListServerVisibleByLibrary(r.Context(), h.UserCollectionPool, userID, libraryID)
+				if loadErr != nil {
+					writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load user collections")
+					return
+				}
+				userCollections = loadedUserCollections
+				userCollectionsLoaded = true
+			}
+			sorted := applyUserCollectionSort(userCollections, g.DefaultSortMode)
+			for i := range sorted {
+				posterURL := h.presignGPURL(r, sorted[i].PosterPath)
+				creatorProfileID := sorted[i].CreatorProfileID
+				colls = append(colls, libraryTabCollection{
+					ID:               sorted[i].ID,
+					Title:            sorted[i].Name,
+					PosterURL:        posterURL,
+					PosterThumbhash:  sorted[i].PosterThumbhash,
+					ItemCount:        sorted[i].ItemCount,
+					CreatorProfileID: &creatorProfileID,
+				})
+			}
+		default:
+			collections := adminCollectionsByGroup[g.ID]
+			collections = applyCollectionSort(collections, g.DefaultSortMode)
+			for _, c := range collections {
+				colls = append(colls, libraryTabCollection{
+					ID:              c.ID,
+					Title:           c.Title,
+					PosterURL:       h.presignGPURL(r, c.PosterURL),
+					PosterThumbhash: c.PosterThumbhash,
+					ItemCount:       c.ItemCount,
+					Featured:        c.Featured,
+				})
+			}
+		}
+		if len(colls) == 0 {
+			continue
+		}
+		resp.Groups = append(resp.Groups, libraryTabGroup{
+			ID:          g.ID,
+			Name:        g.Name,
+			Kind:        g.Kind,
+			SortMode:    g.DefaultSortMode,
+			SortOrder:   g.SortOrder,
+			Collections: colls,
+		})
+	}
+
+	ungrouped := adminCollectionsByGroup[groupKeyPtr(nil)]
+	if len(ungrouped) > 0 {
+		uColls := make([]libraryTabCollection, 0, len(ungrouped))
+		for _, c := range ungrouped {
+			uColls = append(uColls, libraryTabCollection{
+				ID:              c.ID,
+				Title:           c.Title,
+				PosterURL:       h.presignGPURL(r, c.PosterURL),
+				PosterThumbhash: c.PosterThumbhash,
+				ItemCount:       c.ItemCount,
+				Featured:        c.Featured,
+			})
+		}
+		sortOrder := 9999
+		if h.GroupRepo != nil {
+			if sortOrder, err = h.GroupRepo.GetUngroupedSortOrder(r.Context(), libraryID); err != nil {
+				sortOrder = 9999
+			}
+		}
+		resp.Ungrouped = &libraryTabUngrouped{SortOrder: sortOrder, Collections: uColls}
+	}
+
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func toLibraryCollectionGroupResponses(groups []models.LibraryCollectionGroup) []libraryCollectionGroupResponse {
+	out := make([]libraryCollectionGroupResponse, 0, len(groups))
+	for _, g := range groups {
+		out = append(out, toLibraryCollectionGroupResponse(g))
+	}
+	return out
+}
+
+func groupLibraryTabCollections(collections []*models.LibraryCollection) map[string][]*models.LibraryCollection {
+	grouped := make(map[string][]*models.LibraryCollection)
+	for _, collection := range collections {
+		key := groupKeyPtr(collection.GroupID)
+		grouped[key] = append(grouped[key], collection)
+	}
+	return grouped
+}
+
+func groupKeyPtr(id *string) string {
+	if id == nil {
+		return ""
+	}
+	return *id
+}
+
+func toLibraryCollectionGroupResponse(g models.LibraryCollectionGroup) libraryCollectionGroupResponse {
+	return libraryCollectionGroupResponse{
+		ID:              g.ID,
+		LibraryID:       g.LibraryID,
+		Name:            g.Name,
+		Slug:            g.Slug,
+		Kind:            string(g.Kind),
+		DefaultSortMode: string(g.DefaultSortMode),
+		SortOrder:       g.SortOrder,
+	}
+}
+
+func applyCollectionSort(collections []*models.LibraryCollection, mode models.GroupSortMode) []*models.LibraryCollection {
+	out := append([]*models.LibraryCollection(nil), collections...)
+	switch mode {
+	case models.GroupSortNameAsc:
+		sort.Slice(out, func(i, j int) bool { return out[i].Title < out[j].Title })
+	case models.GroupSortNameDesc:
+		sort.Slice(out, func(i, j int) bool { return out[i].Title > out[j].Title })
+	case models.GroupSortRecent:
+		sort.Slice(out, func(i, j int) bool { return out[i].UpdatedAt.After(out[j].UpdatedAt) })
+	case models.GroupSortMostItems:
+		sort.Slice(out, func(i, j int) bool { return out[i].ItemCount > out[j].ItemCount })
+	}
+	return out
+}
+
+func applyUserCollectionSort(collections []usercollections.ServerVisibleCollection, mode models.GroupSortMode) []usercollections.ServerVisibleCollection {
+	out := append([]usercollections.ServerVisibleCollection(nil), collections...)
+	switch mode {
+	case models.GroupSortNameAsc:
+		sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	case models.GroupSortNameDesc:
+		sort.Slice(out, func(i, j int) bool { return out[i].Name > out[j].Name })
+	case models.GroupSortRecent:
+		sort.Slice(out, func(i, j int) bool { return out[i].UpdatedAt > out[j].UpdatedAt })
+	case models.GroupSortMostItems:
+		sort.Slice(out, func(i, j int) bool { return out[i].ItemCount > out[j].ItemCount })
+	}
+	return out
+}
+
+func (h *LibraryCollectionHandler) refreshSmartCountAsync(collectionID string) {
+	if h.SmartCountRefresher == nil || collectionID == "" {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		defer cancel()
+		if err := h.SmartCountRefresher.RefreshOne(ctx, collectionID); err != nil {
+			slog.Warn("smart-count refresh failed", "collection_id", collectionID, "error", err)
+		}
+	}()
+}
+
+func (h *LibraryCollectionHandler) HandleGetLibraryCollectionItems(w http.ResponseWriter, r *http.Request) {
+	libraryID, ok := parsePathLibraryID(w, r)
+	if !ok {
+		return
+	}
+	if !requestCanAccessLibrary(r, libraryID) {
+		writeError(w, http.StatusNotFound, "not_found", "Library not found")
+		return
+	}
+
+	collectionID := chi.URLParam(r, "collection_id")
+	collection, err := h.repo.GetByID(r.Context(), collectionID)
+	if err != nil || collection.LibraryID != libraryID || collection.Visibility != "visible" {
+		writeError(w, http.StatusNotFound, "not_found", "Collection not found")
+		return
+	}
+
+	var items []itemListResponse
+	if catalog.IsLiveQueryType(collection.CollectionType) {
+		items, err = h.loadLiveCollectionItems(r, collection)
+	} else {
+		items, err = h.loadOrderedCollectionItems(r, collectionID)
+	}
+	if err != nil {
+		var queryErr smartCollectionQueryError
+		if errors.As(err, &queryErr) {
+			writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load collection items")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, browseResponse{Items: items, Total: len(items), HasMore: false})
+}
+
+func (h *LibraryCollectionHandler) HandleListAdminCollections(w http.ResponseWriter, r *http.Request) {
+	var libraryID *int
+	if raw := r.URL.Query().Get("library_id"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "bad_request", "Invalid library_id")
+			return
+		}
+		libraryID = &parsed
+	}
+
+	collectionsCh := make(chan []*models.LibraryCollection, 1)
+	eg, egCtx := errgroup.WithContext(r.Context())
+	eg.Go(func() error {
+		collections, err := h.repo.ListAll(egCtx, libraryID, catalog.ListLibraryCollectionsOptions{IncludeHidden: true})
+		if err != nil {
+			return err
+		}
+		collectionsCh <- collections
+		return nil
+	})
+	var groupsCh chan []models.LibraryCollectionGroup
+	if libraryID != nil && h.GroupRepo != nil {
+		scopedID := *libraryID
+		groupsCh = make(chan []models.LibraryCollectionGroup, 1)
+		eg.Go(func() error {
+			groups, err := h.GroupRepo.ListByLibrary(egCtx, scopedID)
+			if err != nil {
+				return err
+			}
+			groupsCh <- groups
+			return nil
+		})
+	}
+	if err := eg.Wait(); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load collections")
+		return
+	}
+	collections := <-collectionsCh
+	var groups []models.LibraryCollectionGroup
+	if groupsCh != nil {
+		groups = <-groupsCh
+	}
+
+	resp := libraryCollectionsListResponse{
+		Collections: make([]libraryCollectionResponse, 0, len(collections)),
+	}
+	for _, collection := range collections {
+		resp.Collections = append(resp.Collections, h.toLibraryCollectionResponse(r, collection))
+	}
+	if libraryID != nil {
+		resp.Groups = toLibraryCollectionGroupResponses(groups)
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *LibraryCollectionHandler) HandleCreateAdminCollection(w http.ResponseWriter, r *http.Request) {
+	var req createLibraryCollectionRequest
+	if err := decodeJSONOrMultipart(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "Invalid request body")
+		return
+	}
+	if !hasLibrarySelection(req.LibraryID, req.LibraryIDs) || strings.TrimSpace(req.Title) == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "library_id/library_ids and title are required")
+		return
+	}
+	if req.Slug == "" {
+		req.Slug = slugifyCollectionName(req.Title)
+	}
+	if req.CollectionType == "" {
+		req.CollectionType = "manual"
+	}
+	queryDefinition := defaultJSON(req.QueryDefinition)
+	if req.CollectionType == "smart" || len(req.QueryDefinition) > 0 {
+		var err error
+		queryDefinition, err = normalizeQueryDefinitionJSON(queryDefinition, false, false)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "bad_request", "Invalid query_definition")
+			return
+		}
+	}
+
+	var syncSchedule *string
+	if s := strings.TrimSpace(req.SyncSchedule); s != "" {
+		if err := catalog.ParseCronExpression(s); err != nil {
+			writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+			return
+		}
+		syncSchedule = &s
+	}
+	managementMode, managementSource, managementKey, err := normalizeCollectionManagementFields(req.ManagementMode, req.ManagementSource, req.ManagementKey)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+
+	collection, err := h.repo.Create(r.Context(), catalog.CreateLibraryCollectionInput{
+		LibraryID:        req.LibraryID,
+		LibraryIDs:       req.LibraryIDs,
+		Slug:             req.Slug,
+		Title:            req.Title,
+		Description:      req.Description,
+		CollectionType:   req.CollectionType,
+		Visibility:       defaultCollectionVisibility(req.Visibility),
+		SortOrder:        req.SortOrder,
+		GroupID:          req.GroupID,
+		Featured:         req.Featured,
+		PosterURL:        req.PosterURL,
+		BackdropURL:      req.BackdropURL,
+		SourceURL:        req.SourceURL,
+		QueryDefinition:  queryDefinition,
+		SortConfig:       defaultJSON(req.SortConfig),
+		SourceConfig:     defaultCollectionSourceConfig(req.SourceConfig),
+		ManagementMode:   managementMode,
+		ManagementSource: managementSource,
+		ManagementKey:    managementKey,
+		SyncSchedule:     syncSchedule,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to create collection")
+		return
+	}
+
+	if err := h.processArtworkInputs(r, collection.ID, req.PosterSourceURL, req.BackdropSourceURL); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to process uploaded images")
+		return
+	}
+	if r.MultipartForm != nil || strings.TrimSpace(req.PosterSourceURL) != "" || strings.TrimSpace(req.BackdropSourceURL) != "" {
+		collection, err = h.repo.GetByID(r.Context(), collection.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load collection")
+			return
+		}
+	}
+	h.refreshSmartCountAsync(collection.ID)
+
+	writeJSON(w, http.StatusCreated, h.toLibraryCollectionResponse(r, collection))
+}
+
+func (h *LibraryCollectionHandler) HandleUpdateAdminCollection(w http.ResponseWriter, r *http.Request) {
+	collectionID := chi.URLParam(r, "id")
+	if collectionID == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "Collection ID is required")
+		return
+	}
+
+	var req updateLibraryCollectionRequest
+	if err := decodeJSONOrMultipart(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "Invalid request body")
+		return
+	}
+	queryDefinition := req.QueryDefinition
+	if len(req.QueryDefinition) > 0 {
+		var err error
+		queryDefinition, err = normalizeQueryDefinitionJSON(req.QueryDefinition, false, false)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "bad_request", "Invalid query_definition")
+			return
+		}
+	}
+
+	// Validate sync_schedule if provided.
+	if req.SyncSchedule != nil && *req.SyncSchedule != "" {
+		if err := catalog.ParseCronExpression(*req.SyncSchedule); err != nil {
+			writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+			return
+		}
+	}
+
+	var setGroupID **string
+	if req.GroupID.Set() {
+		groupID := req.GroupID.Value()
+		if groupID != nil && strings.TrimSpace(*groupID) == "" {
+			groupID = nil
+		}
+		setGroupID = &groupID
+	}
+
+	if err := h.repo.Update(r.Context(), catalog.UpdateLibraryCollectionInput{
+		ID:               collectionID,
+		LibraryIDs:       req.LibraryIDs,
+		Slug:             req.Slug,
+		Title:            req.Title,
+		Description:      req.Description,
+		CollectionType:   req.CollectionType,
+		Visibility:       req.Visibility,
+		SortOrder:        req.SortOrder,
+		SetGroupID:       setGroupID,
+		Featured:         req.Featured,
+		PosterURL:        req.PosterURL,
+		BackdropURL:      req.BackdropURL,
+		SourceURL:        req.SourceURL,
+		QueryDefinition:  queryDefinition,
+		SortConfig:       req.SortConfig,
+		SourceConfig:     req.SourceConfig,
+		ManagementMode:   normalizeOptionalCollectionManagementMode(req.ManagementMode),
+		ManagementSource: req.ManagementSource,
+		ManagementKey:    req.ManagementKey,
+		SyncSchedule:     req.SyncSchedule,
+	}); err != nil {
+		if err == catalog.ErrLibraryCollectionNotFound {
+			writeError(w, http.StatusNotFound, "not_found", "Collection not found")
+			return
+		}
+		if errors.Is(err, catalog.ErrLibraryCollectionGroupNotFound) {
+			writeError(w, http.StatusNotFound, "not_found", "Collection group not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to update collection")
+		return
+	}
+
+	if err := h.processArtworkInputs(r, collectionID, pointerStringValue(req.PosterSourceURL), pointerStringValue(req.BackdropSourceURL)); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to process uploaded images")
+		return
+	}
+
+	updated, err := h.repo.GetByID(r.Context(), collectionID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load collection")
+		return
+	}
+	if len(queryDefinition) > 0 || req.CollectionType != nil {
+		h.refreshSmartCountAsync(collectionID)
+	}
+	writeJSON(w, http.StatusOK, h.toLibraryCollectionResponse(r, updated))
+}
+
+func (h *LibraryCollectionHandler) HandlePreviewAdminCollection(w http.ResponseWriter, r *http.Request) {
+	if h.Executor == nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "Preview is not configured")
+		return
+	}
+
+	var req previewCollectionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "Invalid request body")
+		return
+	}
+
+	var def catalog.QueryDefinition
+	if len(req.QueryDefinition) > 0 {
+		normalized, err := normalizeQueryDefinitionJSON(req.QueryDefinition, false, false)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "bad_request", "Invalid query_definition")
+			return
+		}
+		if err := json.Unmarshal(normalized, &def); err != nil {
+			writeError(w, http.StatusBadRequest, "bad_request", "Invalid query_definition")
+			return
+		}
+	}
+
+	items, total, err := h.Executor.Preview(r.Context(), def, catalog.AccessFilter{}, req.Limit)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+
+	resp := previewLibraryCollectionResponse{Items: make([]itemListResponse, 0, len(items)), Total: total}
+	for _, item := range items {
+		resp.Items = append(resp.Items, h.toItemListResponse(r, item))
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *LibraryCollectionHandler) HandleDeleteCollectionImage(w http.ResponseWriter, r *http.Request) {
+	collectionID := chi.URLParam(r, "id")
+	if collectionID == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "Collection ID is required")
+		return
+	}
+
+	imageType := r.URL.Query().Get("type")
+	switch imageType {
+	case "poster", "backdrop":
+	default:
+		writeError(w, http.StatusBadRequest, "bad_request", "type must be \"poster\" or \"backdrop\"")
+		return
+	}
+
+	if err := h.deleteCollectionImages(r.Context(), collectionID, imageType); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to delete images")
+		return
+	}
+
+	empty := ""
+	notAutoGen := false
+	input := catalog.UpdateLibraryCollectionInput{ID: collectionID}
+	if imageType == "poster" {
+		input.PosterURL = &empty
+		input.PosterThumbhash = &empty
+		input.PosterAutoGenerated = &notAutoGen
+	} else {
+		input.BackdropURL = &empty
+		input.BackdropThumbhash = &empty
+	}
+	if err := h.repo.Update(r.Context(), input); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to update collection")
+		return
+	}
+
+	// After clearing, attempt to auto-generate a poster collage.
+	if imageType == "poster" && h.service.CollageGen != nil {
+		if err := h.GenerateCollectionPoster(r.Context(), collectionID); err != nil {
+			if errors.Is(err, collage.ErrNotEnoughImages) {
+				slog.Debug("collage: not enough images to regenerate after delete", "collection_id", collectionID)
+			} else {
+				slog.Warn("collage: failed to regenerate poster after delete", "collection_id", collectionID, "error", err)
+			}
+		}
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *LibraryCollectionHandler) HandleDeleteAdminCollection(w http.ResponseWriter, r *http.Request) {
+	collectionID := chi.URLParam(r, "id")
+	if collectionID == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "Collection ID is required")
+		return
+	}
+	if err := h.deleteServerCollection(r.Context(), collectionID); err != nil {
+		switch {
+		case errors.Is(err, errLibraryCollectionInUse):
+			writeError(w, http.StatusConflict, "collection_in_use", "Collection is used by one or more sections")
+		case errors.Is(err, catalog.ErrLibraryCollectionNotFound):
+			writeError(w, http.StatusNotFound, "not_found", "Collection not found")
+		default:
+			writeError(w, http.StatusInternalServerError, "internal_error", "Failed to delete collection")
+		}
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *LibraryCollectionHandler) deleteServerCollection(ctx context.Context, collectionID string) error {
+	if h.SectionRepo != nil {
+		refs, err := h.SectionRepo.CountLibraryCollectionReferences(ctx, collectionID, "")
+		if err != nil {
+			return fmt.Errorf("checking collection usage: %w", err)
+		}
+		if refs > 0 {
+			return errLibraryCollectionInUse
+		}
+	}
+
+	// Clean up S3 images before deleting the collection row. Failures here
+	// only leak storage; the collection row delete must still proceed so the
+	// admin's request succeeds.
+	if h.s3GP != nil {
+		prefix := fmt.Sprintf("collection-images/%s/", collectionID)
+		keys, err := h.s3GP.ListObjects(ctx, h.s3GP.Bucket(), prefix)
+		if err != nil {
+			slog.Warn("collection delete: listing S3 images failed; image keys may leak",
+				"collection_id", collectionID, "prefix", prefix, "error", err)
+		}
+		for _, key := range keys {
+			if err := h.s3GP.DeleteObject(ctx, h.s3GP.Bucket(), key); err != nil {
+				slog.Warn("collection delete: removing S3 image failed; key leaks",
+					"collection_id", collectionID, "key", key, "error", err)
+			}
+		}
+	}
+
+	return h.repo.Delete(ctx, collectionID)
+}
+
+type adminReorderCollectionsRequest struct {
+	LibraryID  int      `json:"library_id"`
+	OrderedIDs []string `json:"ordered_ids"`
+	GroupID    *string  `json:"group_id,omitempty"`
+}
+
+type adminReorderItemsRequest struct {
+	OrderedIDs []string `json:"ordered_ids"`
+}
+
+type adminCollectionItemRequest struct {
+	Position int `json:"position"`
+}
+
+// HandleReorderAdminCollections handles PUT /admin/collections/order.
+// Accepts a library_id and the full list of collection ids in the new order.
+func (h *LibraryCollectionHandler) HandleReorderAdminCollections(w http.ResponseWriter, r *http.Request) {
+	var req adminReorderCollectionsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "Invalid request body")
+		return
+	}
+	if req.LibraryID <= 0 {
+		writeError(w, http.StatusBadRequest, "bad_request", "library_id is required")
+		return
+	}
+	if err := h.repo.ReorderCollections(r.Context(), req.LibraryID, req.GroupID, req.OrderedIDs); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// requireManualCollection loads a collection by URL param "id" and rejects
+// the request unless it is a manual collection. Returns nil after writing
+// the appropriate HTTP error response if the collection is missing, of the
+// wrong type, or the database lookup failed.
+func (h *LibraryCollectionHandler) requireManualCollection(w http.ResponseWriter, r *http.Request) (string, bool) {
+	collectionID := chi.URLParam(r, "id")
+	if collectionID == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "Collection ID is required")
+		return "", false
+	}
+	collection, err := h.repo.GetByID(r.Context(), collectionID)
+	if err != nil {
+		if errors.Is(err, catalog.ErrLibraryCollectionNotFound) {
+			writeError(w, http.StatusNotFound, "not_found", "Collection not found")
+			return "", false
+		}
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load collection")
+		return "", false
+	}
+	if collection.CollectionType != "manual" {
+		writeError(w, http.StatusConflict, "collection_not_manual", "Only manual collections support manual items")
+		return "", false
+	}
+	return collectionID, true
+}
+
+// HandleReorderAdminCollectionItems handles PUT /admin/collections/{id}/items/order.
+// Manual collections only — synced types (mdblist/tmdb/trakt) and smart
+// collections reject the call.
+func (h *LibraryCollectionHandler) HandleReorderAdminCollectionItems(w http.ResponseWriter, r *http.Request) {
+	collectionID, ok := h.requireManualCollection(w, r)
+	if !ok {
+		return
+	}
+
+	var req adminReorderItemsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "Invalid request body")
+		return
+	}
+	if err := h.repo.ReorderItems(r.Context(), collectionID, req.OrderedIDs); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// HandleAddAdminCollectionItem handles PUT /admin/collections/{id}/items/{item_id}.
+// Adds an item or updates its position. Manual collections only.
+func (h *LibraryCollectionHandler) HandleAddAdminCollectionItem(w http.ResponseWriter, r *http.Request) {
+	collectionID, ok := h.requireManualCollection(w, r)
+	if !ok {
+		return
+	}
+	itemID := chi.URLParam(r, "item_id")
+	if itemID == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "item ID is required")
+		return
+	}
+
+	var req adminCollectionItemRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if !errors.Is(err, io.EOF) {
+			writeError(w, http.StatusBadRequest, "bad_request", "Invalid request body")
+			return
+		}
+		// Empty body is allowed; defaults to position 0.
+	}
+	if err := h.repo.AddItem(r.Context(), collectionID, itemID, req.Position); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to add collection item")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// HandleRemoveAdminCollectionItem handles DELETE /admin/collections/{id}/items/{item_id}.
+// Manual collections only.
+func (h *LibraryCollectionHandler) HandleRemoveAdminCollectionItem(w http.ResponseWriter, r *http.Request) {
+	collectionID, ok := h.requireManualCollection(w, r)
+	if !ok {
+		return
+	}
+	itemID := chi.URLParam(r, "item_id")
+	if itemID == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "item ID is required")
+		return
+	}
+	if err := h.repo.RemoveItem(r.Context(), collectionID, itemID); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to remove collection item")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *LibraryCollectionHandler) HandleSyncAdminCollection(w http.ResponseWriter, r *http.Request) {
+	collectionID := chi.URLParam(r, "id")
+	run, err := h.service.SyncCollection(r.Context(), collectionID)
+	if err != nil {
+		if errors.Is(err, catalog.ErrLibraryCollectionSyncUnsupported) {
+			writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to sync collection")
+		return
+	}
+	writeJSON(w, http.StatusOK, run)
+}
+
+func (h *LibraryCollectionHandler) templateRegistry() *templates.Registry {
+	if h.TemplateRegistry != nil {
+		return h.TemplateRegistry
+	}
+	return templates.Default
+}
+
+func (h *LibraryCollectionHandler) HandleListTemplateBundles(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, h.templateRegistry().BundleCatalog())
+}
+
+func (h *LibraryCollectionHandler) HandleApplyTemplateBundle(w http.ResponseWriter, r *http.Request) {
+	bundleID := chi.URLParam(r, "bundleID")
+	bundle, ok := h.templateRegistry().GetBundle(bundleID)
+	if !ok {
+		writeError(w, http.StatusNotFound, "not_found", "Template bundle not found")
+		return
+	}
+
+	var req applyTemplateBundleRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "Invalid request body")
+		return
+	}
+	libraryIDs := uniquePositiveInts(req.LibraryIDs)
+	if len(libraryIDs) == 0 {
+		writeError(w, http.StatusBadRequest, "bad_request", "library_ids is required")
+		return
+	}
+	if h.FolderRepo == nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "Library lookup is not configured")
+		return
+	}
+	if h.repo == nil || (!req.DryRun && h.service == nil) {
+		writeError(w, http.StatusInternalServerError, "internal_error", "Collection service is not configured")
+		return
+	}
+
+	libraries, err := h.FolderRepo.ListByIDs(r.Context(), libraryIDs)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load libraries")
+		return
+	}
+	librariesByID := make(map[int]*models.MediaFolder, len(libraries))
+	for _, library := range libraries {
+		librariesByID[library.ID] = library
+	}
+	if len(librariesByID) != len(libraryIDs) {
+		writeError(w, http.StatusBadRequest, "bad_request", "library_ids must reference enabled libraries")
+		return
+	}
+
+	// Detach from the request context so a closed client tab does not abort
+	// the apply mid-way and leave the bundle in a partially-created state.
+	// Re-runs are idempotent via the management_key uniqueness, but only if
+	// the server completes the work it started.
+	workCtx := context.WithoutCancel(r.Context())
+
+	resp := applyTemplateBundleResponse{
+		BundleID:       bundle.ID,
+		DryRun:         req.DryRun,
+		DeleteExisting: req.DeleteExisting,
+		Deleted:        []templateBundleCollectionEntry{},
+		DeleteSkipped:  []templateBundleCollectionEntry{},
+		DeleteFailed:   []templateBundleCollectionEntry{},
+		Created:        []templateBundleApplyEntry{},
+		Skipped:        []templateBundleApplyEntry{},
+		Failed:         []templateBundleApplyEntry{},
+		Featured:       []templateBundleFeaturedEntry{},
+		FeaturedFailed: []templateBundleFeaturedEntry{},
+	}
+
+	selectedLibraryIDs := make(map[int]struct{}, len(libraryIDs))
+	for _, libraryID := range libraryIDs {
+		selectedLibraryIDs[libraryID] = struct{}{}
+	}
+	if req.DeleteExisting {
+		if !req.DryRun && h.SectionRepo != nil {
+			// Generated featured sections must go before we delete the
+			// collections they reference; otherwise every following delete
+			// trips the in-use guard and the admin sees a misleading wall of
+			// "collection_in_use" errors.
+			if err := h.SectionRepo.DeleteGeneratedTemplateBundleFeaturedSections(workCtx, bundle.ID, libraryIDs); err != nil {
+				slog.Error("deleting generated template bundle featured sections", "bundle_id", bundle.ID, "error", err)
+				writeError(w, http.StatusInternalServerError, "delete_setup_failed", "Failed to clear generated featured sections before delete")
+				return
+			}
+		}
+		seenCollections := make(map[string]struct{})
+		for _, libraryID := range libraryIDs {
+			library := librariesByID[libraryID]
+			collections, err := h.repo.ListByLibrary(workCtx, libraryID, catalog.ListLibraryCollectionsOptions{IncludeHidden: true})
+			if err != nil {
+				resp.DeleteFailed = append(resp.DeleteFailed, templateBundleCollectionEntry{
+					LibraryID:   library.ID,
+					LibraryName: library.Name,
+					Reason:      err.Error(),
+				})
+				continue
+			}
+			for _, collection := range collections {
+				if _, ok := seenCollections[collection.ID]; ok {
+					continue
+				}
+				seenCollections[collection.ID] = struct{}{}
+				entry := templateBundleCollectionEntryForLibrary(collection, library, "")
+				if !allCollectionLibrariesSelected(collection, selectedLibraryIDs) {
+					entry.Reason = "shared_with_unselected_library"
+					resp.DeleteSkipped = append(resp.DeleteSkipped, entry)
+					continue
+				}
+				if req.DryRun {
+					entry.Reason = "would_delete"
+					resp.Deleted = append(resp.Deleted, entry)
+					continue
+				}
+				if err := h.deleteServerCollection(workCtx, collection.ID); err != nil {
+					entry.Reason = err.Error()
+					resp.DeleteFailed = append(resp.DeleteFailed, entry)
+					continue
+				}
+				entry.Reason = "deleted"
+				resp.Deleted = append(resp.Deleted, entry)
+			}
+		}
+	}
+
+	collectionRefs := make(map[templateBundleCollectionRefKey]templateBundleCollectionRef)
+	pendingSyncs := make([]pendingTemplateBundleSync, 0)
+	for _, libraryID := range libraryIDs {
+		library := librariesByID[libraryID]
+		for _, templateID := range bundle.TemplateIDs {
+			tmpl, ok := h.templateRegistry().Get(templateID)
+			if !ok {
+				resp.Failed = append(resp.Failed, templateBundleEntry(tmpl, templateID, library, "", "template_not_found"))
+				continue
+			}
+			entry := templateBundleEntry(tmpl, templateID, library, "", "")
+			if !templateEligibleForLibrary(tmpl, library) {
+				entry.Reason = "ineligible_library"
+				resp.Skipped = append(resp.Skipped, entry)
+				continue
+			}
+			key := templateBundleManagementKey(bundle.ID, templateID, library.ID)
+			existing, err := h.repo.GetByManagementKey(workCtx, collectionManagementModeTemplateBundle, bundle.ID, key)
+			if err == nil {
+				entry.CollectionID = existing.ID
+				entry.Reason = "already_exists"
+				resp.Skipped = append(resp.Skipped, entry)
+				collectionRefs[templateBundleCollectionRefKey{LibraryID: library.ID, TemplateID: tmpl.ID}] = templateBundleCollectionRef{
+					CollectionID: existing.ID,
+					Template:     tmpl,
+					Library:      library,
+				}
+				continue
+			}
+			if !errors.Is(err, catalog.ErrLibraryCollectionNotFound) {
+				entry.Reason = err.Error()
+				resp.Failed = append(resp.Failed, entry)
+				continue
+			}
+			if req.DryRun {
+				entry.Reason = "would_create"
+				resp.Created = append(resp.Created, entry)
+				collectionRefs[templateBundleCollectionRefKey{LibraryID: library.ID, TemplateID: tmpl.ID}] = templateBundleCollectionRef{
+					Template: tmpl,
+					Library:  library,
+				}
+				continue
+			}
+
+			collection, err := h.createCollectionFromTemplate(workCtx, bundle.ID, tmpl, library.ID, key)
+			if err != nil {
+				entry.Reason = err.Error()
+				resp.Failed = append(resp.Failed, entry)
+				continue
+			}
+			entry.CollectionID = collection.ID
+			pendingSyncs = append(pendingSyncs, pendingTemplateBundleSync{
+				CollectionID: collection.ID,
+				Entry:        entry,
+			})
+		}
+	}
+
+	if len(pendingSyncs) > 0 {
+		created, failed := h.syncTemplateBundleCollections(workCtx, pendingSyncs)
+		resp.Created = append(resp.Created, created...)
+		resp.Failed = append(resp.Failed, failed...)
+		for _, entry := range created {
+			library := librariesByID[entry.LibraryID]
+			tmpl, _ := h.templateRegistry().Get(entry.TemplateID)
+			collectionRefs[templateBundleCollectionRefKey{LibraryID: entry.LibraryID, TemplateID: entry.TemplateID}] = templateBundleCollectionRef{
+				CollectionID: entry.CollectionID,
+				Template:     tmpl,
+				Library:      library,
+			}
+		}
+		h.generateTemplateBundleCollagesAsync(created)
+	}
+
+	if req.Featured != nil {
+		featured, failed := h.applyTemplateBundleFeaturedSections(
+			workCtx,
+			bundle,
+			req.Featured,
+			librariesByID,
+			collectionRefs,
+			req.DryRun,
+		)
+		resp.Featured = append(resp.Featured, featured...)
+		resp.FeaturedFailed = append(resp.FeaturedFailed, failed...)
+	}
+
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *LibraryCollectionHandler) syncTemplateBundleCollections(
+	ctx context.Context,
+	pending []pendingTemplateBundleSync,
+) ([]templateBundleApplyEntry, []templateBundleApplyEntry) {
+	type syncResult struct {
+		entry templateBundleApplyEntry
+		err   error
+	}
+	results := make([]syncResult, len(pending))
+	var eg errgroup.Group
+	eg.SetLimit(templateBundleSyncConcurrency)
+	for i, item := range pending {
+		i, item := i, item
+		eg.Go(func() error {
+			_, err := h.service.SyncCollectionWithOptions(ctx, item.CollectionID, catalog.SyncCollectionOptions{
+				SkipCollage: true,
+			})
+			results[i] = syncResult{entry: item.Entry, err: err}
+			return nil
+		})
+	}
+	_ = eg.Wait()
+
+	created := make([]templateBundleApplyEntry, 0, len(pending))
+	failed := make([]templateBundleApplyEntry, 0)
+	for _, result := range results {
+		if result.err != nil {
+			result.entry.Reason = result.err.Error()
+			failed = append(failed, result.entry)
+			continue
+		}
+		created = append(created, result.entry)
+	}
+	return created, failed
+}
+
+func (h *LibraryCollectionHandler) generateTemplateBundleCollagesAsync(entries []templateBundleApplyEntry) {
+	if h.service == nil || h.service.CollageGen == nil || len(entries) == 0 {
+		return
+	}
+	collectionIDs := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.CollectionID != "" {
+			collectionIDs = append(collectionIDs, entry.CollectionID)
+		}
+	}
+	if len(collectionIDs) == 0 {
+		return
+	}
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), templateBundleCollageTimeout)
+		defer cancel()
+
+		var eg errgroup.Group
+		eg.SetLimit(templateBundleCollageConcurrency)
+		for _, collectionID := range collectionIDs {
+			collectionID := collectionID
+			eg.Go(func() error {
+				if err := h.service.CollageGen.GenerateCollectionPoster(ctx, collectionID); err != nil {
+					if errors.Is(err, collage.ErrNotEnoughImages) {
+						slog.Debug("collage: not enough images", "collection_id", collectionID)
+					} else {
+						slog.Warn("collage: async poster generation failed", "collection_id", collectionID, "error", err)
+					}
+				}
+				return nil
+			})
+		}
+		_ = eg.Wait()
+	}()
+}
+
+func (h *LibraryCollectionHandler) applyTemplateBundleFeaturedSections(
+	ctx context.Context,
+	bundle templates.Bundle,
+	req *templateBundleFeaturedRequest,
+	librariesByID map[int]*models.MediaFolder,
+	collectionRefs map[templateBundleCollectionRefKey]templateBundleCollectionRef,
+	dryRun bool,
+) ([]templateBundleFeaturedEntry, []templateBundleFeaturedEntry) {
+	if req == nil {
+		return nil, nil
+	}
+	featured := make([]templateBundleFeaturedEntry, 0)
+	failed := make([]templateBundleFeaturedEntry, 0)
+
+	if req.Home != nil && strings.TrimSpace(req.Home.TemplateID) != "" {
+		ok, fail := h.applyTemplateBundleFeaturedSelection(ctx, bundle, "home", req.Home.LibraryID, req.Home.TemplateID, librariesByID, collectionRefs, dryRun)
+		if fail != nil {
+			failed = append(failed, *fail)
+		} else if ok != nil {
+			featured = append(featured, *ok)
+		}
+	}
+
+	libraryIDs := make([]int, 0, len(req.Libraries))
+	for libraryID := range req.Libraries {
+		libraryIDs = append(libraryIDs, libraryID)
+	}
+	sort.Ints(libraryIDs)
+	for _, libraryID := range libraryIDs {
+		templateID := strings.TrimSpace(req.Libraries[libraryID])
+		if templateID == "" {
+			continue
+		}
+		ok, fail := h.applyTemplateBundleFeaturedSelection(ctx, bundle, "library", libraryID, templateID, librariesByID, collectionRefs, dryRun)
+		if fail != nil {
+			failed = append(failed, *fail)
+			continue
+		}
+		if ok != nil {
+			featured = append(featured, *ok)
+		}
+	}
+
+	return featured, failed
+}
+
+func (h *LibraryCollectionHandler) applyTemplateBundleFeaturedSelection(
+	ctx context.Context,
+	bundle templates.Bundle,
+	surface string,
+	libraryID int,
+	templateID string,
+	librariesByID map[int]*models.MediaFolder,
+	collectionRefs map[templateBundleCollectionRefKey]templateBundleCollectionRef,
+	dryRun bool,
+) (*templateBundleFeaturedEntry, *templateBundleFeaturedEntry) {
+	library := librariesByID[libraryID]
+	tmpl, ok := h.templateRegistry().Get(templateID)
+	entry := templateBundleFeaturedEntry{
+		Surface:    surface,
+		LibraryID:  libraryID,
+		TemplateID: templateID,
+	}
+	if library != nil {
+		entry.LibraryName = library.Name
+	}
+	if ok {
+		entry.TemplateTitle = tmpl.Title
+	}
+
+	fail := func(reason string) (*templateBundleFeaturedEntry, *templateBundleFeaturedEntry) {
+		entry.Reason = reason
+		return nil, &entry
+	}
+
+	if library == nil {
+		return fail("library_not_selected")
+	}
+	if !ok {
+		return fail("template_not_found")
+	}
+	if !slices.Contains(bundle.TemplateIDs, templateID) {
+		return fail("template_not_in_bundle")
+	}
+	if !templateEligibleForLibrary(tmpl, library) {
+		return fail("ineligible_library")
+	}
+	ref, ok := collectionRefs[templateBundleCollectionRefKey{LibraryID: libraryID, TemplateID: templateID}]
+	if !ok {
+		return fail("collection_not_available")
+	}
+	entry.CollectionID = ref.CollectionID
+	if dryRun {
+		entry.Reason = "would_create"
+		return &entry, nil
+	}
+	if h.SectionRepo == nil {
+		return fail("section_repo_not_configured")
+	}
+
+	sectionID, err := h.upsertTemplateBundleFeaturedSection(ctx, bundle.ID, surface, ref)
+	if err != nil {
+		return fail(err.Error())
+	}
+	entry.SectionID = sectionID
+	entry.Reason = "created"
+	return &entry, nil
+}
+
+func (h *LibraryCollectionHandler) upsertTemplateBundleFeaturedSection(
+	ctx context.Context,
+	bundleID string,
+	surface string,
+	ref templateBundleCollectionRef,
+) (string, error) {
+	if h.SectionRepo == nil {
+		return "", fmt.Errorf("section repo not configured")
+	}
+	if ref.Library == nil {
+		return "", fmt.Errorf("library not available")
+	}
+	if ref.CollectionID == "" {
+		return "", fmt.Errorf("collection not available")
+	}
+
+	scope := "home"
+	var sectionLibraryID *int
+	if surface == "library" {
+		scope = "library"
+		libraryID := ref.Library.ID
+		sectionLibraryID = &libraryID
+	}
+
+	config, err := templateBundleFeaturedSectionConfig(bundleID, surface, ref)
+	if err != nil {
+		return "", err
+	}
+
+	existing, err := h.SectionRepo.GetGeneratedTemplateBundleFeaturedSection(ctx, bundleID, scope, sectionLibraryID)
+	if err == nil {
+		existing.SectionType = sections.SectionCollection
+		existing.Title = ref.Template.Title
+		existing.Featured = true
+		existing.ItemLimit = templateBundleFeaturedSectionItemLimit
+		existing.Config = config
+		existing.Enabled = true
+		if err := h.SectionRepo.Update(ctx, existing); err != nil {
+			return "", err
+		}
+		if err := h.SectionRepo.ClearFeaturedForSurface(ctx, scope, sectionLibraryID, existing.ID); err != nil {
+			return "", err
+		}
+		return existing.ID, nil
+	}
+	if !errors.Is(err, sections.ErrSectionNotFound) {
+		return "", err
+	}
+
+	created, err := h.SectionRepo.Create(ctx, &sections.PageSection{
+		Scope:       scope,
+		LibraryID:   sectionLibraryID,
+		Position:    0,
+		SectionType: sections.SectionCollection,
+		Title:       ref.Template.Title,
+		Featured:    true,
+		ItemLimit:   templateBundleFeaturedSectionItemLimit,
+		Config:      config,
+		Enabled:     true,
+	})
+	if err != nil {
+		return "", err
+	}
+	if err := h.SectionRepo.ClearFeaturedForSurface(ctx, scope, sectionLibraryID, created.ID); err != nil {
+		return "", err
+	}
+	return created.ID, nil
+}
+
+const templateBundleFeaturedSectionItemLimit = 12
+
+func templateBundleFeaturedSectionConfig(
+	bundleID string,
+	surface string,
+	ref templateBundleCollectionRef,
+) (json.RawMessage, error) {
+	payload := map[string]any{
+		"library_collection_id": ref.CollectionID,
+		"generated_source":      "template_bundle_featured",
+		"template_bundle":       bundleID,
+		"template_id":           ref.Template.ID,
+		"surface":               surface,
+		"library_id":            ref.Library.ID,
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("building featured section config: %w", err)
+	}
+	return raw, nil
+}
+
+func (h *LibraryCollectionHandler) createCollectionFromTemplate(
+	ctx context.Context,
+	bundleID string,
+	tmpl templates.Template,
+	libraryID int,
+	managementKey string,
+) (*models.LibraryCollection, error) {
+	limit := templateLimitPtr(tmpl)
+	switch tmpl.Source {
+	case templates.SourceTMDB:
+		if tmpl.TMDB == nil {
+			return nil, fmt.Errorf("template %q is missing TMDB config", tmpl.ID)
+		}
+		return h.createTMDBCollection(ctx, importTMDBRequest{
+			LibraryID:        libraryID,
+			Title:            tmpl.Title,
+			Description:      tmpl.Description,
+			Preset:           tmpl.TMDB.Preset,
+			TimeWindow:       tmpl.TMDB.TimeWindow,
+			MediaType:        tmpl.TMDB.MediaType,
+			Limit:            limit,
+			Featured:         tmpl.Featured,
+			SyncSchedule:     tmpl.DefaultSyncSchedule,
+			ManagementMode:   collectionManagementModeTemplateBundle,
+			ManagementSource: bundleID,
+			ManagementKey:    managementKey,
+		})
+	case templates.SourceMDBList:
+		if tmpl.MDBList == nil || strings.TrimSpace(tmpl.MDBList.URL) == "" {
+			return nil, fmt.Errorf("template %q is missing MDBList URL", tmpl.ID)
+		}
+		return h.createMDBListCollection(ctx, importMDBListRequest{
+			LibraryID:        libraryID,
+			Title:            tmpl.Title,
+			Description:      tmpl.Description,
+			URL:              tmpl.MDBList.URL,
+			Limit:            limit,
+			Featured:         tmpl.Featured,
+			SyncSchedule:     tmpl.DefaultSyncSchedule,
+			ManagementMode:   collectionManagementModeTemplateBundle,
+			ManagementSource: bundleID,
+			ManagementKey:    managementKey,
+		})
+	case templates.SourceTMDBCollection:
+		if tmpl.TMDBCollection == nil {
+			return nil, fmt.Errorf("template %q is missing TMDBCollection config", tmpl.ID)
+		}
+		return h.createTMDBFranchiseCollection(ctx, importTMDBFranchiseRequest{
+			LibraryID:        libraryID,
+			Title:            tmpl.Title,
+			Description:      tmpl.Description,
+			CollectionID:     tmpl.TMDBCollection.CollectionID,
+			Limit:            limit,
+			Featured:         tmpl.Featured,
+			SyncSchedule:     tmpl.DefaultSyncSchedule,
+			ManagementMode:   collectionManagementModeTemplateBundle,
+			ManagementSource: bundleID,
+			ManagementKey:    managementKey,
+		})
+	case templates.SourceTMDBDiscover:
+		if tmpl.TMDBDiscover == nil {
+			return nil, fmt.Errorf("template %q is missing TMDBDiscover config", tmpl.ID)
+		}
+		return h.createTMDBDiscoverCollection(ctx, importTMDBDiscoverRequest{
+			LibraryID:   libraryID,
+			Title:       tmpl.Title,
+			Description: tmpl.Description,
+			MediaType:   tmpl.TMDBDiscover.MediaType,
+			Spec: importTMDBDiscoverSpecBody{
+				WithGenres:       tmpl.TMDBDiscover.WithGenres,
+				WithoutGenres:    tmpl.TMDBDiscover.WithoutGenres,
+				SortBy:           tmpl.TMDBDiscover.SortBy,
+				VoteCountGte:     tmpl.TMDBDiscover.VoteCountGte,
+				VoteAverageGte:   tmpl.TMDBDiscover.VoteAverageGte,
+				ReleaseDateGte:   tmpl.TMDBDiscover.ReleaseDateGte,
+				ReleaseDateLte:   tmpl.TMDBDiscover.ReleaseDateLte,
+				Certifications:   tmpl.TMDBDiscover.Certifications,
+				CertificationLte: tmpl.TMDBDiscover.CertificationLte,
+				WithRuntimeGte:   tmpl.TMDBDiscover.WithRuntimeGte,
+				WithRuntimeLte:   tmpl.TMDBDiscover.WithRuntimeLte,
+				OriginalLanguage: tmpl.TMDBDiscover.OriginalLanguage,
+			},
+			Limit:            limit,
+			Featured:         tmpl.Featured,
+			SyncSchedule:     tmpl.DefaultSyncSchedule,
+			ManagementMode:   collectionManagementModeTemplateBundle,
+			ManagementSource: bundleID,
+			ManagementKey:    managementKey,
+		})
+	default:
+		return nil, fmt.Errorf("template source %q is not supported by bundles", tmpl.Source)
+	}
+}
+
+func (h *LibraryCollectionHandler) createMDBListCollection(
+	ctx context.Context,
+	req importMDBListRequest,
+) (*models.LibraryCollection, error) {
+	var syncSchedule *string
+	if s := strings.TrimSpace(req.SyncSchedule); s != "" {
+		if err := catalog.ParseCronExpression(s); err != nil {
+			return nil, requestValidationError{err: err}
+		}
+		syncSchedule = &s
+	}
+
+	normalizedURL := usercollections.NormalizeMDBListURL(req.URL)
+	sourceConfig, err := buildMDBListSourceConfig(normalizedURL, req.Limit)
+	if err != nil {
+		return nil, fmt.Errorf("building MDBList source config: %w", err)
+	}
+	managementMode, managementSource, managementKey, err := normalizeCollectionManagementFields(req.ManagementMode, req.ManagementSource, req.ManagementKey)
+	if err != nil {
+		return nil, requestValidationError{err: err}
+	}
+	collection, err := h.repo.Create(ctx, catalog.CreateLibraryCollectionInput{
+		LibraryID:        req.LibraryID,
+		LibraryIDs:       req.LibraryIDs,
+		Slug:             slugifyCollectionName(req.Title),
+		Title:            req.Title,
+		Description:      req.Description,
+		CollectionType:   "mdblist",
+		Visibility:       "visible",
+		Featured:         req.Featured,
+		SourceURL:        req.URL,
+		SourceConfig:     sourceConfig,
+		ManagementMode:   managementMode,
+		ManagementSource: managementSource,
+		ManagementKey:    managementKey,
+		SyncSchedule:     syncSchedule,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("creating collection: %w", err)
+	}
+	return collection, nil
+}
+
+func (h *LibraryCollectionHandler) createTMDBCollection(
+	ctx context.Context,
+	req importTMDBRequest,
+) (*models.LibraryCollection, error) {
+	preset, mediaType, timeWindow, err := normalizeTMDBPresetRequest(req.Preset, req.MediaType, req.TimeWindow)
+	if err != nil {
+		return nil, requestValidationError{err: err}
+	}
+
+	var syncSchedule *string
+	if s := strings.TrimSpace(req.SyncSchedule); s != "" {
+		if err := catalog.ParseCronExpression(s); err != nil {
+			return nil, requestValidationError{err: err}
+		}
+		syncSchedule = &s
+	}
+
+	sourceConfig, err := buildTMDBSourceConfig(preset, mediaType, timeWindow, req.Limit)
+	if err != nil {
+		return nil, fmt.Errorf("building TMDB source config: %w", err)
+	}
+	managementMode, managementSource, managementKey, err := normalizeCollectionManagementFields(req.ManagementMode, req.ManagementSource, req.ManagementKey)
+	if err != nil {
+		return nil, requestValidationError{err: err}
+	}
+	collection, err := h.repo.Create(ctx, catalog.CreateLibraryCollectionInput{
+		LibraryID:        req.LibraryID,
+		LibraryIDs:       req.LibraryIDs,
+		Slug:             slugifyCollectionName(req.Title),
+		Title:            req.Title,
+		Description:      req.Description,
+		CollectionType:   "tmdb",
+		Visibility:       "visible",
+		Featured:         req.Featured,
+		SourceURL:        buildTMDBSourceURL(preset, mediaType, timeWindow),
+		SourceConfig:     sourceConfig,
+		ManagementMode:   managementMode,
+		ManagementSource: managementSource,
+		ManagementKey:    managementKey,
+		SyncSchedule:     syncSchedule,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("creating collection: %w", err)
+	}
+	return collection, nil
+}
+
+// createTMDBFranchiseCollection persists a TMDB-franchise-backed library
+// collection. It re-uses collection_type "tmdb" (set on the existing TMDB
+// preset path) so listing/admin filters that group by collection_type don't
+// need to learn a new discriminator — the source distinction lives entirely
+// in source_config.mode.
+//
+// A CollectionID of 0 is allowed at create time: this is how the bundle-apply
+// flow materializes the catalog's generic "TMDB Franchise" placeholder
+// template. The first sync against such a row records a failed run with a
+// human-readable explanation prompting the admin to edit the config.
+func (h *LibraryCollectionHandler) createTMDBFranchiseCollection(
+	ctx context.Context,
+	req importTMDBFranchiseRequest,
+) (*models.LibraryCollection, error) {
+	if req.CollectionID < 0 {
+		return nil, requestValidationError{err: fmt.Errorf("collection_id must be >= 0")}
+	}
+
+	var syncSchedule *string
+	if s := strings.TrimSpace(req.SyncSchedule); s != "" {
+		if err := catalog.ParseCronExpression(s); err != nil {
+			return nil, requestValidationError{err: err}
+		}
+		syncSchedule = &s
+	}
+
+	sourceConfig, err := buildTMDBCollectionSourceConfig(req.CollectionID, req.Limit)
+	if err != nil {
+		return nil, fmt.Errorf("building TMDB franchise source config: %w", err)
+	}
+	managementMode, managementSource, managementKey, err := normalizeCollectionManagementFields(req.ManagementMode, req.ManagementSource, req.ManagementKey)
+	if err != nil {
+		return nil, requestValidationError{err: err}
+	}
+	collection, err := h.repo.Create(ctx, catalog.CreateLibraryCollectionInput{
+		LibraryID:        req.LibraryID,
+		LibraryIDs:       req.LibraryIDs,
+		Slug:             slugifyCollectionName(req.Title),
+		Title:            req.Title,
+		Description:      req.Description,
+		CollectionType:   "tmdb",
+		Visibility:       "visible",
+		Featured:         req.Featured,
+		SourceURL:        buildTMDBCollectionSourceURL(req.CollectionID),
+		SourceConfig:     sourceConfig,
+		ManagementMode:   managementMode,
+		ManagementSource: managementSource,
+		ManagementKey:    managementKey,
+		SyncSchedule:     syncSchedule,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("creating collection: %w", err)
+	}
+	return collection, nil
+}
+
+// createTMDBDiscoverCollection persists a TMDB-discover-backed library
+// collection. Like createTMDBFranchiseCollection, it re-uses collection_type
+// "tmdb" so admin listings don't need to learn another discriminator — the
+// discover specialization lives entirely in source_config.mode.
+func (h *LibraryCollectionHandler) createTMDBDiscoverCollection(
+	ctx context.Context,
+	req importTMDBDiscoverRequest,
+) (*models.LibraryCollection, error) {
+	if err := validateTMDBDiscoverRequest(req); err != nil {
+		return nil, requestValidationError{err: err}
+	}
+
+	var syncSchedule *string
+	if s := strings.TrimSpace(req.SyncSchedule); s != "" {
+		if err := catalog.ParseCronExpression(s); err != nil {
+			return nil, requestValidationError{err: err}
+		}
+		syncSchedule = &s
+	}
+
+	sourceConfig, err := buildTMDBDiscoverSourceConfig(req.MediaType, req.Spec, req.Limit)
+	if err != nil {
+		return nil, fmt.Errorf("building TMDB discover source config: %w", err)
+	}
+	managementMode, managementSource, managementKey, err := normalizeCollectionManagementFields(req.ManagementMode, req.ManagementSource, req.ManagementKey)
+	if err != nil {
+		return nil, requestValidationError{err: err}
+	}
+	collection, err := h.repo.Create(ctx, catalog.CreateLibraryCollectionInput{
+		LibraryID:        req.LibraryID,
+		LibraryIDs:       req.LibraryIDs,
+		Slug:             slugifyCollectionName(req.Title),
+		Title:            req.Title,
+		Description:      req.Description,
+		CollectionType:   "tmdb",
+		Visibility:       "visible",
+		Featured:         req.Featured,
+		SourceURL:        buildTMDBDiscoverSourceURL(req.MediaType, req.Spec.SortBy),
+		SourceConfig:     sourceConfig,
+		ManagementMode:   managementMode,
+		ManagementSource: managementSource,
+		ManagementKey:    managementKey,
+		SyncSchedule:     syncSchedule,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("creating collection: %w", err)
+	}
+	return collection, nil
+}
+
+// validateTMDBDiscoverRequest performs basic sanity checks on the request
+// body. The deeper spec validation (sort_by, date formats, etc.) lives on
+// templates.validateTMDBDiscover; reuse via importTMDBDiscoverSpecBody isn't
+// straightforward, so this duplicates the most user-facing checks and leaves
+// nuance to the catalog sync.
+func validateTMDBDiscoverRequest(req importTMDBDiscoverRequest) error {
+	switch req.MediaType {
+	case "movie", "tv":
+	default:
+		return fmt.Errorf("media_type must be \"movie\" or \"tv\"")
+	}
+	if strings.TrimSpace(req.Spec.SortBy) == "" {
+		return fmt.Errorf("spec.sort_by is required")
+	}
+	if req.Limit != nil && *req.Limit <= 0 {
+		return fmt.Errorf("limit must be greater than 0")
+	}
+	return nil
+}
+
+func (h *LibraryCollectionHandler) HandleImportMDBList(w http.ResponseWriter, r *http.Request) {
+	var req importMDBListRequest
+	if err := decodeJSONOrMultipart(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "Invalid request body")
+		return
+	}
+	if !hasLibrarySelection(req.LibraryID, req.LibraryIDs) || strings.TrimSpace(req.Title) == "" || strings.TrimSpace(req.URL) == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "library_id/library_ids, title, and url are required")
+		return
+	}
+	if req.Limit != nil && *req.Limit <= 0 {
+		writeError(w, http.StatusBadRequest, "bad_request", "limit must be greater than 0")
+		return
+	}
+
+	collection, err := h.createMDBListCollection(r.Context(), req)
+	if err != nil {
+		var validationErr requestValidationError
+		if errors.As(err, &validationErr) {
+			writeError(w, http.StatusBadRequest, "bad_request", validationErr.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to create collection")
+		return
+	}
+
+	// Process admin artwork before sync so maybeGenerateCollage sees the
+	// uploaded poster and skips collage generation.
+	if err := h.processArtworkInputs(r, collection.ID, req.PosterSourceURL, req.BackdropSourceURL); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to process uploaded images")
+		return
+	}
+
+	run, err := h.service.SyncCollection(r.Context(), collection.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to import MDBList collection")
+		return
+	}
+
+	refreshed, err := h.repo.GetByID(r.Context(), collection.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load collection")
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, importCollectionResponse{
+		Collection: h.toLibraryCollectionResponse(r, refreshed),
+		SyncRun:    run,
+	})
+}
+
+func (h *LibraryCollectionHandler) HandleImportTMDBCollection(w http.ResponseWriter, r *http.Request) {
+	var req importTMDBRequest
+	if err := decodeJSONOrMultipart(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "Invalid request body")
+		return
+	}
+	if !hasLibrarySelection(req.LibraryID, req.LibraryIDs) || strings.TrimSpace(req.Title) == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "library_id/library_ids and title are required")
+		return
+	}
+	if _, _, _, err := normalizeTMDBPresetRequest(req.Preset, req.MediaType, req.TimeWindow); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	if req.Limit != nil && *req.Limit <= 0 {
+		writeError(w, http.StatusBadRequest, "bad_request", "limit must be greater than 0")
+		return
+	}
+
+	collection, err := h.createTMDBCollection(r.Context(), req)
+	if err != nil {
+		var validationErr requestValidationError
+		if errors.As(err, &validationErr) {
+			writeError(w, http.StatusBadRequest, "bad_request", validationErr.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to create collection")
+		return
+	}
+
+	// Process admin artwork before sync so maybeGenerateCollage sees the
+	// uploaded poster and skips collage generation.
+	if err := h.processArtworkInputs(r, collection.ID, req.PosterSourceURL, req.BackdropSourceURL); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to process uploaded images")
+		return
+	}
+
+	run, err := h.service.SyncCollection(r.Context(), collection.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to sync TMDB collection")
+		return
+	}
+
+	refreshed, err := h.repo.GetByID(r.Context(), collection.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load collection")
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, importCollectionResponse{
+		Collection: h.toLibraryCollectionResponse(r, refreshed),
+		SyncRun:    run,
+	})
+}
+
+func (h *LibraryCollectionHandler) HandleImportTraktCollection(w http.ResponseWriter, r *http.Request) {
+	var req importTraktRequest
+	if err := decodeJSONOrMultipart(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "Invalid request body")
+		return
+	}
+	if !hasLibrarySelection(req.LibraryID, req.LibraryIDs) || strings.TrimSpace(req.Title) == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "library_id/library_ids and title are required")
+		return
+	}
+	preset, mediaType, profileID, err := normalizeTraktPresetRequest(req.Preset, req.MediaType, req.ProfileID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	if req.Limit != nil && *req.Limit <= 0 {
+		writeError(w, http.StatusBadRequest, "bad_request", "limit must be greater than 0")
+		return
+	}
+
+	var syncSchedule *string
+	if s := strings.TrimSpace(req.SyncSchedule); s != "" {
+		if err := catalog.ParseCronExpression(s); err != nil {
+			writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+			return
+		}
+		syncSchedule = &s
+	}
+
+	sourceConfig, err := buildTraktSourceConfig(preset, mediaType, profileID, req.Limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to build source config")
+		return
+	}
+	managementMode, managementSource, managementKey, err := normalizeCollectionManagementFields(req.ManagementMode, req.ManagementSource, req.ManagementKey)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+
+	collection, err := h.repo.Create(r.Context(), catalog.CreateLibraryCollectionInput{
+		LibraryID:        req.LibraryID,
+		LibraryIDs:       req.LibraryIDs,
+		Slug:             slugifyCollectionName(req.Title),
+		Title:            req.Title,
+		Description:      req.Description,
+		CollectionType:   "trakt",
+		Visibility:       "visible",
+		Featured:         req.Featured,
+		SourceURL:        buildTraktSourceURL(preset, mediaType, profileID),
+		SourceConfig:     sourceConfig,
+		ManagementMode:   managementMode,
+		ManagementSource: managementSource,
+		ManagementKey:    managementKey,
+		SyncSchedule:     syncSchedule,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to create collection")
+		return
+	}
+
+	if err := h.processArtworkInputs(r, collection.ID, req.PosterSourceURL, req.BackdropSourceURL); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to process uploaded images")
+		return
+	}
+
+	run, err := h.service.SyncCollection(r.Context(), collection.ID)
+	if err != nil {
+		slog.Error("failed to sync imported Trakt collection",
+			"collection_id", collection.ID,
+			"library_id", req.LibraryID,
+			"title", req.Title,
+			"preset", preset,
+			"media_type", mediaType,
+			"error", err,
+		)
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to sync Trakt collection")
+		return
+	}
+
+	refreshed, err := h.repo.GetByID(r.Context(), collection.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load collection")
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, importCollectionResponse{
+		Collection: h.toLibraryCollectionResponse(r, refreshed),
+		SyncRun:    run,
+	})
+}
+
+func (h *LibraryCollectionHandler) loadOrderedCollectionItems(r *http.Request, collectionID string) ([]itemListResponse, error) {
+	collectionItems, err := h.repo.ListItems(r.Context(), collectionID)
+	if err != nil {
+		return nil, err
+	}
+
+	contentIDs := make([]string, 0, len(collectionItems))
+	for _, item := range collectionItems {
+		contentIDs = append(contentIDs, item.MediaItemID)
+	}
+
+	items, err := h.itemRepo.GetByIDs(r.Context(), contentIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	itemByID := make(map[string]*models.MediaItem, len(items))
+	for _, item := range items {
+		itemByID[item.ContentID] = item
+	}
+
+	resp := make([]itemListResponse, 0, len(collectionItems))
+	for _, collectionItem := range collectionItems {
+		item, ok := itemByID[collectionItem.MediaItemID]
+		if !ok {
+			continue
+		}
+		resp = append(resp, h.toItemListResponse(r, item))
+	}
+	return resp, nil
+}
+
+func (h *LibraryCollectionHandler) loadLiveCollectionItems(r *http.Request, collection *models.LibraryCollection) ([]itemListResponse, error) {
+	if h.Executor == nil {
+		return nil, fmt.Errorf("query executor is not configured")
+	}
+
+	var def catalog.QueryDefinition
+	if len(collection.QueryDefinition) > 0 {
+		if err := json.Unmarshal(collection.QueryDefinition, &def); err != nil {
+			return nil, smartCollectionQueryError{fmt.Errorf("parsing smart collection query definition: %w", err)}
+		}
+	}
+	def = def.Normalize()
+	if err := def.ValidateWithOptions(false, false); err != nil {
+		return nil, smartCollectionQueryError{fmt.Errorf("validating smart collection query definition: %w", err)}
+	}
+
+	switch {
+	case len(collection.LibraryIDs) > 0:
+		def.LibraryIDs = intersectCollectionLibraryIDs(def.LibraryIDs, collection.LibraryIDs)
+		if len(def.LibraryIDs) == 0 {
+			return []itemListResponse{}, nil
+		}
+	case collection.LibraryID > 0:
+		def.LibraryIDs = intersectCollectionLibraryIDs(def.LibraryIDs, []int{collection.LibraryID})
+		if len(def.LibraryIDs) == 0 {
+			return []itemListResponse{}, nil
+		}
+	}
+
+	items, total, err := h.Executor.Preview(r.Context(), def, requestAccessFilter(r), 1)
+	if err != nil {
+		return nil, err
+	}
+	if total == 0 {
+		return []itemListResponse{}, nil
+	}
+	if total > len(items) {
+		items, _, err = h.Executor.Preview(r.Context(), def, requestAccessFilter(r), total)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	resp := make([]itemListResponse, 0, len(items))
+	for _, item := range items {
+		resp = append(resp, h.toItemListResponse(r, item))
+	}
+	return resp, nil
+}
+
+type smartCollectionQueryError struct {
+	err error
+}
+
+func (e smartCollectionQueryError) Error() string {
+	return e.err.Error()
+}
+
+func (e smartCollectionQueryError) Unwrap() error {
+	return e.err
+}
+
+func intersectCollectionLibraryIDs(existing, required []int) []int {
+	if len(required) == 0 {
+		return append([]int(nil), existing...)
+	}
+	if len(existing) == 0 {
+		return append([]int(nil), required...)
+	}
+
+	allowed := make(map[int]struct{}, len(required))
+	for _, id := range required {
+		allowed[id] = struct{}{}
+	}
+
+	result := make([]int, 0, len(existing))
+	seen := make(map[int]struct{}, len(existing))
+	for _, id := range existing {
+		if _, ok := allowed[id]; !ok {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		result = append(result, id)
+	}
+	return result
+}
+
+func (h *LibraryCollectionHandler) toItemListResponse(r *http.Request, item *models.MediaItem) itemListResponse {
+	resp := itemListResponse{
+		ContentID:         item.ContentID,
+		Type:              item.Type,
+		Title:             item.Title,
+		Year:              item.Year,
+		Genres:            item.Genres,
+		ContentRating:     item.ContentRating,
+		Status:            item.Status,
+		RatingIMDB:        item.RatingIMDB,
+		Overview:          item.Overview,
+		PosterThumbhash:   item.PosterThumbhash,
+		BackdropThumbhash: item.BackdropThumbhash,
+	}
+	resp.PosterURL = h.presignURL(r, cardThumbnailPath(item.PosterPath), "card")
+	resp.BackdropURL = h.presignURL(r, cardThumbnailPath(item.BackdropPath), "card")
+	return resp
+}
+
+func (h *LibraryCollectionHandler) presignURL(r *http.Request, path string, variant string) string {
+	if h.detailSvc != nil {
+		return h.detailSvc.PresignURL(r.Context(), path, variant)
+	}
+	return ""
+}
+
+func (h *LibraryCollectionHandler) presignGPURL(r *http.Request, path string) string {
+	if path == "" {
+		return ""
+	}
+	if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
+		return path
+	}
+	if h.s3GP == nil {
+		return ""
+	}
+	url, err := h.s3GP.PresignGetURL(r.Context(), h.s3GP.Bucket(), cardThumbnailPath(path), h.presignTTL)
+	if err != nil {
+		return ""
+	}
+	return url
+}
+
+func (h *LibraryCollectionHandler) toLibraryCollectionResponse(r *http.Request, collection *models.LibraryCollection) libraryCollectionResponse {
+	resp := libraryCollectionResponse{
+		ID:                collection.ID,
+		LibraryID:         collection.LibraryID,
+		LibraryIDs:        append([]int(nil), collection.LibraryIDs...),
+		Slug:              collection.Slug,
+		Title:             collection.Title,
+		Description:       collection.Description,
+		CollectionType:    collection.CollectionType,
+		Visibility:        collection.Visibility,
+		SortOrder:         collection.SortOrder,
+		GroupID:           collection.GroupID,
+		Featured:          collection.Featured,
+		PosterURL:         h.presignGPURL(r, collection.PosterURL),
+		BackdropURL:       h.presignGPURL(r, collection.BackdropURL),
+		PosterThumbhash:   collection.PosterThumbhash,
+		BackdropThumbhash: collection.BackdropThumbhash,
+		SourceURL:         collection.SourceURL,
+		QueryDefinition:   defaultJSON(collection.QueryDefinition),
+		SortConfig:        defaultJSON(collection.SortConfig),
+		SourceConfig:      collection.SourceConfig,
+		ManagementMode:    collection.ManagementMode,
+		ManagementSource:  collection.ManagementSource,
+		ManagementKey:     collection.ManagementKey,
+		LastSyncStatus:    collection.LastSyncStatus,
+		LastSyncMessage:   collection.LastSyncMessage,
+		ItemCount:         collection.ItemCount,
+		CreatedAt:         collection.CreatedAt.Format(time.RFC3339),
+		UpdatedAt:         collection.UpdatedAt.Format(time.RFC3339),
+	}
+	if collection.LastSyncAt != nil {
+		resp.LastSyncAt = collection.LastSyncAt.Format(time.RFC3339)
+	}
+	if collection.SyncSchedule != nil {
+		resp.SyncSchedule = *collection.SyncSchedule
+	}
+	if collection.NextSyncAt != nil {
+		resp.NextSyncAt = collection.NextSyncAt.Format(time.RFC3339)
+	}
+	return resp
+}
+
+func (h *LibraryCollectionHandler) toLibraryCollectionResponses(r *http.Request, collections []*models.LibraryCollection) []libraryCollectionResponse {
+	out := make([]libraryCollectionResponse, 0, len(collections))
+	for _, collection := range collections {
+		out = append(out, h.toLibraryCollectionResponse(r, collection))
+	}
+	return out
+}
+
+func parsePathLibraryID(w http.ResponseWriter, r *http.Request) (int, bool) {
+	libraryID, err := strconv.Atoi(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "Invalid library ID")
+		return 0, false
+	}
+	return libraryID, true
+}
+
+func requestCanAccessLibrary(r *http.Request, libraryID int) bool {
+	scope, ok := access.GetScope(r.Context())
+	if !ok || scope.AllowedLibraryIDs == nil {
+		return true
+	}
+	return slices.Contains(scope.AllowedLibraryIDs, libraryID)
+}
+
+func slugifyCollectionName(title string) string {
+	title = strings.ToLower(strings.TrimSpace(title))
+	var builder strings.Builder
+	lastHyphen := false
+	for _, r := range title {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			builder.WriteRune(r)
+			lastHyphen = false
+			continue
+		}
+		if !lastHyphen {
+			builder.WriteByte('-')
+			lastHyphen = true
+		}
+	}
+	return strings.Trim(builder.String(), "-")
+}
+
+func defaultCollectionVisibility(visibility string) string {
+	if visibility == "" {
+		return "visible"
+	}
+	return visibility
+}
+
+func normalizeCollectionManagementMode(mode string) string {
+	switch strings.TrimSpace(strings.ToLower(mode)) {
+	case collectionManagementModeSection, collectionManagementModeTemplateBundle:
+		return strings.TrimSpace(strings.ToLower(mode))
+	default:
+		return collectionManagementModeManual
+	}
+}
+
+func normalizeCollectionManagementFields(mode, source, key string) (string, string, string, error) {
+	normalizedMode := normalizeCollectionManagementMode(mode)
+	normalizedSource := strings.TrimSpace(source)
+	normalizedKey := strings.TrimSpace(key)
+	if normalizedMode != collectionManagementModeManual && normalizedKey == "" {
+		return "", "", "", fmt.Errorf("management_key is required for managed collections")
+	}
+	if normalizedMode == collectionManagementModeManual {
+		normalizedSource = ""
+		normalizedKey = ""
+	}
+	return normalizedMode, normalizedSource, normalizedKey, nil
+}
+
+func normalizeOptionalCollectionManagementMode(mode *string) *string {
+	if mode == nil {
+		return nil
+	}
+	normalized := normalizeCollectionManagementMode(*mode)
+	return &normalized
+}
+
+func defaultCollectionSourceConfig(config json.RawMessage) json.RawMessage {
+	if len(config) == 0 {
+		return json.RawMessage(`{}`)
+	}
+	return config
+}
+
+func buildMDBListSourceConfig(url string, limit *int) (json.RawMessage, error) {
+	payload := struct {
+		Mode  string `json:"mode"`
+		URL   string `json:"url"`
+		Limit *int   `json:"limit,omitempty"`
+	}{
+		Mode: "mdblist_json",
+		URL:  url,
+	}
+	if limit != nil && *limit > 0 {
+		payload.Limit = limit
+	}
+
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
+func buildTMDBSourceConfig(preset, mediaType, timeWindow string, limit *int) (json.RawMessage, error) {
+	payload := struct {
+		Mode       string `json:"mode"`
+		Preset     string `json:"preset"`
+		MediaType  string `json:"media_type"`
+		TimeWindow string `json:"time_window,omitempty"`
+		Limit      *int   `json:"limit,omitempty"`
+	}{
+		Mode:      "tmdb_preset",
+		Preset:    preset,
+		MediaType: mediaType,
+		Limit:     limit,
+	}
+	if preset == "trending" {
+		payload.TimeWindow = timeWindow
+	}
+
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
+// buildTMDBCollectionSourceConfig emits the `source_config` JSON for a TMDB
+// franchise/saga collection. CollectionID == 0 is permitted and round-trips
+// through omitempty as no key at all — the catalog sync path uses that to
+// detect a placeholder template that an admin still needs to configure.
+func buildTMDBCollectionSourceConfig(collectionID int, limit *int) (json.RawMessage, error) {
+	payload := struct {
+		Mode         string `json:"mode"`
+		CollectionID int    `json:"collection_id,omitempty"`
+		Limit        *int   `json:"limit,omitempty"`
+	}{
+		Mode:         collectionSourceModeTMDBCollection,
+		CollectionID: collectionID,
+		Limit:        limit,
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
+// buildTMDBCollectionSourceURL composes the deterministic source URL string
+// stored alongside the collection. Mirrors buildTMDBSourceURL.
+func buildTMDBCollectionSourceURL(collectionID int) string {
+	return fmt.Sprintf("tmdb://collection/%d", collectionID)
+}
+
+// tmdbDiscoverConfigBody is the on-disk shape of the `discover` object inside
+// a tmdb_discover collection's source_config. Field names match the
+// templates.TMDBDiscoverSpec JSON contract so the catalog sync can decode the
+// same JSON either way.
+type tmdbDiscoverConfigBody struct {
+	WithGenres       []int    `json:"with_genres,omitempty"`
+	WithoutGenres    []int    `json:"without_genres,omitempty"`
+	SortBy           string   `json:"sort_by"`
+	VoteCountGte     int      `json:"vote_count_gte,omitempty"`
+	VoteAverageGte   float64  `json:"vote_average_gte,omitempty"`
+	ReleaseDateGte   string   `json:"release_date_gte,omitempty"`
+	ReleaseDateLte   string   `json:"release_date_lte,omitempty"`
+	Certifications   []string `json:"certifications,omitempty"`
+	CertificationLte string   `json:"certification_lte,omitempty"`
+	WithRuntimeGte   int      `json:"with_runtime_gte,omitempty"`
+	WithRuntimeLte   int      `json:"with_runtime_lte,omitempty"`
+	OriginalLanguage string   `json:"original_language,omitempty"`
+}
+
+// buildTMDBDiscoverSourceConfig emits the `source_config` JSON for a TMDB
+// discover collection. The on-disk shape is:
+//
+//	{ "mode":"tmdb_discover", "media_type":"movie",
+//	  "discover": { "sort_by":"...", ... }, "limit": 50 }
+//
+// The discover sub-object exists so additional discover-only fields don't
+// pollute the top-level libraryCollectionSourceConfig struct used for the
+// existing tmdb_preset / trakt_preset / mdblist_json modes.
+func buildTMDBDiscoverSourceConfig(mediaType string, spec importTMDBDiscoverSpecBody, limit *int) (json.RawMessage, error) {
+	payload := struct {
+		Mode      string                 `json:"mode"`
+		MediaType string                 `json:"media_type"`
+		Limit     *int                   `json:"limit,omitempty"`
+		Discover  tmdbDiscoverConfigBody `json:"discover"`
+	}{
+		Mode:      collectionSourceModeTMDBDiscover,
+		MediaType: mediaType,
+		Limit:     limit,
+		Discover: tmdbDiscoverConfigBody{
+			WithGenres:       spec.WithGenres,
+			WithoutGenres:    spec.WithoutGenres,
+			SortBy:           spec.SortBy,
+			VoteCountGte:     spec.VoteCountGte,
+			VoteAverageGte:   spec.VoteAverageGte,
+			ReleaseDateGte:   spec.ReleaseDateGte,
+			ReleaseDateLte:   spec.ReleaseDateLte,
+			Certifications:   spec.Certifications,
+			CertificationLte: spec.CertificationLte,
+			WithRuntimeGte:   spec.WithRuntimeGte,
+			WithRuntimeLte:   spec.WithRuntimeLte,
+			OriginalLanguage: spec.OriginalLanguage,
+		},
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
+// buildTMDBDiscoverSourceURL composes a deterministic source URL string for
+// a TMDB discover collection. The URL is purely informational — sync uses
+// source_config.
+func buildTMDBDiscoverSourceURL(mediaType, sortBy string) string {
+	return fmt.Sprintf("tmdb://discover/%s?sort_by=%s", mediaType, sortBy)
+}
+
+func buildTraktSourceConfig(preset, mediaType, profileID string, limit *int) (json.RawMessage, error) {
+	payload := struct {
+		Mode      string `json:"mode"`
+		Provider  string `json:"provider"`
+		Preset    string `json:"preset"`
+		MediaType string `json:"media_type"`
+		ProfileID string `json:"profile_id,omitempty"`
+		Limit     *int   `json:"limit,omitempty"`
+	}{
+		Mode:      "trakt_preset",
+		Provider:  "trakt",
+		Preset:    preset,
+		MediaType: mediaType,
+		ProfileID: profileID,
+		Limit:     limit,
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
+func normalizeTMDBPresetRequest(preset, mediaType, timeWindow string) (string, string, string, error) {
+	switch preset {
+	case "trending":
+		switch mediaType {
+		case "movie", "tv", "all":
+		default:
+			return "", "", "", fmt.Errorf("media_type must be \"movie\", \"tv\", or \"all\"")
+		}
+		switch timeWindow {
+		case "day", "week":
+		default:
+			return "", "", "", fmt.Errorf("time_window must be \"day\" or \"week\"")
+		}
+		return preset, mediaType, timeWindow, nil
+	case "popular", "top_rated":
+		switch mediaType {
+		case "movie", "tv":
+			return preset, mediaType, "", nil
+		default:
+			return "", "", "", fmt.Errorf("media_type must be \"movie\" or \"tv\" for preset %q", preset)
+		}
+	case "now_playing", "upcoming":
+		if mediaType != "movie" {
+			return "", "", "", fmt.Errorf("media_type must be \"movie\" for preset %q", preset)
+		}
+		return preset, mediaType, "", nil
+	case "airing_today", "on_the_air":
+		if mediaType != "tv" {
+			return "", "", "", fmt.Errorf("media_type must be \"tv\" for preset %q", preset)
+		}
+		return preset, mediaType, "", nil
+	default:
+		return "", "", "", fmt.Errorf("preset must be one of \"trending\", \"popular\", \"top_rated\", \"now_playing\", \"upcoming\", \"airing_today\", or \"on_the_air\"")
+	}
+}
+
+func normalizeTraktPresetRequest(preset, mediaType, profileID string) (string, string, string, error) {
+	preset = strings.TrimSpace(strings.ToLower(preset))
+	mediaType = strings.TrimSpace(strings.ToLower(mediaType))
+	profileID = strings.TrimSpace(profileID)
+
+	switch preset {
+	case "trending", "popular":
+	case "recommended":
+		if profileID == "" {
+			return "", "", "", fmt.Errorf("profile_id is required for Trakt recommended collections")
+		}
+	default:
+		return "", "", "", fmt.Errorf("preset must be one of \"trending\", \"popular\", or \"recommended\"")
+	}
+	switch mediaType {
+	case "movie", "tv":
+	default:
+		return "", "", "", fmt.Errorf("media_type must be \"movie\" or \"tv\"")
+	}
+	if preset != "recommended" {
+		profileID = ""
+	}
+	return preset, mediaType, profileID, nil
+}
+
+func buildTMDBSourceURL(preset, mediaType, timeWindow string) string {
+	if preset == "trending" {
+		return fmt.Sprintf("tmdb://%s/%s/%s", preset, mediaType, timeWindow)
+	}
+	return fmt.Sprintf("tmdb://%s/%s", preset, mediaType)
+}
+
+func buildTraktSourceURL(preset, mediaType, profileID string) string {
+	if preset == "recommended" {
+		return fmt.Sprintf("trakt://%s/%s/%s", preset, mediaType, profileID)
+	}
+	return fmt.Sprintf("trakt://%s/%s", preset, mediaType)
+}
+
+func (h *LibraryCollectionHandler) processCollectionImage(
+	ctx context.Context,
+	collectionID string,
+	imageType string,
+	fileData []byte,
+) (s3Path string, thumbhashStr string, err error) {
+	return uploadCollectionImageVariants(ctx, h.s3GP, adminCollectionImagePrefix, collectionID, imageType, fileData)
+}
+
+func (h *LibraryCollectionHandler) deleteCollectionImages(ctx context.Context, collectionID, imageType string) error {
+	return removeCollectionImageVariants(ctx, h.s3GP, adminCollectionImagePrefix, collectionID, imageType)
+}
+
+func (h *LibraryCollectionHandler) processArtworkInputs(r *http.Request, collectionID, posterSourceURL, backdropSourceURL string) error {
+	sourceByType := map[string]string{
+		"poster":   strings.TrimSpace(posterSourceURL),
+		"backdrop": strings.TrimSpace(backdropSourceURL),
+	}
+	isMultipart := strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/")
+
+	for _, imageType := range []string{"poster", "backdrop"} {
+		var (
+			fileData []byte
+			err      error
+		)
+		if isMultipart {
+			fileData, err = readCollectionImageMultipart(r, imageType)
+		} else {
+			err = http.ErrMissingFile
+		}
+
+		switch {
+		case err == nil:
+		case err == http.ErrMissingFile:
+			if sourceByType[imageType] == "" {
+				continue
+			}
+			fileData, err = downloadCollectionImageURL(r.Context(), h.httpClient, sourceByType[imageType])
+			if err != nil {
+				return fmt.Errorf("%s source: %w", imageType, err)
+			}
+		default:
+			return fmt.Errorf("%s: %w", imageType, err)
+		}
+
+		if err := h.deleteCollectionImages(r.Context(), collectionID, imageType); err != nil {
+			return fmt.Errorf("deleting %s images: %w", imageType, err)
+		}
+
+		s3Path, thumbhash, err := h.processCollectionImage(r.Context(), collectionID, imageType, fileData)
+		if err != nil {
+			return fmt.Errorf("%s: %w", imageType, err)
+		}
+
+		posterURL, backdropURL := (*string)(nil), (*string)(nil)
+		posterThumbhash, backdropThumbhash := (*string)(nil), (*string)(nil)
+		if imageType == "poster" {
+			posterURL = &s3Path
+			posterThumbhash = &thumbhash
+		} else {
+			backdropURL = &s3Path
+			backdropThumbhash = &thumbhash
+		}
+
+		update := catalog.UpdateLibraryCollectionInput{
+			ID:                collectionID,
+			PosterURL:         posterURL,
+			BackdropURL:       backdropURL,
+			PosterThumbhash:   posterThumbhash,
+			BackdropThumbhash: backdropThumbhash,
+		}
+		if imageType == "poster" {
+			adminUpload := false
+			update.PosterAutoGenerated = &adminUpload
+		}
+		if err := h.repo.Update(r.Context(), update); err != nil {
+			return fmt.Errorf("updating %s: %w", imageType, err)
+		}
+	}
+	return nil
+}
+
+func decodeJSONOrMultipart(r *http.Request, dest interface{}) error {
+	ct := r.Header.Get("Content-Type")
+	if strings.HasPrefix(ct, "multipart/") {
+		if err := r.ParseMultipartForm(20 << 20); err != nil {
+			return fmt.Errorf("parsing multipart form: %w", err)
+		}
+		dataField := r.FormValue("data")
+		if dataField == "" {
+			return fmt.Errorf("missing 'data' field in multipart form")
+		}
+		return json.Unmarshal([]byte(dataField), dest)
+	}
+	return json.NewDecoder(r.Body).Decode(dest)
+}
+
+func pointerStringValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}

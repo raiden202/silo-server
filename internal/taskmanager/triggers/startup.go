@@ -1,0 +1,88 @@
+package triggers
+
+import (
+	"sync"
+	"time"
+
+	"github.com/Silo-Server/silo-server/internal/taskmanager"
+)
+
+const startupDelay = 5 * time.Second
+
+// StartupTrigger fires once, shortly after Start() is called. Subsequent
+// calls to Start() (e.g. re-arming after execution) are no-ops.
+type StartupTrigger struct {
+	cfg     taskmanager.TriggerConfig
+	ch      chan struct{}
+	nextRun time.Time
+	timer   *time.Timer
+	stopCh  chan struct{}
+	fired   bool
+	mu      sync.Mutex
+}
+
+func NewStartupTrigger(cfg taskmanager.TriggerConfig) *StartupTrigger {
+	return &StartupTrigger{
+		cfg: cfg,
+		ch:  make(chan struct{}, 1),
+	}
+}
+
+func (s *StartupTrigger) Start(_ *taskmanager.ExecutionResult) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Drain any stale signal from a previous timer fire.
+	select {
+	case <-s.ch:
+	default:
+	}
+
+	if s.fired {
+		return
+	}
+	s.fired = true
+
+	s.stopCh = make(chan struct{})
+	s.nextRun = time.Now().Add(startupDelay)
+	s.timer = time.NewTimer(startupDelay)
+
+	go func() {
+		select {
+		case <-s.stopCh:
+			if !s.timer.Stop() {
+				select {
+				case <-s.timer.C:
+				default:
+				}
+			}
+			return
+		case <-s.timer.C:
+			select {
+			case s.ch <- struct{}{}:
+			default:
+			}
+		}
+	}()
+}
+
+func (s *StartupTrigger) Stop() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.stopCh != nil {
+		select {
+		case <-s.stopCh:
+		default:
+			close(s.stopCh)
+		}
+	}
+}
+
+func (s *StartupTrigger) NextRunTime() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.nextRun
+}
+
+func (s *StartupTrigger) Config() taskmanager.TriggerConfig { return s.cfg }
+func (s *StartupTrigger) C() <-chan struct{}                { return s.ch }

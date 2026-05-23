@@ -1,0 +1,182 @@
+package handlers
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/go-chi/chi/v5"
+
+	"github.com/Silo-Server/silo-server/internal/playback"
+)
+
+func TestPlaybackSessionMissingResponsesUseStableErrorCode(t *testing.T) {
+	const missingSessionID = "missing-session"
+
+	sessionMgr := playback.NewSessionManager(0, 0)
+	playbackHandler := NewPlaybackHandler(sessionMgr)
+	playbackHandler.RealtimeHub = playback.NewRealtimeHub()
+	streamHandler := NewStreamHandler(sessionMgr, testPlaybackFileResolver{})
+
+	tests := []struct {
+		name    string
+		request func() *http.Request
+		handle  func(http.ResponseWriter, *http.Request)
+	}{
+		{
+			name: "progress",
+			request: func() *http.Request {
+				return playbackTestRequest(
+					http.MethodPost,
+					"/api/v1/playback/"+missingSessionID+"/progress",
+					[]byte(`{"position":12,"is_paused":false}`),
+					map[string]string{"session_id": missingSessionID},
+				)
+			},
+			handle: playbackHandler.HandleUpdateProgress,
+		},
+		{
+			name: "stop",
+			request: func() *http.Request {
+				return playbackTestRequest(
+					http.MethodDelete,
+					"/api/v1/playback/"+missingSessionID,
+					nil,
+					map[string]string{"session_id": missingSessionID},
+				)
+			},
+			handle: playbackHandler.HandleStopPlayback,
+		},
+		{
+			name: "audio",
+			request: func() *http.Request {
+				return playbackTestRequest(
+					http.MethodPatch,
+					"/api/v1/playback/"+missingSessionID+"/audio",
+					[]byte(`{"audio_track_index":1}`),
+					map[string]string{"session_id": missingSessionID},
+				)
+			},
+			handle: playbackHandler.HandleChangeAudioTrack,
+		},
+		{
+			name: "websocket",
+			request: func() *http.Request {
+				return playbackTestRequest(
+					http.MethodGet,
+					"/api/v1/playback/sessions/"+missingSessionID+"/control/ws",
+					nil,
+					map[string]string{"session_id": missingSessionID},
+				)
+			},
+			handle: playbackHandler.HandleSessionWebSocket,
+		},
+		{
+			name: "stream",
+			request: func() *http.Request {
+				return playbackTestRequest(
+					http.MethodGet,
+					"/api/v1/stream/"+missingSessionID,
+					nil,
+					map[string]string{"session_id": missingSessionID},
+				)
+			},
+			handle: streamHandler.HandleStream,
+		},
+		{
+			name: "subtitle",
+			request: func() *http.Request {
+				return playbackTestRequest(
+					http.MethodGet,
+					"/api/v1/stream/"+missingSessionID+"/subtitles/0.vtt",
+					nil,
+					map[string]string{"session_id": missingSessionID, "track": "0.vtt"},
+				)
+			},
+			handle: streamHandler.HandleSubtitle,
+		},
+		{
+			name: "transcode start",
+			request: func() *http.Request {
+				return playbackTestRequest(
+					http.MethodPost,
+					"/api/v1/playback/transcode/start",
+					[]byte(`{"session_id":"`+missingSessionID+`","seek_seconds":0,"target_bitrate_kbps":0,"segment_duration":2,"subtitle_track_index":-1,"subtitle_burn_in":false}`),
+					nil,
+				)
+			},
+			handle: playbackHandler.HandleStartTranscode,
+		},
+		{
+			name: "transcode manifest",
+			request: func() *http.Request {
+				return playbackTestRequest(
+					http.MethodGet,
+					"/api/v1/playback/transcode/"+missingSessionID+"/master.m3u8",
+					nil,
+					map[string]string{"session_id": missingSessionID},
+				)
+			},
+			handle: playbackHandler.HandleGetTranscodeManifest,
+		},
+		{
+			name: "transcode segment",
+			request: func() *http.Request {
+				return playbackTestRequest(
+					http.MethodGet,
+					"/api/v1/playback/transcode/"+missingSessionID+"/segment/000.ts",
+					nil,
+					map[string]string{"session_id": missingSessionID, "name": "000.ts"},
+				)
+			},
+			handle: playbackHandler.HandleGetTranscodeSegment,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			tt.handle(rr, tt.request())
+			assertPlaybackSessionMissingResponse(t, rr)
+		})
+	}
+}
+
+func playbackTestRequest(method, target string, body []byte, params map[string]string) *http.Request {
+	var reader *bytes.Reader
+	if body == nil {
+		reader = bytes.NewReader(nil)
+	} else {
+		reader = bytes.NewReader(body)
+	}
+	req := httptest.NewRequest(method, target, reader)
+	req = req.WithContext(newAuthorizedPlaybackContext())
+	if len(params) == 0 {
+		return req
+	}
+	routeCtx := chi.NewRouteContext()
+	for key, value := range params {
+		routeCtx.URLParams.Add(key, value)
+	}
+	return req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, routeCtx))
+}
+
+func assertPlaybackSessionMissingResponse(t *testing.T, rr *httptest.ResponseRecorder) {
+	t.Helper()
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var resp errorResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode error response: %v; body = %s", err, rr.Body.String())
+	}
+	if resp.Error != playbackSessionNotFoundErrorCode {
+		t.Fatalf("error = %q, want %q; body = %s", resp.Error, playbackSessionNotFoundErrorCode, rr.Body.String())
+	}
+	if resp.Message != "Playback session not found" {
+		t.Fatalf("message = %q", resp.Message)
+	}
+}

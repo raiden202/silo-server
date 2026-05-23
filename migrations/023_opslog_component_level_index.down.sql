@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS idx_operational_logs_component_level;
