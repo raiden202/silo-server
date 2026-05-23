@@ -247,6 +247,14 @@ func (s *LibraryCollectionService) syncMDBListCollection(ctx context.Context, co
 		return nil, err
 	}
 
+	// Trim the entry list to the same fetch-multiplier bound used for TMDB and
+	// Trakt sources before building the external-ID batches. MDBList lists can
+	// return hundreds of entries; without this, the two GetByExternalIDs IN
+	// arrays balloon to the full list size even when the user's limit is small.
+	if fetchLimit := collectionutil.SourceFetchLimit(limit); fetchLimit > 0 && len(entries) > fetchLimit {
+		entries = entries[:fetchLimit]
+	}
+
 	// Pre-fetch all external-ID lookups grouped by item type (movie vs series)
 	// in two batched queries instead of up to 3×N GetByExternalID calls
 	// (audit 2026-05-01 §3.7).
@@ -337,6 +345,7 @@ func (s *LibraryCollectionService) syncMDBListCollection(ctx context.Context, co
 	}
 
 	scannedEntries := 0
+	limitReached := false
 	for index, entry := range entries {
 		scannedEntries = index + 1
 		r, ok := resolvedByIndex[index]
@@ -361,6 +370,7 @@ func (s *LibraryCollectionService) syncMDBListCollection(ctx context.Context, co
 			SourceRank:  r.sourceRank,
 		})
 		if collectionutil.ItemLimitReached(len(matchedItems), limit) {
+			limitReached = true
 			break
 		}
 	}
@@ -378,11 +388,20 @@ func (s *LibraryCollectionService) syncMDBListCollection(ctx context.Context, co
 		return nil, fmt.Errorf("marshaling sync warnings: %w", err)
 	}
 
+	// Report the full source size as the denominator so operators can tell
+	// "limit reached" apart from "perfect coverage of a small source"; the
+	// extra clause exposes how many entries were actually scanned before the
+	// break.
+	message := fmt.Sprintf("Matched %d of %d entries", len(matchedItems), len(entries))
+	if limitReached {
+		message = fmt.Sprintf("%s (item limit reached after %d scanned)", message, scannedEntries)
+	}
+
 	completedAt := syncTimestamp()
 	run, err := s.collections.RecordSyncRun(ctx, RecordLibraryCollectionSyncRunInput{
 		CollectionID:   collection.ID,
 		Status:         status,
-		Message:        fmt.Sprintf("Matched %d of %d entries", len(matchedItems), scannedEntries),
+		Message:        message,
 		ItemsAdded:     len(matchedItems),
 		ItemsRemoved:   0,
 		ItemsMatched:   len(matchedItems),
@@ -446,6 +465,7 @@ func (s *LibraryCollectionService) syncTMDBPresetCollection(ctx context.Context,
 	unmatchedCount := 0
 	duplicateCount := 0
 	scannedEntries := 0
+	limitReached := false
 
 	for i, entry := range results {
 		scannedEntries = i + 1
@@ -498,6 +518,7 @@ func (s *LibraryCollectionService) syncTMDBPresetCollection(ctx context.Context,
 			SourceRank:  i + 1,
 		})
 		if collectionutil.ItemLimitReached(len(matchedItems), cfg.Limit) {
+			limitReached = true
 			break
 		}
 	}
@@ -508,7 +529,8 @@ func (s *LibraryCollectionService) syncTMDBPresetCollection(ctx context.Context,
 		"matched", len(matchedItems),
 		"unmatched", unmatchedCount,
 		"duplicates", duplicateCount,
-		"total", scannedEntries,
+		"scanned", scannedEntries,
+		"total", len(results),
 	)
 
 	if err := s.collections.ReplaceItems(ctx, collection.ID, matchedItems); err != nil {
@@ -519,7 +541,10 @@ func (s *LibraryCollectionService) syncTMDBPresetCollection(ctx context.Context,
 	if len(warnings) > 0 {
 		status = "warning"
 	}
-	message := fmt.Sprintf("Matched %d of %d entries", len(matchedItems), scannedEntries)
+	message := fmt.Sprintf("Matched %d of %d entries", len(matchedItems), len(results))
+	if limitReached {
+		message = fmt.Sprintf("%s (item limit reached after %d scanned)", message, scannedEntries)
+	}
 	if duplicateCount > 0 {
 		message = fmt.Sprintf("%s (%d duplicates skipped)", message, duplicateCount)
 	}
@@ -604,6 +629,7 @@ func (s *LibraryCollectionService) syncTMDBFranchiseCollection(ctx context.Conte
 	unmatchedCount := 0
 	duplicateCount := 0
 	scannedEntries := 0
+	limitReached := false
 
 	for i, entry := range results {
 		scannedEntries = i + 1
@@ -647,6 +673,7 @@ func (s *LibraryCollectionService) syncTMDBFranchiseCollection(ctx context.Conte
 			SourceRank:  i + 1,
 		})
 		if collectionutil.ItemLimitReached(len(matchedItems), cfg.Limit) {
+			limitReached = true
 			break
 		}
 	}
@@ -657,7 +684,8 @@ func (s *LibraryCollectionService) syncTMDBFranchiseCollection(ctx context.Conte
 		"matched", len(matchedItems),
 		"unmatched", unmatchedCount,
 		"duplicates", duplicateCount,
-		"total", scannedEntries,
+		"scanned", scannedEntries,
+		"total", len(results),
 	)
 
 	if err := s.collections.ReplaceItems(ctx, collection.ID, matchedItems); err != nil {
@@ -668,7 +696,10 @@ func (s *LibraryCollectionService) syncTMDBFranchiseCollection(ctx context.Conte
 	if len(warnings) > 0 {
 		status = "warning"
 	}
-	message := fmt.Sprintf("Matched %d of %d entries", len(matchedItems), scannedEntries)
+	message := fmt.Sprintf("Matched %d of %d entries", len(matchedItems), len(results))
+	if limitReached {
+		message = fmt.Sprintf("%s (item limit reached after %d scanned)", message, scannedEntries)
+	}
 	if duplicateCount > 0 {
 		message = fmt.Sprintf("%s (%d duplicates skipped)", message, duplicateCount)
 	}
@@ -773,6 +804,7 @@ func (s *LibraryCollectionService) syncTMDBDiscoverCollection(ctx context.Contex
 	unmatchedCount := 0
 	duplicateCount := 0
 	scannedEntries := 0
+	limitReached := false
 
 	for i, entry := range results {
 		scannedEntries = i + 1
@@ -812,6 +844,7 @@ func (s *LibraryCollectionService) syncTMDBDiscoverCollection(ctx context.Contex
 			SourceRank:  i + 1,
 		})
 		if collectionutil.ItemLimitReached(len(matchedItems), cfg.Limit) {
+			limitReached = true
 			break
 		}
 	}
@@ -822,7 +855,8 @@ func (s *LibraryCollectionService) syncTMDBDiscoverCollection(ctx context.Contex
 		"matched", len(matchedItems),
 		"unmatched", unmatchedCount,
 		"duplicates", duplicateCount,
-		"total", scannedEntries,
+		"scanned", scannedEntries,
+		"total", len(results),
 	)
 
 	if err := s.collections.ReplaceItems(ctx, collection.ID, matchedItems); err != nil {
@@ -833,7 +867,10 @@ func (s *LibraryCollectionService) syncTMDBDiscoverCollection(ctx context.Contex
 	if len(warnings) > 0 {
 		status = "warning"
 	}
-	message := fmt.Sprintf("Matched %d of %d entries", len(matchedItems), scannedEntries)
+	message := fmt.Sprintf("Matched %d of %d entries", len(matchedItems), len(results))
+	if limitReached {
+		message = fmt.Sprintf("%s (item limit reached after %d scanned)", message, scannedEntries)
+	}
 	if duplicateCount > 0 {
 		message = fmt.Sprintf("%s (%d duplicates skipped)", message, duplicateCount)
 	}
@@ -929,6 +966,7 @@ func (s *LibraryCollectionService) syncTraktPresetCollection(ctx context.Context
 	unmatchedCount := 0
 	duplicateCount := 0
 	scannedEntries := 0
+	limitReached := false
 
 	for i, entry := range results {
 		scannedEntries = i + 1
@@ -963,6 +1001,7 @@ func (s *LibraryCollectionService) syncTraktPresetCollection(ctx context.Context
 			SourceRank:  sourceRank,
 		})
 		if collectionutil.ItemLimitReached(len(matchedItems), cfg.Limit) {
+			limitReached = true
 			break
 		}
 	}
@@ -975,7 +1014,10 @@ func (s *LibraryCollectionService) syncTraktPresetCollection(ctx context.Context
 	if len(warnings) > 0 {
 		status = "warning"
 	}
-	message := fmt.Sprintf("Matched %d of %d entries", len(matchedItems), scannedEntries)
+	message := fmt.Sprintf("Matched %d of %d entries", len(matchedItems), len(results))
+	if limitReached {
+		message = fmt.Sprintf("%s (item limit reached after %d scanned)", message, scannedEntries)
+	}
 	if duplicateCount > 0 {
 		message = fmt.Sprintf("%s (%d duplicates skipped)", message, duplicateCount)
 	}

@@ -173,7 +173,7 @@ func (s *Service) syncMDBList(ctx context.Context, store userstore.UserStore, co
 		return nil, nil, err
 	}
 	matched = limitCollectionItems(matched, cfg.Limit)
-	return s.applyResult(ctx, store, collection, startedAt, matched, scanned, unmatched+droppedByLib)
+	return s.applyResult(ctx, store, collection, startedAt, matched, len(entries), scanned, unmatched+droppedByLib)
 }
 
 func mdbListItemType(entry mdblistEntry) string {
@@ -266,6 +266,15 @@ func resolveMatchedWithLimit(total int, limit *int, resolve func(i int) string) 
 	return matched, unmatched, scanned
 }
 
+// collectionResolveLimit returns the limit to pass into resolveMatchedWithLimit.
+//
+// When LibraryIDs is set we cannot break early on cfg.Limit during the resolve
+// pass: filterByLibraries runs after resolve and may drop most items, so an
+// early break would leave us short of cfg.Limit final items. Returning nil
+// disables the inline break; limitCollectionItems then truncates to cfg.Limit
+// after filtering. This trades a wider GetItemsInFolders IN-array (bounded by
+// the source-fetch cap) for a correct result count when the library filter is
+// selective.
 func collectionResolveLimit(cfg SourceConfig) *int {
 	if len(cfg.LibraryIDs) > 0 {
 		return nil
@@ -379,7 +388,7 @@ func (s *Service) syncTMDB(ctx context.Context, store userstore.UserStore, colle
 		return nil, nil, err
 	}
 	matched = limitCollectionItems(matched, cfg.Limit)
-	return s.applyResult(ctx, store, collection, startedAt, matched, scanned, unmatched+droppedByLib)
+	return s.applyResult(ctx, store, collection, startedAt, matched, len(results), scanned, unmatched+droppedByLib)
 }
 
 // ── Trakt presets ────────────────────────────────────────────────────────────
@@ -457,7 +466,7 @@ func (s *Service) syncTrakt(ctx context.Context, store userstore.UserStore, coll
 		return nil, nil, err
 	}
 	matched = limitCollectionItems(matched, cfg.Limit)
-	return s.applyResult(ctx, store, collection, startedAt, matched, scanned, unmatched+droppedByLib)
+	return s.applyResult(ctx, store, collection, startedAt, matched, len(results), scanned, unmatched+droppedByLib)
 }
 
 // ── Result application ───────────────────────────────────────────────────────
@@ -468,7 +477,8 @@ func (s *Service) applyResult(
 	collection *userstore.Collection,
 	startedAt time.Time,
 	matched []userstore.CollectionItemReplacement,
-	totalEntries int,
+	sourceTotal int,
+	scanned int,
 	unmatched int,
 ) (*SyncResult, *userstore.Collection, error) {
 	if err := store.ReplaceCollectionItems(ctx, collection.ID, matched); err != nil {
@@ -480,7 +490,13 @@ func (s *Service) applyResult(
 	if unmatched > 0 {
 		status = "warning"
 	}
-	message := fmt.Sprintf("Matched %d of %d entries", len(matched), totalEntries)
+	// Report the full source size as the denominator so users see
+	// "Matched 10 of 200" rather than "Matched 10 of 10" when the limit
+	// truncated mid-source; the trailing clause exposes the actual scan depth.
+	message := fmt.Sprintf("Matched %d of %d entries", len(matched), sourceTotal)
+	if scanned < sourceTotal {
+		message = fmt.Sprintf("%s (item limit reached after %d scanned)", message, scanned)
+	}
 
 	var nextSyncAt *time.Time
 	if collection.SyncSchedule != nil && *collection.SyncSchedule != "" {
@@ -510,7 +526,8 @@ func (s *Service) applyResult(
 		"status", status,
 		"matched", len(matched),
 		"unmatched", unmatched,
-		"total", totalEntries,
+		"scanned", scanned,
+		"total", sourceTotal,
 		"duration", completedAt.Sub(startedAt).Round(time.Millisecond),
 	)
 
