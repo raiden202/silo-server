@@ -113,6 +113,7 @@ func (s *PostgresUserStore) CreateCollection(ctx context.Context, input userstor
 		SyncSchedule:               input.SyncSchedule,
 		NextSyncAt:                 input.NextSyncAt,
 		IncludeInServerCollections: input.IncludeInServerCollections,
+		PosterURL:                  input.PosterURL,
 		SortOrder:                  sortOrder,
 		CreatedAt:                  now,
 		UpdatedAt:                  now,
