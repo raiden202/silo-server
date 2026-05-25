@@ -37,7 +37,7 @@ func TestSubmitMovieAddsLookupResult(t *testing.T) {
 			if got := r.URL.Query().Get("tmdbId"); got != "550" {
 				t.Fatalf("lookup tmdbId = %q, want 550", got)
 			}
-			w.Write([]byte(`[{"title":"Fight Club","tmdbId":550,"titleSlug":"fight-club"}]`))
+			w.Write([]byte(`{"title":"Fight Club","tmdbId":550,"titleSlug":"fight-club"}`))
 			return
 		}
 		t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
@@ -78,7 +78,7 @@ func TestSubmitMovieRecoversFromEmptyAddResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/v3/movie/lookup/tmdb":
-			w.Write([]byte(`[{"title":"Fight Club","tmdbId":550,"titleSlug":"fight-club"}]`))
+			w.Write([]byte(`{"title":"Fight Club","tmdbId":550,"titleSlug":"fight-club"}`))
 		case "/api/v3/movie":
 			if r.Method == http.MethodPost {
 				w.WriteHeader(http.StatusCreated)
@@ -125,7 +125,7 @@ func TestSubmitMovieFallsBackWhenEmptyResponseAndLookupFails(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/v3/movie/lookup/tmdb":
-			w.Write([]byte(`[{"title":"Fight Club","tmdbId":550,"titleSlug":"fight-club"}]`))
+			w.Write([]byte(`{"title":"Fight Club","tmdbId":550,"titleSlug":"fight-club"}`))
 		case "/api/v3/movie":
 			if r.Method == http.MethodPost {
 				w.WriteHeader(http.StatusCreated)
