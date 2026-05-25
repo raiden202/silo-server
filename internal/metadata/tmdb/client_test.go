@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 )
 
@@ -67,6 +68,212 @@ func TestGetCollectionPresetTrending(t *testing.T) {
 	}
 	if results[1] != (CollectionResult{ID: 20, MediaType: "tv", Title: "Series Title"}) {
 		t.Fatalf("results[1] = %+v", results[1])
+	}
+}
+
+func TestDiscoverSectionCachesSuccess(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if r.URL.Path != "/movie/popular" {
+			http.NotFound(w, r)
+			return
+		}
+		if got := r.URL.Query().Get("page"); got != "1" {
+			t.Fatalf("page query = %q, want 1", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"page": 1,
+			"total_pages": 1,
+			"total_results": 1,
+			"results": [
+				{"id": 11, "title": "Cached Movie", "overview": "from tmdb"}
+			]
+		}`))
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", 1000)
+	client.SetBaseURL(server.URL)
+
+	first, err := client.DiscoverSection(context.Background(), "popular_movies", 1)
+	if err != nil {
+		t.Fatalf("first DiscoverSection returned error: %v", err)
+	}
+	second, err := client.DiscoverSection(context.Background(), "popular_movies", 1)
+	if err != nil {
+		t.Fatalf("second DiscoverSection returned error: %v", err)
+	}
+
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("upstream calls = %d, want 1", got)
+	}
+	for name, page := range map[string]*MediaPage{"first": first, "second": second} {
+		if page == nil || len(page.Results) != 1 {
+			t.Fatalf("%s page results = %#v, want one result", name, page)
+		}
+		if page.Results[0].ID != 11 || page.Results[0].Title != "Cached Movie" {
+			t.Fatalf("%s result = %+v", name, page.Results[0])
+		}
+	}
+}
+
+func TestDiscoverSectionCacheKeyIncludesPage(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if r.URL.Path != "/movie/popular" {
+			http.NotFound(w, r)
+			return
+		}
+		page := r.URL.Query().Get("page")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"page": ` + page + `,
+			"total_pages": 2,
+			"total_results": 2,
+			"results": [
+				{"id": ` + page + `, "title": "Movie ` + page + `"}
+			]
+		}`))
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", 1000)
+	client.SetBaseURL(server.URL)
+
+	first, err := client.DiscoverSection(context.Background(), "popular_movies", 1)
+	if err != nil {
+		t.Fatalf("page 1 DiscoverSection returned error: %v", err)
+	}
+	second, err := client.DiscoverSection(context.Background(), "popular_movies", 2)
+	if err != nil {
+		t.Fatalf("page 2 DiscoverSection returned error: %v", err)
+	}
+
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("upstream calls = %d, want 2", got)
+	}
+	if first.Results[0].ID != 1 || second.Results[0].ID != 2 {
+		t.Fatalf("cached pages collapsed unexpectedly: first=%+v second=%+v", first.Results[0], second.Results[0])
+	}
+}
+
+func TestDiscoverSectionDoesNotCacheClientErrors(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		call := calls.Add(1)
+		if r.URL.Path != "/movie/popular" {
+			http.NotFound(w, r)
+			return
+		}
+		if call == 1 {
+			http.Error(w, `{"status_message":"bad section"}`, http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"page": 1,
+			"total_pages": 1,
+			"total_results": 1,
+			"results": [
+				{"id": 22, "title": "Recovered Movie"}
+			]
+		}`))
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", 1000)
+	client.SetBaseURL(server.URL)
+
+	if _, err := client.DiscoverSection(context.Background(), "popular_movies", 1); err == nil {
+		t.Fatal("first DiscoverSection expected error")
+	}
+	page, err := client.DiscoverSection(context.Background(), "popular_movies", 1)
+	if err != nil {
+		t.Fatalf("second DiscoverSection returned error: %v", err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("upstream calls = %d, want 2", got)
+	}
+	if page == nil || len(page.Results) != 1 || page.Results[0].ID != 22 {
+		t.Fatalf("second page = %#v, want recovered movie", page)
+	}
+}
+
+func TestDiscoverSectionReturnsClonedCachedPage(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if r.URL.Path != "/movie/popular" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"page": 1,
+			"total_pages": 1,
+			"total_results": 1,
+			"results": [
+				{"id": 33, "title": "Immutable Movie"}
+			]
+		}`))
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", 1000)
+	client.SetBaseURL(server.URL)
+
+	first, err := client.DiscoverSection(context.Background(), "popular_movies", 1)
+	if err != nil {
+		t.Fatalf("first DiscoverSection returned error: %v", err)
+	}
+	first.Results[0].Title = "mutated by caller"
+
+	second, err := client.DiscoverSection(context.Background(), "popular_movies", 1)
+	if err != nil {
+		t.Fatalf("second DiscoverSection returned error: %v", err)
+	}
+
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("upstream calls = %d, want 1", got)
+	}
+	if second.Results[0].Title != "Immutable Movie" {
+		t.Fatalf("cached title = %q, want Immutable Movie", second.Results[0].Title)
+	}
+}
+
+func TestGetExternalIDsCachesSuccess(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if r.URL.Path != "/movie/123/external_ids" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"imdb_id":"tt123","tvdb_id":456}`))
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", 1000)
+	client.SetBaseURL(server.URL)
+
+	first, err := client.GetExternalIDs(context.Background(), "movie", 123)
+	if err != nil {
+		t.Fatalf("first GetExternalIDs returned error: %v", err)
+	}
+	second, err := client.GetExternalIDs(context.Background(), "movie", 123)
+	if err != nil {
+		t.Fatalf("second GetExternalIDs returned error: %v", err)
+	}
+
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("upstream calls = %d, want 1", got)
+	}
+	if first.IMDbID != "tt123" || first.TVDBID != 456 || second.IMDbID != "tt123" || second.TVDBID != 456 {
+		t.Fatalf("external IDs = first %+v second %+v", first, second)
 	}
 }
 

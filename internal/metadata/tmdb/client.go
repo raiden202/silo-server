@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Silo-Server/silo-server/internal/cache"
+	"golang.org/x/sync/singleflight"
 	"golang.org/x/time/rate"
 )
 
@@ -21,14 +23,20 @@ const (
 	maxRetries                 = 3
 	maxResponseBody            = 1 << 20 // 1 MB
 	maxCollectionPresetResults = 500
+	defaultResponseCacheTTL    = 2 * time.Hour
 )
 
 // Client is an HTTP client for the TMDB collection preset API surface.
 type Client struct {
-	httpClient *http.Client
-	apiKey     string
-	baseURL    string
-	limiter    *rate.Limiter
+	httpClient           *http.Client
+	apiKey               string
+	baseURL              string
+	limiter              *rate.Limiter
+	discoverSectionCache *cache.TTLCache[*MediaPage]
+	discoverPageCache    *cache.TTLCache[*MediaPage]
+	externalIDCache      *cache.TTLCache[*ExternalIDs]
+	cacheGroup           singleflight.Group
+	responseCacheTTL     time.Duration
 }
 
 // NewClient creates a TMDB API client with the given API key and rate limit
@@ -40,16 +48,36 @@ func NewClient(apiKey string, rateLimit int) *Client {
 		apiKey = projectAPIKey
 	}
 	return &Client{
-		httpClient: &http.Client{Timeout: 30 * time.Second},
-		apiKey:     apiKey,
-		baseURL:    defaultBaseURL,
-		limiter:    rate.NewLimiter(rate.Limit(rateLimit), rateLimit),
+		httpClient:           &http.Client{Timeout: 30 * time.Second},
+		apiKey:               apiKey,
+		baseURL:              defaultBaseURL,
+		limiter:              rate.NewLimiter(rate.Limit(rateLimit), rateLimit),
+		discoverSectionCache: cache.NewTTLCache[*MediaPage](),
+		discoverPageCache:    cache.NewTTLCache[*MediaPage](),
+		externalIDCache:      cache.NewTTLCache[*ExternalIDs](),
+		responseCacheTTL:     defaultResponseCacheTTL,
 	}
 }
 
 // SetBaseURL overrides the API base URL. Used for testing.
 func (c *Client) SetBaseURL(url string) {
 	c.baseURL = url
+}
+
+// Close releases background cache sweepers owned by the client.
+func (c *Client) Close() {
+	if c == nil {
+		return
+	}
+	if c.discoverSectionCache != nil {
+		c.discoverSectionCache.Close()
+	}
+	if c.discoverPageCache != nil {
+		c.discoverPageCache.Close()
+	}
+	if c.externalIDCache != nil {
+		c.externalIDCache.Close()
+	}
 }
 
 // doGet executes a GET request against the TMDB API with rate limiting,
@@ -191,7 +219,40 @@ func (c *Client) DiscoverSection(ctx context.Context, section string, page int) 
 	if page <= 0 {
 		page = 1
 	}
+	cacheKey := "discover_section:" + section + ":" + strconv.Itoa(page)
+	if c.discoverSectionCache != nil {
+		if cached, ok := c.discoverSectionCache.Get(cacheKey); ok {
+			return cloneMediaPage(cached), nil
+		}
+	}
 
+	value, err, _ := c.cacheGroup.Do(cacheKey, func() (any, error) {
+		if c.discoverSectionCache != nil {
+			if cached, ok := c.discoverSectionCache.Get(cacheKey); ok {
+				return cached, nil
+			}
+		}
+		page, err := c.fetchDiscoverSection(ctx, section, page)
+		if err != nil {
+			return nil, err
+		}
+		cached := cloneMediaPage(page)
+		if c.discoverSectionCache != nil && c.responseCacheTTL > 0 {
+			c.discoverSectionCache.Set(cacheKey, cached, c.responseCacheTTL)
+		}
+		return cached, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	pageValue, ok := value.(*MediaPage)
+	if !ok {
+		return nil, fmt.Errorf("tmdb: invalid cached discovery section response")
+	}
+	return cloneMediaPage(pageValue), nil
+}
+
+func (c *Client) fetchDiscoverSection(ctx context.Context, section string, page int) (*MediaPage, error) {
 	values := url.Values{}
 	values.Set("page", strconv.Itoa(page))
 
@@ -235,6 +296,17 @@ func (c *Client) DiscoverSection(ctx context.Context, section string, page int) 
 	default:
 		return nil, fmt.Errorf("tmdb: invalid discovery section: %q", section)
 	}
+}
+
+func cloneMediaPage(page *MediaPage) *MediaPage {
+	if page == nil {
+		return nil
+	}
+	cloned := *page
+	if page.Results != nil {
+		cloned.Results = append([]MediaResult(nil), page.Results...)
+	}
+	return &cloned
 }
 
 func normalizeMoviePage(resp paginatedResponse[mediaMovieResponse]) *MediaPage {
@@ -582,7 +654,40 @@ func (c *Client) DiscoverPage(ctx context.Context, mediaType string, params Disc
 
 	query := buildDiscoverQuery(mediaType, params) + "&page=" + strconv.Itoa(page)
 	path := "/discover/" + mediaType + "?" + query
+	cacheKey := "discover_page:" + path
+	if c.discoverPageCache != nil {
+		if cached, ok := c.discoverPageCache.Get(cacheKey); ok {
+			return cloneMediaPage(cached), nil
+		}
+	}
 
+	value, err, _ := c.cacheGroup.Do(cacheKey, func() (any, error) {
+		if c.discoverPageCache != nil {
+			if cached, ok := c.discoverPageCache.Get(cacheKey); ok {
+				return cached, nil
+			}
+		}
+		page, err := c.fetchDiscoverPage(ctx, mediaType, path)
+		if err != nil {
+			return nil, err
+		}
+		cached := cloneMediaPage(page)
+		if c.discoverPageCache != nil && c.responseCacheTTL > 0 {
+			c.discoverPageCache.Set(cacheKey, cached, c.responseCacheTTL)
+		}
+		return cached, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	pageValue, ok := value.(*MediaPage)
+	if !ok {
+		return nil, fmt.Errorf("tmdb: invalid cached discover page response")
+	}
+	return cloneMediaPage(pageValue), nil
+}
+
+func (c *Client) fetchDiscoverPage(ctx context.Context, mediaType, path string) (*MediaPage, error) {
 	if mediaType == "tv" {
 		var resp paginatedResponse[mediaTVResponse]
 		if err := c.doGet(ctx, path, &resp); err != nil {
@@ -980,6 +1085,48 @@ func (c *Client) GetExternalIDs(ctx context.Context, mediaType string, id int) (
 		return nil, fmt.Errorf("tmdb: invalid media type: %q", mediaType)
 	}
 
+	cacheKey := "external_ids:" + path
+	if c.externalIDCache != nil {
+		if cached, ok := c.externalIDCache.Get(cacheKey); ok {
+			return cloneExternalIDs(cached), nil
+		}
+	}
+
+	value, err, _ := c.cacheGroup.Do(cacheKey, func() (any, error) {
+		if c.externalIDCache != nil {
+			if cached, ok := c.externalIDCache.Get(cacheKey); ok {
+				return cached, nil
+			}
+		}
+		ids, err := c.fetchExternalIDs(ctx, path)
+		if err != nil {
+			return nil, err
+		}
+		cached := cloneExternalIDs(ids)
+		if c.externalIDCache != nil && c.responseCacheTTL > 0 {
+			c.externalIDCache.Set(cacheKey, cached, c.responseCacheTTL)
+		}
+		return cached, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	ids, ok := value.(*ExternalIDs)
+	if !ok {
+		return nil, fmt.Errorf("tmdb: invalid cached external IDs response")
+	}
+	return cloneExternalIDs(ids), nil
+}
+
+func cloneExternalIDs(ids *ExternalIDs) *ExternalIDs {
+	if ids == nil {
+		return nil
+	}
+	cloned := *ids
+	return &cloned
+}
+
+func (c *Client) fetchExternalIDs(ctx context.Context, path string) (*ExternalIDs, error) {
 	var resp ExternalIDs
 	if err := c.doGet(ctx, path, &resp); err != nil {
 		return nil, err

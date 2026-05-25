@@ -1,16 +1,20 @@
-import { useMemo } from "react";
 import { useNavigate, useParams } from "react-router";
 import { ArrowLeft, Check, Clock, Loader2, Plus, Star } from "lucide-react";
+import CastCarousel from "@/components/CastCarousel";
 import MediaCarousel from "@/components/MediaCarousel";
 import RequestPosterCard from "@/components/RequestPosterCard";
 import DetailHero from "@/pages/ItemDetail/DetailHero";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import type { RequestMediaCastMember, RequestMediaDetail, RequestMediaResult } from "@/api/types";
+import type {
+  CastMember,
+  RequestMediaCastMember,
+  RequestMediaDetail,
+  RequestMediaResult,
+} from "@/api/types";
 import { useCreateMediaRequest, useRequestMediaDetail } from "@/hooks/queries/useRequests";
 import { useDocumentTitle } from "@/hooks/useDocumentTitle";
 import { cn } from "@/lib/utils";
-import { getInitials } from "@/lib/text";
 import {
   formatRequestReason,
   formatRequestStatus,
@@ -80,11 +84,13 @@ export default function RequestDetail() {
         }
       />
 
-      <div className="page-shell space-y-12 py-10 sm:space-y-14">
+      <div className="space-y-12 py-10 sm:space-y-14">
         {item.cast && item.cast.length > 0 && (
-          <section>
-            <h2 className="mb-5 text-xl font-semibold tracking-tight">Cast</h2>
-            <RequestCastRow cast={item.cast} />
+          <section className="section-row">
+            <div className="mb-5 px-4 sm:px-6 lg:px-10 xl:px-12">
+              <h2 className="text-foreground text-xl font-semibold tracking-tight">Cast</h2>
+            </div>
+            <CastCarousel cast={adaptRequestCast(item.cast)} fullBleed />
           </section>
         )}
 
@@ -99,6 +105,16 @@ export default function RequestDetail() {
       </div>
     </div>
   );
+}
+
+function adaptRequestCast(cast: RequestMediaCastMember[]): CastMember[] {
+  return cast.map((member) => ({
+    name: member.name,
+    character: member.character ?? "",
+    order: member.order,
+    person_id: "",
+    photo_url: tmdbImageURL(member.profile_path, "w185") ?? undefined,
+  }));
 }
 
 function RequestContext({ mediaType }: { mediaType: "movie" | "series" }) {
@@ -311,54 +327,6 @@ function statusToneForStatus(status: string): "amber" | "sky" | "emerald" | "zin
   }
 }
 
-function RequestCastRow({ cast }: { cast: RequestMediaCastMember[] }) {
-  const sorted = useMemo(
-    () =>
-      cast
-        .slice()
-        .sort((a, b) => a.order - b.order)
-        .slice(0, 24),
-    [cast],
-  );
-  return (
-    <div className="-mx-4 overflow-x-auto px-4 sm:-mx-6 sm:px-6 lg:-mx-10 lg:px-10 xl:-mx-12 xl:px-12">
-      <ul role="list" className="flex w-max list-none gap-3">
-        {sorted.map((member, index) => {
-          const photo = tmdbImageURL(member.profile_path, "w185");
-          return (
-            <li key={`${member.name}-${index}`} className="w-[110px] shrink-0">
-              <div className="media-card-image mb-2.5 aspect-[2/3] overflow-hidden rounded-lg">
-                {photo ? (
-                  <img
-                    src={photo}
-                    alt={member.name}
-                    loading="lazy"
-                    className="h-full w-full object-cover"
-                  />
-                ) : (
-                  <div className="bg-surface text-muted-foreground flex h-full w-full items-center justify-center text-lg font-semibold">
-                    {getInitials(member.name)}
-                  </div>
-                )}
-              </div>
-              <div className="px-0.5">
-                <div className="text-foreground truncate text-[13px] font-medium">
-                  {member.name}
-                </div>
-                {member.character ? (
-                  <div className="text-muted-foreground truncate text-[11px]">
-                    {member.character}
-                  </div>
-                ) : null}
-              </div>
-            </li>
-          );
-        })}
-      </ul>
-    </div>
-  );
-}
-
 function RecommendationsRow({
   recommendations,
   pendingTMDBID,
@@ -371,24 +339,17 @@ function RecommendationsRow({
   onRequest: (item: RequestMediaResult) => void;
 }) {
   return (
-    <section className="space-y-1">
-      <div className="px-4 sm:px-6 lg:px-10 xl:px-12">
-        <span className="text-muted-foreground text-[10px] font-semibold tracking-[0.22em] uppercase">
-          More like this
-        </span>
-      </div>
-      <MediaCarousel title="Recommendations">
-        {recommendations.map((item) => (
-          <RequestPosterCard
-            key={`${item.media_type}-${item.tmdb_id}`}
-            variant="discover"
-            item={item}
-            isSubmitting={isSubmitting && pendingTMDBID === item.tmdb_id}
-            onRequest={() => onRequest(item)}
-          />
-        ))}
-      </MediaCarousel>
-    </section>
+    <MediaCarousel title="More Like This">
+      {recommendations.map((item) => (
+        <RequestPosterCard
+          key={`${item.media_type}-${item.tmdb_id}`}
+          variant="discover"
+          item={item}
+          isSubmitting={isSubmitting && pendingTMDBID === item.tmdb_id}
+          onRequest={() => onRequest(item)}
+        />
+      ))}
+    </MediaCarousel>
   );
 }
 
@@ -439,10 +400,12 @@ function RequestDetailSkeleton() {
           </div>
         </div>
       </section>
-      <div className="page-shell space-y-12 py-10 sm:space-y-14">
-        <div>
-          <Skeleton className="mb-5 h-6 w-24 rounded" />
-          <div className="flex gap-3 overflow-hidden">
+      <div className="space-y-12 py-10 sm:space-y-14">
+        <div className="section-row">
+          <div className="mb-5 px-4 sm:px-6 lg:px-10 xl:px-12">
+            <Skeleton className="h-6 w-24 rounded" />
+          </div>
+          <div className="flex gap-3 overflow-hidden pl-4 sm:pl-6 lg:pl-10 xl:pl-12">
             {Array.from({ length: 8 }).map((_, i) => (
               <Skeleton key={i} className="aspect-[2/3] w-[110px] shrink-0 rounded-lg" />
             ))}
