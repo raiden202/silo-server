@@ -1270,7 +1270,10 @@ func main() {
 		requestReconcileSvc := mediarequests.NewService(
 			mediarequests.NewRepository(deps.DB),
 			nil,
-			mediarequests.NewCatalogPresence(catalog.NewItemRepository(deps.DB)),
+			mediarequests.NewCatalogPresence(
+				catalog.NewItemRepository(deps.DB),
+				catalog.NewProviderIDRepository(deps.DB),
+			),
 		)
 		requestReconcileSvc.SetSecretResolver(settingsRepo)
 		requestReconcileSvc.SetFulfillmentAdapters(radarr.NewClient(nil), sonarr.NewClient(nil))

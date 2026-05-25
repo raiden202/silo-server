@@ -2,47 +2,116 @@ package requests
 
 import (
 	"context"
+	"log/slog"
 	"strconv"
+	"strings"
 
 	"github.com/Silo-Server/silo-server/internal/catalog"
 )
+
+type PresenceCandidate struct {
+	TMDBID int
+	TVDBID *int
+	IMDbID string
+}
+
+type PresenceMatch struct {
+	Available       bool
+	ContentID       string
+	MatchedProvider string
+}
 
 type PresenceResolver interface {
 	LookupTMDB(ctx context.Context, mediaType MediaType, tmdbIDs []int) (map[int]bool, error)
 }
 
+type presenceItemLookup interface {
+	LookupExternalIDs(ctx context.Context, mediaType string, candidates []catalog.ExternalIDLookupCandidate) ([]catalog.ExternalIDMatchRow, error)
+}
+
+type tmdbBackfiller interface {
+	AttachTMDBID(ctx context.Context, contentID, itemType string, tmdbID int) error
+}
+
 type CatalogPresence struct {
-	items *catalog.ItemRepository
+	items        presenceItemLookup
+	tmdbBackfill tmdbBackfiller
 }
 
-func NewCatalogPresence(items *catalog.ItemRepository) *CatalogPresence {
-	return &CatalogPresence{items: items}
+func NewCatalogPresence(items *catalog.ItemRepository, providerIDs ...*catalog.ProviderIDRepository) *CatalogPresence {
+	var backfill tmdbBackfiller
+	if len(providerIDs) > 0 {
+		backfill = providerIDs[0]
+	}
+	return &CatalogPresence{items: items, tmdbBackfill: backfill}
 }
 
-func (p *CatalogPresence) LookupTMDB(ctx context.Context, mediaType MediaType, tmdbIDs []int) (map[int]bool, error) {
-	out := map[int]bool{}
-	if p == nil || p.items == nil || len(tmdbIDs) == 0 {
+func (p *CatalogPresence) Lookup(ctx context.Context, mediaType MediaType, candidates []PresenceCandidate) (map[int]PresenceMatch, error) {
+	out := map[int]PresenceMatch{}
+	if p == nil || p.items == nil || len(candidates) == 0 {
 		return out, nil
 	}
-	ids := make([]string, 0, len(tmdbIDs))
-	for _, id := range tmdbIDs {
-		if id > 0 {
-			ids = append(ids, strconv.Itoa(id))
+
+	lookupCandidates := make([]catalog.ExternalIDLookupCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		if candidate.TMDBID <= 0 {
+			continue
 		}
+		row := catalog.ExternalIDLookupCandidate{
+			TMDBID: strconv.Itoa(candidate.TMDBID),
+			IMDbID: strings.TrimSpace(candidate.IMDbID),
+		}
+		if candidate.TVDBID != nil && *candidate.TVDBID > 0 {
+			row.TVDBID = strconv.Itoa(*candidate.TVDBID)
+		}
+		lookupCandidates = append(lookupCandidates, row)
 	}
-	if len(ids) == 0 {
+	if len(lookupCandidates) == 0 {
 		return out, nil
 	}
-	internalType := string(mediaType)
-	rows, err := p.items.LookupTMDBIDs(ctx, internalType, ids)
+
+	rows, err := p.items.LookupExternalIDs(ctx, string(mediaType), lookupCandidates)
 	if err != nil {
 		return nil, err
 	}
 	for _, row := range rows {
-		id, err := strconv.Atoi(row.TMDBID)
-		if err == nil {
-			out[id] = true
+		id, err := strconv.Atoi(row.QueryTMDBID)
+		if err != nil || id <= 0 {
+			continue
 		}
+		out[id] = PresenceMatch{
+			Available:       true,
+			ContentID:       row.MediaID,
+			MatchedProvider: row.MatchedProvider,
+		}
+		if row.MatchedProvider != "tmdb" && p.tmdbBackfill != nil {
+			if err := p.tmdbBackfill.AttachTMDBID(ctx, row.MediaID, string(mediaType), id); err != nil {
+				slog.Warn("requests: failed to backfill tmdb id from presence lookup",
+					"content_id", row.MediaID,
+					"media_type", mediaType,
+					"tmdb_id", id,
+					"matched_provider", row.MatchedProvider,
+					"error", err)
+			}
+		}
+	}
+	return out, nil
+}
+
+func (p *CatalogPresence) LookupTMDB(ctx context.Context, mediaType MediaType, tmdbIDs []int) (map[int]bool, error) {
+	candidates := make([]PresenceCandidate, 0, len(tmdbIDs))
+	for _, id := range tmdbIDs {
+		if id > 0 {
+			candidates = append(candidates, PresenceCandidate{TMDBID: id})
+		}
+	}
+	matches, err := p.Lookup(ctx, mediaType, candidates)
+	if err != nil {
+		return nil, err
+	}
+	out := map[int]bool{}
+	for id, match := range matches {
+		out[id] = match.Available
 	}
 	return out, nil
 }

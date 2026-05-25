@@ -393,7 +393,7 @@ func NewRouter(deps Dependencies) chi.Router {
 		requestSvc := mediarequests.NewService(
 			mediarequests.NewRepository(deps.DB),
 			tmdb.NewClient(tmdbAPIKey, 40),
-			mediarequests.NewCatalogPresence(itemRepo),
+			mediarequests.NewCatalogPresence(itemRepo, providerIDRepo),
 		)
 		requestSvc.SetSecretResolver(settingsRepo)
 		requestSvc.SetFulfillmentAdapters(radarr.NewClient(nil), sonarr.NewClient(nil))
