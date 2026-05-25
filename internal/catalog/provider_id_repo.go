@@ -70,6 +70,36 @@ func (r *ProviderIDRepository) AttachTMDBID(ctx context.Context, contentID, item
 		return fmt.Errorf("media item tmdb id conflict: got %q, want %q", existingTMDBID, tmdbText)
 	}
 
+	var existingProviderTMDBID string
+	err = tx.QueryRow(ctx, `
+		SELECT provider_id
+		FROM media_item_provider_ids
+		WHERE content_id = $1 AND provider = 'tmdb'
+		FOR UPDATE
+	`, contentID).Scan(&existingProviderTMDBID)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("loading media item tmdb provider id: %w", err)
+	}
+	if existingProviderTMDBID != "" && existingProviderTMDBID != tmdbText {
+		return fmt.Errorf("media item tmdb provider id conflict: got %q, want %q", existingProviderTMDBID, tmdbText)
+	}
+
+	var existingOwnerContentID string
+	err = tx.QueryRow(ctx, `
+		SELECT content_id
+		FROM media_items
+		WHERE type = $1
+		  AND tmdb_id = $2
+		  AND content_id <> $3
+		LIMIT 1
+	`, itemType, tmdbText, contentID).Scan(&existingOwnerContentID)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("checking tmdb id owner: %w", err)
+	}
+	if existingOwnerContentID != "" {
+		return fmt.Errorf("tmdb id %q already belongs to content_id %q", tmdbText, existingOwnerContentID)
+	}
+
 	if _, err := tx.Exec(ctx, `
 		UPDATE media_items
 		SET tmdb_id = $1,

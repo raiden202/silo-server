@@ -1389,9 +1389,9 @@ func lookupExternalIDsSQL() string {
 			JOIN media_items mi
 			  ON mi.type = $5
 			 AND (
-				(r.provider = 'tmdb' AND mi.tmdb_id = r.provider_id)
-				OR (r.provider = 'tvdb' AND mi.tvdb_id = r.provider_id)
-				OR (r.provider = 'imdb' AND mi.imdb_id = r.provider_id)
+				(r.provider = 'tmdb' AND mi.tmdb_id <> '' AND mi.tmdb_id = r.provider_id)
+				OR (r.provider = 'tvdb' AND mi.tvdb_id <> '' AND mi.tvdb_id = r.provider_id)
+				OR (r.provider = 'imdb' AND mi.imdb_id <> '' AND mi.imdb_id = r.provider_id)
 			 )
 			JOIN media_item_libraries mil ON mil.content_id = mi.content_id
 			JOIN media_folders mf ON mf.id = mil.media_folder_id
