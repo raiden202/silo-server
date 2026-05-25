@@ -95,6 +95,10 @@ func (f *fakeRequestService) Decline(context.Context, mediarequests.Viewer, stri
 	return nil, nil
 }
 
+func (f *fakeRequestService) Cancel(context.Context, mediarequests.Viewer, string, string) (*mediarequests.Request, error) {
+	return nil, nil
+}
+
 func (f *fakeRequestService) Retry(context.Context, mediarequests.Viewer, string) (*mediarequests.Request, error) {
 	return nil, nil
 }

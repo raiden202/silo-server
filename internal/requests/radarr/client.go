@@ -34,38 +34,21 @@ type addMovieOptions struct {
 	Monitor        string `json:"monitor,omitempty"`
 }
 
-type rootFolderResource struct {
-	Path       string `json:"path"`
-	FreeSpace  int64  `json:"freeSpace"`
-	TotalSpace int64  `json:"totalSpace"`
-	Accessible bool   `json:"accessible"`
-}
-
-type qualityProfileResource struct {
-	ID   int    `json:"id"`
-	Name string `json:"name"`
-}
-
-type tagResource struct {
-	ID    int    `json:"id"`
-	Label string `json:"label"`
-}
-
 func NewClient(httpClient *http.Client) *Client {
 	return &Client{httpClient: httpClient}
 }
 
 func (c *Client) ListMovieIntegrationOptions(ctx context.Context, integration mediarequests.Integration) (*mediarequests.IntegrationOptions, error) {
 	client := arrclient.New(integration.BaseURL, integration.APIKeyRef, c.httpClient)
-	rootFolders, err := c.rootFolders(ctx, client)
+	rootFolders, err := arrclient.ListRootFolders(ctx, client)
 	if err != nil {
 		return nil, err
 	}
-	qualityProfiles, err := c.qualityProfiles(ctx, client)
+	qualityProfiles, err := arrclient.ListQualityProfiles(ctx, client)
 	if err != nil {
 		return nil, err
 	}
-	tags, err := c.tags(ctx, client)
+	tags, err := arrclient.ListTags(ctx, client)
 	if err != nil {
 		return nil, err
 	}
@@ -115,7 +98,7 @@ func (c *Client) SubmitMovie(ctx context.Context, req mediarequests.Request, int
 		if found, lookErr := c.findMovieByTMDBID(ctx, client, req.TMDBID); lookErr == nil && found.ID > 0 {
 			return resultFromMovie(found), nil
 		}
-		return acceptedWithoutResponse("radarr"), nil
+		return arrclient.AcceptedWithoutResponse("radarr"), nil
 	}
 	return resultFromMovie(created), nil
 }
@@ -151,7 +134,7 @@ func (c *Client) CheckMovieStatus(ctx context.Context, req mediarequests.Request
 		return mediarequests.FulfillmentStatus{}, err
 	}
 	evaluation := arrclient.EvaluateQueue(queues)
-	return statusFromQueueEvaluation("radarr", movieID, evaluation), nil
+	return arrclient.StatusFromQueueEvaluation("radarr", movieID, evaluation), nil
 }
 
 func (c *Client) lookupMovie(ctx context.Context, client *arrclient.Client, tmdbID int) (movieResource, error) {
@@ -181,53 +164,6 @@ func (c *Client) queueDetails(ctx context.Context, client *arrclient.Client, mov
 	return queues, nil
 }
 
-func (c *Client) rootFolders(ctx context.Context, client *arrclient.Client) ([]mediarequests.IntegrationRootFolder, error) {
-	var resources []rootFolderResource
-	if err := client.GetJSON(ctx, "/api/v3/rootfolder", &resources); err != nil {
-		return nil, err
-	}
-	out := make([]mediarequests.IntegrationRootFolder, 0, len(resources))
-	for _, resource := range resources {
-		out = append(out, mediarequests.IntegrationRootFolder{
-			Path:       resource.Path,
-			FreeSpace:  resource.FreeSpace,
-			TotalSpace: resource.TotalSpace,
-			Accessible: resource.Accessible,
-		})
-	}
-	return out, nil
-}
-
-func (c *Client) qualityProfiles(ctx context.Context, client *arrclient.Client) ([]mediarequests.IntegrationQualityProfile, error) {
-	var resources []qualityProfileResource
-	if err := client.GetJSON(ctx, "/api/v3/qualityprofile", &resources); err != nil {
-		return nil, err
-	}
-	out := make([]mediarequests.IntegrationQualityProfile, 0, len(resources))
-	for _, resource := range resources {
-		out = append(out, mediarequests.IntegrationQualityProfile{
-			ID:   resource.ID,
-			Name: resource.Name,
-		})
-	}
-	return out, nil
-}
-
-func (c *Client) tags(ctx context.Context, client *arrclient.Client) ([]mediarequests.IntegrationTag, error) {
-	var resources []tagResource
-	if err := client.GetJSON(ctx, "/api/v3/tag", &resources); err != nil {
-		return nil, err
-	}
-	out := make([]mediarequests.IntegrationTag, 0, len(resources))
-	for _, resource := range resources {
-		out = append(out, mediarequests.IntegrationTag{
-			ID:    resource.ID,
-			Label: resource.Label,
-		})
-	}
-	return out, nil
-}
-
 func resultFromMovie(movie movieResource) mediarequests.FulfillmentResult {
 	externalID := ""
 	if movie.ID > 0 {
@@ -237,31 +173,5 @@ func resultFromMovie(movie movieResource) mediarequests.FulfillmentResult {
 		IntegrationKind: "radarr",
 		ExternalID:      externalID,
 		ExternalStatus:  "queued",
-	}
-}
-
-func acceptedWithoutResponse(kind string) mediarequests.FulfillmentResult {
-	return mediarequests.FulfillmentResult{
-		IntegrationKind: kind,
-		ExternalStatus:  "accepted_without_response",
-	}
-}
-
-func statusFromQueueEvaluation(kind string, externalID int, evaluation arrclient.QueueEvaluation) mediarequests.FulfillmentStatus {
-	status := mediarequests.StatusQueued
-	outcome := mediarequests.Outcome("")
-	if evaluation.State == arrclient.QueueStateDownloading {
-		status = mediarequests.StatusDownloading
-	}
-	if evaluation.State == arrclient.QueueStateFailed {
-		outcome = mediarequests.OutcomeFailed
-	}
-	return mediarequests.FulfillmentStatus{
-		Status:          status,
-		Outcome:         outcome,
-		IntegrationKind: kind,
-		ExternalID:      strconv.Itoa(externalID),
-		ExternalStatus:  evaluation.ExternalStatus,
-		Message:         evaluation.Message,
 	}
 }
