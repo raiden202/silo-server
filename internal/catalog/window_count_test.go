@@ -41,9 +41,11 @@ func TestQueryExecutor_PreviewPage_SkipTotal_OmitsWindowCount(t *testing.T) {
 	}
 }
 
-// TestBrowseRepository_browse_UsesWindowCount asserts that buildBrowsePlan +
-// pagedSQL emit COUNT(*) OVER () in the data SELECT when includeTotal is true.
-func TestBrowseRepository_browse_UsesWindowCount(t *testing.T) {
+// TestBrowseRepository_browse_ExactTotalOmitsWindowCount asserts that
+// buildBrowsePlan + pagedSQL keep the data SELECT free of COUNT(*) OVER ().
+// BrowsePage runs the exact count separately when needed so large ordered
+// catalogs can use top-N/index plans for the page fetch.
+func TestBrowseRepository_browse_ExactTotalOmitsWindowCount(t *testing.T) {
 	repo := &BrowseRepository{}
 	plan, earlyEmpty, err := repo.buildBrowsePlan(BrowseFilters{Limit: 20})
 	if err != nil {
@@ -53,8 +55,8 @@ func TestBrowseRepository_browse_UsesWindowCount(t *testing.T) {
 		t.Fatalf("did not expect early empty result for default filters")
 	}
 	sql, _ := plan.pagedSQL(true)
-	if !strings.Contains(sql, "COUNT(*) OVER ()") {
-		t.Fatalf("expected COUNT(*) OVER () for single-pass browse count; got:\n%s", sql)
+	if strings.Contains(sql, "COUNT(*) OVER ()") {
+		t.Fatalf("exact browse totals must omit COUNT(*) OVER (); got:\n%s", sql)
 	}
 }
 
