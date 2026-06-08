@@ -5,10 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strconv"
+	"net/url"
 	"strings"
 
 	"github.com/Silo-Server/silo-server/internal/catalog"
+	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/recommendations"
 	"github.com/Silo-Server/silo-server/internal/scanner"
 	"github.com/Silo-Server/silo-server/internal/userstore"
@@ -20,6 +21,7 @@ import (
 type AudiobookHandler struct {
 	Items         *catalog.ItemRepository
 	Files         *scanner.FileRepository
+	Catalog       *catalog.CatalogResolver
 	StoreProvider userstore.UserStoreProvider
 	Detail        *catalog.DetailService
 	// Recs is optional. When set, the detail handler uses embedding-based
@@ -33,77 +35,109 @@ type AudiobookHandler struct {
 // Paginated catalog of media_items with type='audiobook' scoped to the
 // caller's accessible libraries.
 func (h *AudiobookHandler) HandleListAudiobooks(w http.ResponseWriter, r *http.Request) {
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	if limit <= 0 || limit > 200 {
-		limit = 50
-	}
-	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
-	if offset < 0 {
-		offset = 0
-	}
-
-	ctx := r.Context()
-	access := requestAccessFilter(r)
-	genre := r.URL.Query().Get("genre")
-	conditions, args, argIdx, empty := audiobookListConditions(access, genre)
-	if empty {
-		writeAudiobookListResponse(w, nil, 0, limit, offset)
+	if h == nil || h.Catalog == nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "audiobook catalog is not configured")
 		return
 	}
 
-	pool := h.Files.Pool()
-	var total int
-	countSQL := "SELECT COUNT(*) FROM media_items mi WHERE " + strings.Join(conditions, " AND ")
-	if err := pool.QueryRow(ctx, countSQL, args...).Scan(&total); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", "list audiobooks count failed")
+	req, err := audiobookCatalogRequest(r.URL.Query())
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
 
-	dataArgs := append([]any(nil), args...)
-	limitIdx := argIdx
-	dataArgs = append(dataArgs, limit)
-	offsetIdx := argIdx + 1
-	dataArgs = append(dataArgs, offset)
-
-	rows, err := pool.Query(ctx, fmt.Sprintf(`
-		SELECT
-			mi.content_id,
-			mi.title,
-			COALESCE(mi.year, 0),
-			COALESCE(mi.poster_path, ''),
-			COALESCE(SUM(mf.duration), 0)::int           AS duration_seconds,
-			COALESCE(MIN(mf.container), '')              AS container,
-			COALESCE(MIN(mf.codec_audio), '')            AS codec_audio,
-			COUNT(mf.id)                                 AS file_count
-		FROM media_items mi
-		LEFT JOIN media_files mf ON mf.content_id = mi.content_id
-		WHERE %s
-		GROUP BY mi.content_id, mi.title, mi.year, mi.poster_path, mi.sort_title
-		ORDER BY LOWER(mi.sort_title), LOWER(mi.title)
-		LIMIT $%d OFFSET $%d
-	`, strings.Join(conditions, " AND "), limitIdx, offsetIdx), dataArgs...)
+	result, err := h.Catalog.Resolve(r.Context(), req, requestAccessFilter(r))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "list audiobooks failed")
 		return
 	}
+
+	items := h.audiobookListItems(r.Context(), result.Items)
+	writeAudiobookListResponse(w, items, result.Total, req.Limit, req.Offset)
+}
+
+func audiobookCatalogRequest(values url.Values) (catalog.CatalogRequest, error) {
+	catalogValues := make(url.Values, len(values)+1)
+	for key, value := range values {
+		catalogValues[key] = append([]string(nil), value...)
+	}
+	catalogValues.Set("type", "audiobook")
+	return catalog.ParseCatalogRequest(catalogValues)
+}
+
+func (h *AudiobookHandler) audiobookListItems(ctx context.Context, items []*models.MediaItem) []audiobookListItem {
+	out := make([]audiobookListItem, 0, len(items))
+	stats := h.audiobookListStats(ctx, items)
+	for _, item := range items {
+		if item == nil {
+			continue
+		}
+		resp := audiobookListItem{
+			ContentID: item.ContentID,
+			Title:     item.Title,
+			Year:      item.Year,
+			PosterURL: h.presignAudiobookPoster(ctx, item.PosterPath),
+		}
+		if stat, ok := stats[item.ContentID]; ok {
+			resp.DurationSeconds = stat.DurationSeconds
+			resp.Container = stat.Container
+			resp.CodecAudio = stat.CodecAudio
+			resp.FileCount = stat.FileCount
+		}
+		out = append(out, resp)
+	}
+	return out
+}
+
+type audiobookListStat struct {
+	DurationSeconds int
+	Container       string
+	CodecAudio      string
+	FileCount       int
+}
+
+func (h *AudiobookHandler) audiobookListStats(ctx context.Context, items []*models.MediaItem) map[string]audiobookListStat {
+	if h == nil || h.Files == nil || len(items) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		if item != nil {
+			ids = append(ids, item.ContentID)
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	rows, err := h.Files.Pool().Query(ctx, `
+		SELECT
+			content_id,
+			COALESCE(SUM(duration), 0)::int AS duration_seconds,
+			COALESCE(MIN(container), '') AS container,
+			COALESCE(MIN(codec_audio), '') AS codec_audio,
+			COUNT(id) AS file_count
+		FROM media_files
+		WHERE content_id = ANY($1)
+		GROUP BY content_id
+	`, ids)
+	if err != nil {
+		return nil
+	}
 	defer rows.Close()
 
-	items := make([]audiobookListItem, 0, limit)
+	stats := make(map[string]audiobookListStat, len(ids))
 	for rows.Next() {
-		var it audiobookListItem
-		var posterPath string
-		if err := rows.Scan(&it.ContentID, &it.Title, &it.Year, &posterPath, &it.DurationSeconds, &it.Container, &it.CodecAudio, &it.FileCount); err != nil {
-			writeError(w, http.StatusInternalServerError, "internal_error", "scan audiobook row failed")
-			return
+		var contentID string
+		var stat audiobookListStat
+		if err := rows.Scan(&contentID, &stat.DurationSeconds, &stat.Container, &stat.CodecAudio, &stat.FileCount); err != nil {
+			return nil
 		}
-		it.PosterURL = h.presignAudiobookPoster(ctx, posterPath)
-		items = append(items, it)
+		stats[contentID] = stat
 	}
 	if err := rows.Err(); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", "iterate audiobook rows failed")
-		return
+		return nil
 	}
-	writeAudiobookListResponse(w, items, total, limit, offset)
+	return stats
 }
 
 func audiobookListConditions(access catalog.AccessFilter, genre string) ([]string, []any, int, bool) {

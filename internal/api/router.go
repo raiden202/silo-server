@@ -422,12 +422,10 @@ func NewRouter(deps Dependencies) chi.Router {
 			itemsHandler.SetLocalWatchEventDispatcher(dispatcher)
 		}
 		catalogResourceHandler = handlers.NewCatalogResourceHandler(itemsHandler)
-		catalogHandler = handlers.NewCatalogHandler(
-			catalog.NewCatalogResolver(browseRepo, itemRepo).
-				WithEpisodeRepository(episodeRepo).
-				WithUserStoreProvider(deps.UserStoreProvider),
-			itemsHandler,
-		)
+		catalogResolver := catalog.NewCatalogResolver(browseRepo, itemRepo).
+			WithEpisodeRepository(episodeRepo).
+			WithUserStoreProvider(deps.UserStoreProvider)
+		catalogHandler = handlers.NewCatalogHandler(catalogResolver, itemsHandler)
 
 		tmdbAPIKey := ""
 		if deps.Config != nil {
@@ -1814,6 +1812,7 @@ func NewRouter(deps Dependencies) chi.Router {
 					audiobookHandler := &handlers.AudiobookHandler{
 						Items:         itemRepo,
 						Files:         deps.FileRepo,
+						Catalog:       catalogResolver,
 						Detail:        detailSvc,
 						StoreProvider: deps.UserStoreProvider,
 						Recs:          recsRepoForStale,
