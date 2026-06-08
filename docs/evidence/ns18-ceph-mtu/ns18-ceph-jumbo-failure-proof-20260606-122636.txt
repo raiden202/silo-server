@@ -1,0 +1,36 @@
+ns18 Ceph jumbo failure proof 2026-06-06T12:26:36+02:00
+Setting vmbr0.400 to 9000 temporarily for probe
+--- vmbr0.400 ---
+10: vmbr0.400@vmbr0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 9000 qdisc noqueue state UP mode DEFAULT group default qlen 20000
+    link/ether e4:43:4b:76:30:cc brd ff:ff:ff:ff:ff:ff promiscuity 0 allmulti 0 minmtu 0 maxmtu 65535 
+    vlan protocol 802.1Q id 400 <REORDER_HDR> addrgenmode eui64 numtxqueues 1 numrxqueues 1 gso_max_size 65536 gso_max_segs 65535 tso_max_size 65536 tso_max_segs 65535 gro_max_size 65536 gso_ipv4_max_size 65536 gro_ipv4_max_size 65536 
+--- matrix at mtu 9000 ---
+=== 10.10.3.58 ===
+payload=1472 1 packets transmitted, 1 received, 0% packet loss, time 0ms rtt min/avg/max/mdev = 0.076/0.076/0.076/0.000 ms  rc=0
+payload=4000 1 packets transmitted, 1 received, 0% packet loss, time 0ms rtt min/avg/max/mdev = 0.152/0.152/0.152/0.000 ms  rc=0
+payload=8972 1 packets transmitted, 1 received, 0% packet loss, time 0ms rtt min/avg/max/mdev = 0.095/0.095/0.095/0.000 ms  rc=0
+=== 10.10.3.59 ===
+payload=1472 1 packets transmitted, 1 received, 0% packet loss, time 0ms rtt min/avg/max/mdev = 0.075/0.075/0.075/0.000 ms  rc=0
+payload=4000 1 packets transmitted, 0 received, 100% packet loss, time 0ms   rc=1
+payload=8972 1 packets transmitted, 1 received, 0% packet loss, time 0ms rtt min/avg/max/mdev = 0.101/0.101/0.101/0.000 ms  rc=0
+=== 10.10.3.60 ===
+payload=1472 1 packets transmitted, 1 received, 0% packet loss, time 0ms rtt min/avg/max/mdev = 0.052/0.052/0.052/0.000 ms  rc=0
+payload=4000 1 packets transmitted, 0 received, 100% packet loss, time 0ms   rc=1
+payload=8972 1 packets transmitted, 0 received, 100% packet loss, time 0ms   rc=1
+=== 10.10.3.12 ===
+payload=1472 1 packets transmitted, 1 received, 0% packet loss, time 0ms rtt min/avg/max/mdev = 0.053/0.053/0.053/0.000 ms  rc=0
+payload=4000 1 packets transmitted, 0 received, 100% packet loss, time 0ms   rc=1
+payload=8972 1 packets transmitted, 0 received, 100% packet loss, time 0ms   rc=1
+=== 10.10.3.18 ===
+payload=1472 1 packets transmitted, 1 received, 0% packet loss, time 0ms rtt min/avg/max/mdev = 0.069/0.069/0.069/0.000 ms  rc=0
+payload=4000 1 packets transmitted, 0 received, 100% packet loss, time 0ms   rc=1
+payload=8972 1 packets transmitted, 0 received, 100% packet loss, time 0ms   rc=1
+=== 10.10.3.43 ===
+payload=1472 1 packets transmitted, 1 received, 0% packet loss, time 0ms rtt min/avg/max/mdev = 0.074/0.074/0.074/0.000 ms  rc=0
+payload=4000 1 packets transmitted, 0 received, 100% packet loss, time 0ms   rc=1
+payload=8972 1 packets transmitted, 1 received, 0% packet loss, time 0ms rtt min/avg/max/mdev = 0.114/0.114/0.114/0.000 ms  rc=0
+Restoring vmbr0.400 to 1500
+--- vmbr0.400 restored ---
+10: vmbr0.400@vmbr0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP mode DEFAULT group default qlen 20000
+    link/ether e4:43:4b:76:30:cc brd ff:ff:ff:ff:ff:ff promiscuity 0 allmulti 0 minmtu 0 maxmtu 65535 
+    vlan protocol 802.1Q id 400 <REORDER_HDR> addrgenmode eui64 numtxqueues 1 numrxqueues 1 gso_max_size 65536 gso_max_segs 65535 tso_max_size 65536 tso_max_segs 65535 gro_max_size 65536 gso_ipv4_max_size 65536 gro_ipv4_max_size 65536 

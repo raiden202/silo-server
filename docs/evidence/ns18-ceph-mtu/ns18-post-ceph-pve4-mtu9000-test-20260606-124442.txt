@@ -1,0 +1,43 @@
+ns18 post-ceph-pve4 MTU 9000 test 2026-06-06T12:44:42+02:00
+--- versions ---
+ceph version 19.2.3 (d74d168b1c80fb01e1a30d5e4ca9a45b12bc145b) squid (stable)
+ceph-common	19.2.3-pve4
+ceph-fuse	19.2.3-pve4
+libcephfs2	19.2.3-pve4
+librados2	19.2.3-pve4
+librbd1	19.2.3-pve4
+librgw2	19.2.3-pve4
+python3-ceph-common	19.2.3-pve4
+python3-rados	19.2.3-pve4
+python3-rbd	19.2.3-pve4
+python3-rgw	19.2.3-pve4
+--- set mtu 9000 ---
+10: vmbr0.400@vmbr0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 9000 qdisc noqueue state UP mode DEFAULT group default qlen 20000\    link/ether e4:43:4b:76:30:cc brd ff:ff:ff:ff:ff:ff
+--- jumbo matrix ---
+=== 10.10.3.58 ===
+payload=1472 1 packets transmitted, 1 received, 0% packet loss, time 0ms rtt min/avg/max/mdev = 0.085/0.085/0.085/0.000 ms  rc=0
+payload=4000 1 packets transmitted, 0 received, 100% packet loss, time 0ms   rc=1
+payload=8972 1 packets transmitted, 0 received, 100% packet loss, time 0ms   rc=1
+=== 10.10.3.59 ===
+payload=1472 1 packets transmitted, 1 received, 0% packet loss, time 0ms rtt min/avg/max/mdev = 0.075/0.075/0.075/0.000 ms  rc=0
+payload=4000 1 packets transmitted, 1 received, 0% packet loss, time 0ms rtt min/avg/max/mdev = 0.075/0.075/0.075/0.000 ms  rc=0
+payload=8972 1 packets transmitted, 0 received, 100% packet loss, time 0ms   rc=1
+=== 10.10.3.60 ===
+payload=1472 1 packets transmitted, 1 received, 0% packet loss, time 0ms rtt min/avg/max/mdev = 0.734/0.734/0.734/0.000 ms  rc=0
+payload=4000 1 packets transmitted, 0 received, 100% packet loss, time 0ms   rc=1
+payload=8972 1 packets transmitted, 0 received, 100% packet loss, time 0ms   rc=1
+=== 10.10.3.12 ===
+payload=1472 1 packets transmitted, 1 received, 0% packet loss, time 0ms rtt min/avg/max/mdev = 0.077/0.077/0.077/0.000 ms  rc=0
+payload=4000 1 packets transmitted, 0 received, 100% packet loss, time 0ms   rc=1
+payload=8972 1 packets transmitted, 0 received, 100% packet loss, time 0ms   rc=1
+=== 10.10.3.18 ===
+payload=1472 1 packets transmitted, 1 received, 0% packet loss, time 0ms rtt min/avg/max/mdev = 0.079/0.079/0.079/0.000 ms  rc=0
+payload=4000 1 packets transmitted, 0 received, 100% packet loss, time 0ms   rc=1
+payload=8972 1 packets transmitted, 0 received, 100% packet loss, time 0ms   rc=1
+=== 10.10.3.43 ===
+payload=1472 1 packets transmitted, 1 received, 0% packet loss, time 0ms rtt min/avg/max/mdev = 0.062/0.062/0.062/0.000 ms  rc=0
+payload=4000 1 packets transmitted, 1 received, 0% packet loss, time 0ms rtt min/avg/max/mdev = 0.058/0.058/0.058/0.000 ms  rc=0
+payload=8972 1 packets transmitted, 0 received, 100% packet loss, time 0ms   rc=1
+failures=10
+--- restore mtu 1500 ---
+10: vmbr0.400@vmbr0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP mode DEFAULT group default qlen 20000\    link/ether e4:43:4b:76:30:cc brd ff:ff:ff:ff:ff:ff
