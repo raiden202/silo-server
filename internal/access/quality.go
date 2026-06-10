@@ -79,3 +79,17 @@ func MinQuality(a, b string) string {
 		return b
 	}
 }
+
+// MaxQuality returns the more permissive quality ceiling. An empty string
+// means unrestricted and beats any concrete ceiling.
+func MaxQuality(a, b string) string {
+	a = NormalizePlaybackQuality(a)
+	b = NormalizePlaybackQuality(b)
+	if strings.TrimSpace(a) == "" || strings.TrimSpace(b) == "" {
+		return ""
+	}
+	if CompareQuality(a, b) >= 0 {
+		return a
+	}
+	return b
+}

@@ -54,3 +54,22 @@ func TestParsePlaybackQualityPreset(t *testing.T) {
 		t.Fatal("expected invalid preset to return ok=false")
 	}
 }
+
+func TestMaxQuality(t *testing.T) {
+	cases := []struct {
+		a, b, want string
+	}{
+		{"", "", ""},
+		{"", "1080p", ""}, // unrestricted beats any ceiling
+		{"2160p", "", ""},
+		{"1080p", "2160p", "2160p"},
+		{"2160p", "1080p", "2160p"},
+		{"1080p", "1080p", "1080p"},
+		{"720p", "480p", "1080p"}, // presets normalize: 720p/480p both -> 1080p (standard)
+	}
+	for _, tc := range cases {
+		if got := MaxQuality(tc.a, tc.b); got != tc.want {
+			t.Errorf("MaxQuality(%q, %q) = %q, want %q", tc.a, tc.b, got, tc.want)
+		}
+	}
+}
