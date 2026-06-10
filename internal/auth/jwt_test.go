@@ -175,8 +175,14 @@ func TestJWT_TamperedToken(t *testing.T) {
 		t.Fatalf("GenerateAccessToken() error: %v", err)
 	}
 
-	// Tamper with the token by modifying the last character of the signature.
-	tampered := token[:len(token)-1] + "X"
+	// Tamper with the token by replacing the last character of the signature
+	// with a different one (a fixed substitute would be a no-op whenever the
+	// real signature already ends in that character).
+	replacement := "X"
+	if token[len(token)-1] == 'X' {
+		replacement = "Y"
+	}
+	tampered := token[:len(token)-1] + replacement
 
 	_, err = svc.ValidateToken(tampered)
 	if err == nil {
