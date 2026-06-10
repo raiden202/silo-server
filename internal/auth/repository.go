@@ -83,6 +83,7 @@ func scanUser(row pgx.Row) (*models.User, error) {
 		}
 		return nil, fmt.Errorf("scanning user: %w", err)
 	}
+	u.IsAdmin = u.Role == "admin"
 	return &u, nil
 }
 
@@ -114,6 +115,7 @@ func scanUsers(rows pgx.Rows) ([]*models.User, error) {
 		if err != nil {
 			return nil, fmt.Errorf("scanning user row: %w", err)
 		}
+		u.IsAdmin = u.Role == "admin"
 		users = append(users, &u)
 	}
 	if err := rows.Err(); err != nil {

@@ -10,18 +10,21 @@ type User struct {
 	PasswordHash              string
 	LocalPasswordLoginEnabled bool
 	Role                      string
-	Permissions               []string
-	Enabled                   bool
-	LibraryIDs                []int // nullable in PG (nil = all libraries)
-	MaxPlaybackQuality        string
-	AccessPolicyRevision      int64
-	MaxStreams                int
-	MaxTranscodes             int
-	MaxProfiles               int
-	DownloadAllowed           bool
-	DownloadTranscodeAllowed  bool
-	CreatedAt                 time.Time
-	UpdatedAt                 time.Time
+	// IsAdmin and GroupIDs are derived from group membership at load time.
+	IsAdmin                  bool
+	GroupIDs                 []int
+	Permissions              []string
+	Enabled                  bool
+	LibraryIDs               []int // nullable in PG (nil = all libraries)
+	MaxPlaybackQuality       string
+	AccessPolicyRevision     int64
+	MaxStreams               int
+	MaxTranscodes            int
+	MaxProfiles              int
+	DownloadAllowed          bool
+	DownloadTranscodeAllowed bool
+	CreatedAt                time.Time
+	UpdatedAt                time.Time
 }
 
 // CreateUserInput contains the fields required to create a new user.

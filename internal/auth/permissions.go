@@ -11,11 +11,13 @@ import (
 type Permission string
 
 const (
+	PermissionAdmin            Permission = "admin"
 	PermissionMarkerEdit       Permission = "marker_edit"
 	PermissionMetadataCuration Permission = "metadata_curation"
 )
 
 var assignablePermissions = map[Permission]struct{}{
+	PermissionAdmin:            {},
 	PermissionMarkerEdit:       {},
 	PermissionMetadataCuration: {},
 }
@@ -80,7 +82,7 @@ func HasEffectivePermission(user *models.User, permission Permission) bool {
 	if user == nil || !user.Enabled {
 		return false
 	}
-	if user.Role == "admin" {
+	if user.IsAdmin {
 		return isAssignablePermission(permission)
 	}
 	return HasAssignedPermission(user, permission)
@@ -90,7 +92,7 @@ func EffectivePermissions(user *models.User) []string {
 	if user == nil || !user.Enabled {
 		return []string{}
 	}
-	if user.Role == "admin" {
+	if user.IsAdmin {
 		return assignablePermissionList()
 	}
 	permissions, err := NormalizePermissions(user.Permissions)
