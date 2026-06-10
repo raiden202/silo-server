@@ -39,6 +39,7 @@ type EventsHandler struct {
 	scans          *evt.ScanRegistry
 	persistedScans activeScanLister
 	historyImports historyImportActiveLister
+	users          adminUserLoader
 }
 
 func NewEventsHandler(
@@ -49,6 +50,7 @@ func NewEventsHandler(
 	scans *evt.ScanRegistry,
 	persistedScans *scanqueue.Service,
 	historyImports historyImportActiveLister,
+	users adminUserLoader,
 ) *EventsHandler {
 	return &EventsHandler{
 		hub:            hub,
@@ -58,6 +60,7 @@ func NewEventsHandler(
 		scans:          scans,
 		persistedScans: persistedScans,
 		historyImports: historyImports,
+		users:          users,
 	}
 }
 
@@ -72,6 +75,10 @@ func (h *EventsHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+
+	// Admin status is checked server-side once per connection; it never comes
+	// from token contents.
+	viewerIsAdmin := isAdminRequest(r, h.users)
 
 	conn, err := wsUpgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -89,7 +96,7 @@ func (h *EventsHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) 
 		return writeWebSocketControl(conn, websocket.PingMessage, nil)
 	})
 
-	allowedChannels := allowedChannelsForRole(claims.Role)
+	allowedChannels := allowedChannelsForViewer(viewerIsAdmin)
 	connectionID := ulid.Make().String()
 	if err := writeWebSocketJSON(conn, evt.EventsHelloMessage{
 		Type:              "hello",
@@ -142,7 +149,7 @@ func (h *EventsHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) 
 			)
 			return
 		case data := <-readMessages:
-			nextSubs, handled, ok := h.handleEventsClientMessage(conn, r, claims, data, allowedChannels)
+			nextSubs, handled, ok := h.handleEventsClientMessage(conn, r, claims, viewerIsAdmin, data, allowedChannels)
 			if !ok {
 				return
 			}
@@ -164,10 +171,10 @@ func (h *EventsHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) 
 			if _, subscribed := subscriptions[env.Channel]; !subscribed {
 				continue
 			}
-			if !allowsEventForClaims(claims, env) {
+			if !allowsEventForViewer(claims.UserID, viewerIsAdmin, env) {
 				continue
 			}
-			if err := h.writeEventFrame(conn, r, claims, env); err != nil {
+			if err := h.writeEventFrame(conn, r, claims, viewerIsAdmin, env); err != nil {
 				return
 			}
 		}
@@ -178,6 +185,7 @@ func (h *EventsHandler) handleEventsClientMessage(
 	conn *websocket.Conn,
 	r *http.Request,
 	claims *auth.Claims,
+	viewerIsAdmin bool,
 	data []byte,
 	allowed []evt.EventChannel,
 ) (map[evt.EventChannel]struct{}, bool, bool) {
@@ -262,7 +270,7 @@ func (h *EventsHandler) handleEventsClientMessage(
 	}
 
 	for _, channel := range accepted {
-		if err := h.writeSnapshotFrame(conn, r, claims, channel); err != nil {
+		if err := h.writeSnapshotFrame(conn, r, claims, viewerIsAdmin, channel); err != nil {
 			return nil, false, false
 		}
 	}
@@ -270,13 +278,13 @@ func (h *EventsHandler) handleEventsClientMessage(
 	return nextSubs, true, true
 }
 
-func allowedChannelsForRole(role string) []evt.EventChannel {
+func allowedChannelsForViewer(viewerIsAdmin bool) []evt.EventChannel {
 	channels := []evt.EventChannel{
 		evt.ChannelCatalog,
 		evt.ChannelHistoryImport,
 		evt.ChannelUserState,
 	}
-	if role == "admin" {
+	if viewerIsAdmin {
 		channels = append(channels,
 			evt.ChannelJobs,
 			evt.ChannelSessions,
@@ -287,14 +295,14 @@ func allowedChannelsForRole(role string) []evt.EventChannel {
 	return channels
 }
 
-func allowsEventForClaims(claims *auth.Claims, env evt.Envelope) bool {
-	if claims == nil {
+func allowsEventForViewer(viewerUserID int, viewerIsAdmin bool, env evt.Envelope) bool {
+	if viewerUserID == 0 {
 		return false
 	}
-	if env.AdminOnly && claims.Role != "admin" {
+	if env.AdminOnly && !viewerIsAdmin {
 		return false
 	}
-	if env.UserID > 0 && claims.Role != "admin" && env.UserID != claims.UserID {
+	if env.UserID > 0 && !viewerIsAdmin && env.UserID != viewerUserID {
 		return false
 	}
 	return true
@@ -314,6 +322,7 @@ func marshalJSON(value any) json.RawMessage {
 func (h *EventsHandler) snapshotForChannel(
 	r *http.Request,
 	claims *auth.Claims,
+	viewerIsAdmin bool,
 	channel evt.EventChannel,
 ) (json.RawMessage, error) {
 	switch channel {
@@ -366,7 +375,7 @@ func (h *EventsHandler) snapshotForChannel(
 		if h == nil || h.historyImports == nil {
 			return json.RawMessage("[]"), nil
 		}
-		if claims != nil && claims.Role == "admin" {
+		if viewerIsAdmin {
 			runs, err := h.historyImports.ListAdminActiveRuns(r.Context(), nil)
 			if err != nil {
 				return nil, err
@@ -387,9 +396,10 @@ func (h *EventsHandler) writeSnapshotFrame(
 	conn *websocket.Conn,
 	r *http.Request,
 	claims *auth.Claims,
+	viewerIsAdmin bool,
 	channel evt.EventChannel,
 ) error {
-	data, err := h.snapshotForChannel(r, claims, channel)
+	data, err := h.snapshotForChannel(r, claims, viewerIsAdmin, channel)
 	if err != nil {
 		slog.Error(
 			"events: failed to build initial snapshot",
@@ -415,11 +425,12 @@ func (h *EventsHandler) writeEventFrame(
 	conn *websocket.Conn,
 	r *http.Request,
 	claims *auth.Claims,
+	viewerIsAdmin bool,
 	env evt.Envelope,
 ) error {
 	data := env.Data
 	if len(data) == 0 || (env.Channel == evt.ChannelSessions && env.Event == "sessions.replaced") {
-		snapshot, err := h.snapshotForChannel(r, claims, env.Channel)
+		snapshot, err := h.snapshotForChannel(r, claims, viewerIsAdmin, env.Channel)
 		if err != nil {
 			slog.Error("events: failed to build event payload", "channel", env.Channel, "event", env.Event, "error", err)
 			return err

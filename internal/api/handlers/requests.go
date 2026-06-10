@@ -50,6 +50,7 @@ type RequestService interface {
 
 type RequestsHandler struct {
 	service RequestService
+	Users   adminUserLoader // for server-side admin checks
 }
 
 func NewRequestsHandler(service RequestService) *RequestsHandler {
@@ -57,7 +58,7 @@ func NewRequestsHandler(service RequestService) *RequestsHandler {
 }
 
 func (h *RequestsHandler) HandleSearch(w http.ResponseWriter, r *http.Request) {
-	viewer, ok := requestViewer(w, r, true)
+	viewer, ok := h.requestViewer(w, r, true)
 	if !ok {
 		return
 	}
@@ -80,7 +81,7 @@ func (h *RequestsHandler) HandleSearch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *RequestsHandler) HandleDiscover(w http.ResponseWriter, r *http.Request) {
-	viewer, ok := requestViewer(w, r, true)
+	viewer, ok := h.requestViewer(w, r, true)
 	if !ok {
 		return
 	}
@@ -95,7 +96,7 @@ func (h *RequestsHandler) HandleDiscover(w http.ResponseWriter, r *http.Request)
 }
 
 func (h *RequestsHandler) HandleDiscoverSection(w http.ResponseWriter, r *http.Request) {
-	viewer, ok := requestViewer(w, r, true)
+	viewer, ok := h.requestViewer(w, r, true)
 	if !ok {
 		return
 	}
@@ -112,7 +113,7 @@ func (h *RequestsHandler) HandleDiscoverSection(w http.ResponseWriter, r *http.R
 }
 
 func (h *RequestsHandler) HandleListStudios(w http.ResponseWriter, r *http.Request) {
-	viewer, ok := requestViewer(w, r, true)
+	viewer, ok := h.requestViewer(w, r, true)
 	if !ok {
 		return
 	}
@@ -127,7 +128,7 @@ func (h *RequestsHandler) HandleListStudios(w http.ResponseWriter, r *http.Reque
 }
 
 func (h *RequestsHandler) HandleListNetworks(w http.ResponseWriter, r *http.Request) {
-	viewer, ok := requestViewer(w, r, true)
+	viewer, ok := h.requestViewer(w, r, true)
 	if !ok {
 		return
 	}
@@ -142,7 +143,7 @@ func (h *RequestsHandler) HandleListNetworks(w http.ResponseWriter, r *http.Requ
 }
 
 func (h *RequestsHandler) HandleListGenres(w http.ResponseWriter, r *http.Request) {
-	viewer, ok := requestViewer(w, r, true)
+	viewer, ok := h.requestViewer(w, r, true)
 	if !ok {
 		return
 	}
@@ -157,7 +158,7 @@ func (h *RequestsHandler) HandleListGenres(w http.ResponseWriter, r *http.Reques
 }
 
 func (h *RequestsHandler) HandleBrowseStudio(w http.ResponseWriter, r *http.Request) {
-	viewer, ok := requestViewer(w, r, true)
+	viewer, ok := h.requestViewer(w, r, true)
 	if !ok {
 		return
 	}
@@ -176,7 +177,7 @@ func (h *RequestsHandler) HandleBrowseStudio(w http.ResponseWriter, r *http.Requ
 }
 
 func (h *RequestsHandler) HandleBrowseNetwork(w http.ResponseWriter, r *http.Request) {
-	viewer, ok := requestViewer(w, r, true)
+	viewer, ok := h.requestViewer(w, r, true)
 	if !ok {
 		return
 	}
@@ -195,7 +196,7 @@ func (h *RequestsHandler) HandleBrowseNetwork(w http.ResponseWriter, r *http.Req
 }
 
 func (h *RequestsHandler) HandleBrowseGenre(w http.ResponseWriter, r *http.Request) {
-	viewer, ok := requestViewer(w, r, true)
+	viewer, ok := h.requestViewer(w, r, true)
 	if !ok {
 		return
 	}
@@ -215,7 +216,7 @@ func (h *RequestsHandler) HandleBrowseGenre(w http.ResponseWriter, r *http.Reque
 }
 
 func (h *RequestsHandler) HandleGetDetail(w http.ResponseWriter, r *http.Request) {
-	viewer, ok := requestViewer(w, r, true)
+	viewer, ok := h.requestViewer(w, r, true)
 	if !ok {
 		return
 	}
@@ -234,7 +235,7 @@ func (h *RequestsHandler) HandleGetDetail(w http.ResponseWriter, r *http.Request
 }
 
 func (h *RequestsHandler) HandleCreate(w http.ResponseWriter, r *http.Request) {
-	viewer, ok := requestViewer(w, r, true)
+	viewer, ok := h.requestViewer(w, r, true)
 	if !ok {
 		return
 	}
@@ -252,7 +253,7 @@ func (h *RequestsHandler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *RequestsHandler) HandleListMine(w http.ResponseWriter, r *http.Request) {
-	viewer, ok := requestViewer(w, r, true)
+	viewer, ok := h.requestViewer(w, r, true)
 	if !ok {
 		return
 	}
@@ -267,7 +268,7 @@ func (h *RequestsHandler) HandleListMine(w http.ResponseWriter, r *http.Request)
 }
 
 func (h *RequestsHandler) HandleGet(w http.ResponseWriter, r *http.Request) {
-	viewer, ok := requestViewer(w, r, true)
+	viewer, ok := h.requestViewer(w, r, true)
 	if !ok {
 		return
 	}
@@ -280,7 +281,7 @@ func (h *RequestsHandler) HandleGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *RequestsHandler) HandleAdminList(w http.ResponseWriter, r *http.Request) {
-	viewer, ok := requestViewer(w, r, false)
+	viewer, ok := h.requestViewer(w, r, false)
 	if !ok {
 		return
 	}
@@ -295,7 +296,7 @@ func (h *RequestsHandler) HandleAdminList(w http.ResponseWriter, r *http.Request
 }
 
 func (h *RequestsHandler) HandleApprove(w http.ResponseWriter, r *http.Request) {
-	viewer, ok := requestViewer(w, r, false)
+	viewer, ok := h.requestViewer(w, r, false)
 	if !ok {
 		return
 	}
@@ -308,7 +309,7 @@ func (h *RequestsHandler) HandleApprove(w http.ResponseWriter, r *http.Request) 
 }
 
 func (h *RequestsHandler) HandleDecline(w http.ResponseWriter, r *http.Request) {
-	viewer, ok := requestViewer(w, r, false)
+	viewer, ok := h.requestViewer(w, r, false)
 	if !ok {
 		return
 	}
@@ -330,7 +331,7 @@ func (h *RequestsHandler) HandleDecline(w http.ResponseWriter, r *http.Request) 
 }
 
 func (h *RequestsHandler) HandleCancel(w http.ResponseWriter, r *http.Request) {
-	viewer, ok := requestViewer(w, r, false)
+	viewer, ok := h.requestViewer(w, r, false)
 	if !ok {
 		return
 	}
@@ -352,7 +353,7 @@ func (h *RequestsHandler) HandleCancel(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *RequestsHandler) HandleRetry(w http.ResponseWriter, r *http.Request) {
-	viewer, ok := requestViewer(w, r, false)
+	viewer, ok := h.requestViewer(w, r, false)
 	if !ok {
 		return
 	}
@@ -365,7 +366,7 @@ func (h *RequestsHandler) HandleRetry(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *RequestsHandler) HandleGetStatus(w http.ResponseWriter, r *http.Request) {
-	viewer, ok := requestViewer(w, r, true)
+	viewer, ok := h.requestViewer(w, r, true)
 	if !ok {
 		return
 	}
@@ -378,7 +379,7 @@ func (h *RequestsHandler) HandleGetStatus(w http.ResponseWriter, r *http.Request
 }
 
 func (h *RequestsHandler) HandleGetSettings(w http.ResponseWriter, r *http.Request) {
-	viewer, ok := requestViewer(w, r, false)
+	viewer, ok := h.requestViewer(w, r, false)
 	if !ok {
 		return
 	}
@@ -391,7 +392,7 @@ func (h *RequestsHandler) HandleGetSettings(w http.ResponseWriter, r *http.Reque
 }
 
 func (h *RequestsHandler) HandleUpdateSettings(w http.ResponseWriter, r *http.Request) {
-	viewer, ok := requestViewer(w, r, false)
+	viewer, ok := h.requestViewer(w, r, false)
 	if !ok {
 		return
 	}
@@ -409,7 +410,7 @@ func (h *RequestsHandler) HandleUpdateSettings(w http.ResponseWriter, r *http.Re
 }
 
 func (h *RequestsHandler) HandleListIntegrations(w http.ResponseWriter, r *http.Request) {
-	viewer, ok := requestViewer(w, r, false)
+	viewer, ok := h.requestViewer(w, r, false)
 	if !ok {
 		return
 	}
@@ -424,7 +425,7 @@ func (h *RequestsHandler) HandleListIntegrations(w http.ResponseWriter, r *http.
 }
 
 func (h *RequestsHandler) HandleCreateIntegration(w http.ResponseWriter, r *http.Request) {
-	viewer, ok := requestViewer(w, r, false)
+	viewer, ok := h.requestViewer(w, r, false)
 	if !ok {
 		return
 	}
@@ -442,7 +443,7 @@ func (h *RequestsHandler) HandleCreateIntegration(w http.ResponseWriter, r *http
 }
 
 func (h *RequestsHandler) HandleUpdateIntegration(w http.ResponseWriter, r *http.Request) {
-	viewer, ok := requestViewer(w, r, false)
+	viewer, ok := h.requestViewer(w, r, false)
 	if !ok {
 		return
 	}
@@ -461,7 +462,7 @@ func (h *RequestsHandler) HandleUpdateIntegration(w http.ResponseWriter, r *http
 }
 
 func (h *RequestsHandler) HandleDeleteIntegration(w http.ResponseWriter, r *http.Request) {
-	viewer, ok := requestViewer(w, r, false)
+	viewer, ok := h.requestViewer(w, r, false)
 	if !ok {
 		return
 	}
@@ -473,7 +474,7 @@ func (h *RequestsHandler) HandleDeleteIntegration(w http.ResponseWriter, r *http
 }
 
 func (h *RequestsHandler) HandleLoadIntegrationOptions(w http.ResponseWriter, r *http.Request) {
-	viewer, ok := requestViewer(w, r, false)
+	viewer, ok := h.requestViewer(w, r, false)
 	if !ok {
 		return
 	}
@@ -496,7 +497,7 @@ func (h *RequestsHandler) HandleLoadIntegrationOptions(w http.ResponseWriter, r 
 }
 
 func (h *RequestsHandler) HandleGetUserLimit(w http.ResponseWriter, r *http.Request) {
-	viewer, ok := requestViewer(w, r, false)
+	viewer, ok := h.requestViewer(w, r, false)
 	if !ok {
 		return
 	}
@@ -513,7 +514,7 @@ func (h *RequestsHandler) HandleGetUserLimit(w http.ResponseWriter, r *http.Requ
 }
 
 func (h *RequestsHandler) HandleUpdateUserLimit(w http.ResponseWriter, r *http.Request) {
-	viewer, ok := requestViewer(w, r, false)
+	viewer, ok := h.requestViewer(w, r, false)
 	if !ok {
 		return
 	}
@@ -535,7 +536,7 @@ func (h *RequestsHandler) HandleUpdateUserLimit(w http.ResponseWriter, r *http.R
 	writeJSON(w, http.StatusOK, updated)
 }
 
-func requestViewer(w http.ResponseWriter, r *http.Request, requireProfile bool) (mediarequests.Viewer, bool) {
+func (h *RequestsHandler) requestViewer(w http.ResponseWriter, r *http.Request, requireProfile bool) (mediarequests.Viewer, bool) {
 	claims := apimw.GetClaims(r.Context())
 	if claims == nil || claims.UserID == 0 {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required")
@@ -549,7 +550,7 @@ func requestViewer(w http.ResponseWriter, r *http.Request, requireProfile bool) 
 	return mediarequests.Viewer{
 		UserID:    claims.UserID,
 		ProfileID: profileID,
-		IsAdmin:   claims.Role == "admin",
+		IsAdmin:   isAdminRequest(r, h.Users),
 	}, true
 }
 

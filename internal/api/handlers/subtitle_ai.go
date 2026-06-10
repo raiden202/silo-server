@@ -26,6 +26,9 @@ type SubtitleAIHandler struct {
 	// StoreProvider resolves household profiles for the transcription quota
 	// exemption check; when nil the whole admin account is exempt.
 	StoreProvider userstore.UserStoreProvider
+	// Users loads the account server-side for the quota exemption's admin
+	// check; admin status is never read from token contents.
+	Users adminUserLoader
 }
 
 // NewSubtitleAIHandler creates a handler backed by the given service.
@@ -154,7 +157,7 @@ func (h *SubtitleAIHandler) HandleTranslate(w http.ResponseWriter, r *http.Reque
 // budgeting gate, not a security boundary; the quota itself is account-scoped.
 func (h *SubtitleAIHandler) quotaExempt(r *http.Request) bool {
 	ctx := r.Context()
-	if !apimw.IsAdmin(ctx) {
+	if !isAdminRequest(r, h.Users) {
 		return false
 	}
 	profileID := apimw.GetProfileID(ctx)

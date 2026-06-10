@@ -1800,9 +1800,6 @@ func (h *ItemsHandler) requestCanViewFilePaths(r *http.Request) bool {
 	if claims == nil {
 		return false
 	}
-	if claims.Role == "admin" {
-		return true
-	}
 	if h == nil || h.UserRepo == nil {
 		return false
 	}

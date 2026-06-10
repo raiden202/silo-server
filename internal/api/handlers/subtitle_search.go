@@ -63,6 +63,7 @@ type SubtitleSearchHandler struct {
 	repo           subtitles.Repository
 	mediaResolver  SubtitleMediaResolver
 	FileAuthorizer *MediaFileAuthorizer
+	Users          adminUserLoader // for server-side admin checks
 }
 
 // NewSubtitleSearchHandler creates a new SubtitleSearchHandler.
@@ -334,8 +335,8 @@ func (h *SubtitleSearchHandler) HandleDelete(w http.ResponseWriter, r *http.Requ
 	}
 
 	claims := apimw.GetClaims(r.Context())
-	isAdmin := claims != nil && claims.Role == "admin"
 	isOwner := sub.DownloadedBy != nil && claims != nil && *sub.DownloadedBy == claims.UserID
+	isAdmin := !isOwner && isAdminRequest(r, h.Users)
 	if !isAdmin && !isOwner {
 		writeError(w, http.StatusForbidden, "forbidden", "Not authorized to delete this subtitle")
 		return

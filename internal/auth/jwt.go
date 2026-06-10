@@ -17,7 +17,6 @@ var (
 // Claims represents the custom JWT claims used for authentication.
 type Claims struct {
 	UserID             int    `json:"user_id"`
-	Role               string `json:"role"`
 	SessionID          string `json:"session_id"`
 	TokenType          string `json:"token_type"`
 	ImpersonatorUserID *int   `json:"impersonator_user_id,omitempty"`
@@ -63,31 +62,28 @@ func (j *JWTService) RefreshExpiry() time.Duration {
 
 // GenerateAccessToken creates a signed JWT access token with the configured
 // access token expiry duration.
-func (j *JWTService) GenerateAccessToken(userID int, role, sessionID string) (string, error) {
+func (j *JWTService) GenerateAccessToken(userID int, sessionID string) (string, error) {
 	return j.generateAccessToken(Claims{
 		UserID:    userID,
-		Role:      role,
 		SessionID: sessionID,
 	})
 }
 
 // GenerateRefreshToken creates a signed JWT refresh token with the configured
 // refresh token expiry duration.
-func (j *JWTService) GenerateRefreshToken(userID int, role, sessionID string) (string, error) {
+func (j *JWTService) GenerateRefreshToken(userID int, sessionID string) (string, error) {
 	return j.generateRefreshToken(Claims{
 		UserID:    userID,
-		Role:      role,
 		SessionID: sessionID,
 	})
 }
 
-func (j *JWTService) GeneratePluginAccessToken(userID int, role, sessionID string, ttl time.Duration) (string, error) {
+func (j *JWTService) GeneratePluginAccessToken(userID int, sessionID string, ttl time.Duration) (string, error) {
 	if ttl <= 0 {
 		ttl = 5 * time.Minute
 	}
 	return j.generateToken(Claims{
 		UserID:    userID,
-		Role:      role,
 		SessionID: sessionID,
 	}, TokenTypePluginAccess, ttl)
 }

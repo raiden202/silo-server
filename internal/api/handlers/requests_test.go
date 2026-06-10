@@ -147,7 +147,6 @@ func authedRequest(method, target string) *http.Request {
 	req := httptest.NewRequest(method, target, nil)
 	ctx := apimw.SetClaims(req.Context(), &auth.Claims{
 		UserID:    1,
-		Role:      "user",
 		TokenType: auth.TokenTypeAccess,
 	})
 	ctx = apimw.SetProfileID(ctx, "profile-1")

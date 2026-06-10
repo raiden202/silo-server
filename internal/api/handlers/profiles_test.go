@@ -45,7 +45,6 @@ func newAuthorizedProfileRequestWithSession(
 	req := httptest.NewRequest(method, path, strings.NewReader(body))
 	ctx := apimw.SetClaims(context.Background(), &auth.Claims{
 		UserID:    1,
-		Role:      role,
 		SessionID: sessionID,
 		TokenType: auth.TokenTypeAccess,
 	})
@@ -99,7 +98,7 @@ func TestHandleCreateProfile_EnforcesUserProfileLimit(t *testing.T) {
 	store := newProfileTestStore(t)
 	handler := NewProfileHandler(testUserStoreProvider{store: store})
 	handler.UserRepo = testProfileUserRepo{
-		user: &models.User{ID: 1, MaxProfiles: 1},
+		user: &models.User{ID: 1, MaxProfiles: 1, Enabled: true, IsAdmin: true},
 	}
 
 	req := newAuthorizedProfileRequestWithRole(

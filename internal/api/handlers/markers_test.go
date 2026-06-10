@@ -90,7 +90,6 @@ func markerItemPutRequest(body string) *http.Request {
 func withMarkerAdminClaims(req *http.Request) *http.Request {
 	return req.WithContext(apimw.SetClaims(req.Context(), &auth.Claims{
 		UserID:    1,
-		Role:      "admin",
 		TokenType: auth.TokenTypeAccess,
 		SessionID: "session-1",
 	}))
@@ -98,7 +97,12 @@ func withMarkerAdminClaims(req *http.Request) *http.Request {
 
 func newMarkersHandler(writer ManualMarkerWriter) *MarkersHandler {
 	files := fakeMarkerFiles{file: &models.MediaFile{ID: 5, Duration: 1800}}
-	return NewMarkersHandler(files, writer, nil, nil, nil, nil)
+	h := NewMarkersHandler(files, writer, nil, nil, nil, nil)
+	h.Users = fakeMarkerUsers{
+		1: {ID: 1, Enabled: true, IsAdmin: true},
+		7: {ID: 7, Enabled: true, IsAdmin: true},
+	}
+	return h
 }
 
 func TestSetFileMarkersWritesManual(t *testing.T) {
@@ -131,6 +135,7 @@ func TestSetItemMarkersWritesPrimaryEpisodeFile(t *testing.T) {
 		episodeFiles: []*models.MediaFile{file},
 	}
 	h := NewMarkersHandler(files, writer, nil, nil, nil, nil)
+	h.Users = fakeMarkerUsers{1: {ID: 1, Enabled: true, IsAdmin: true}}
 
 	rec := httptest.NewRecorder()
 	h.HandleSetItemMarkers(rec, markerItemPutRequest(`{"recap":{"start":0,"end":45}}`))
@@ -215,7 +220,7 @@ func TestGetFileMarkersDoesNotRequireMarkerEditPermission(t *testing.T) {
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("fileId", "5")
 	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
-	req = req.WithContext(apimw.SetClaims(req.Context(), &auth.Claims{UserID: 7, Role: "user", TokenType: auth.TokenTypeAccess}))
+	req = req.WithContext(apimw.SetClaims(req.Context(), &auth.Claims{UserID: 7, TokenType: auth.TokenTypeAccess}))
 
 	rec := httptest.NewRecorder()
 	h.HandleGetFileMarkers(rec, req)
@@ -232,7 +237,7 @@ func TestSetFileMarkersRejectsUserWithoutMarkerEditPermission(t *testing.T) {
 		7: &models.User{ID: 7, Enabled: true, Permissions: nil},
 	}
 	req := markerPutRequest(`{"intro":{"start":0,"end":60}}`)
-	req = req.WithContext(apimw.SetClaims(req.Context(), &auth.Claims{UserID: 7, Role: "user", TokenType: auth.TokenTypeAccess}))
+	req = req.WithContext(apimw.SetClaims(req.Context(), &auth.Claims{UserID: 7, TokenType: auth.TokenTypeAccess}))
 
 	rec := httptest.NewRecorder()
 	h.HandleSetFileMarkers(rec, req)
@@ -252,7 +257,7 @@ func TestSetFileMarkersAllowsUserWithMarkerEditPermission(t *testing.T) {
 		7: &models.User{ID: 7, Enabled: true, Permissions: []string{"marker_edit"}},
 	}
 	req := markerPutRequest(`{"intro":{"start":0,"end":60}}`)
-	req = req.WithContext(apimw.SetClaims(req.Context(), &auth.Claims{UserID: 7, Role: "user", TokenType: auth.TokenTypeAccess}))
+	req = req.WithContext(apimw.SetClaims(req.Context(), &auth.Claims{UserID: 7, TokenType: auth.TokenTypeAccess}))
 
 	rec := httptest.NewRecorder()
 	h.HandleSetFileMarkers(rec, req)
@@ -274,7 +279,6 @@ func TestSetFileMarkersPassesAuditContextToWriter(t *testing.T) {
 	ctx := clientip.SetContext(req.Context(), "203.0.113.10")
 	ctx = apimw.SetClaims(ctx, &auth.Claims{
 		UserID:    7,
-		Role:      "admin",
 		TokenType: auth.TokenTypeAPIKey,
 		APIKeyID:  apiKeyID,
 	})
@@ -382,6 +386,7 @@ func TestSetFileMarkersTriggersBackgroundContribution(t *testing.T) {
 	called := make(chan markers.ContributeOptions, 1)
 	files := fakeMarkerFiles{file: &models.MediaFile{ID: 5, Duration: 1800}}
 	h := NewMarkersHandler(files, &fakeMarkerWriter{}, signalContributor{called: called}, nil, nil, nil)
+	h.Users = fakeMarkerUsers{1: {ID: 1, Enabled: true, IsAdmin: true}}
 
 	rec := httptest.NewRecorder()
 	h.HandleSetFileMarkers(rec, markerPutRequest(`{"intro":{"start":0,"end":60}}`))
@@ -403,6 +408,7 @@ func TestSetFileMarkersClearOnlyDoesNotContribute(t *testing.T) {
 	called := make(chan markers.ContributeOptions, 1)
 	files := fakeMarkerFiles{file: &models.MediaFile{ID: 5, Duration: 1800}}
 	h := NewMarkersHandler(files, &fakeMarkerWriter{}, signalContributor{called: called}, nil, nil, nil)
+	h.Users = fakeMarkerUsers{1: {ID: 1, Enabled: true, IsAdmin: true}}
 
 	rec := httptest.NewRecorder()
 	h.HandleSetFileMarkers(rec, markerPutRequest(`{"credits":null}`))

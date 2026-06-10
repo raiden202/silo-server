@@ -162,7 +162,7 @@ func newPlaybackTestStore(t *testing.T) userstore.UserStore {
 
 func newAuthorizedPlaybackContext() context.Context {
 	ctx := context.Background()
-	ctx = apimw.SetClaims(ctx, &auth.Claims{UserID: 1, Role: "user", TokenType: auth.TokenTypeAccess})
+	ctx = apimw.SetClaims(ctx, &auth.Claims{UserID: 1, TokenType: auth.TokenTypeAccess})
 	return apimw.SetProfileID(ctx, "profile-1")
 }
 

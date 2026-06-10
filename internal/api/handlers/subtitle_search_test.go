@@ -56,7 +56,6 @@ func newSubtitleAuthRequest(method, path string, body io.Reader) *http.Request {
 	req := httptest.NewRequest(method, path, body)
 	ctx := apimw.SetClaims(context.Background(), &auth.Claims{
 		UserID:    1,
-		Role:      "user",
 		TokenType: auth.TokenTypeAccess,
 	})
 	return req.WithContext(ctx)

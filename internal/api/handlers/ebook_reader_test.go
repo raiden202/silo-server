@@ -24,7 +24,6 @@ func newEbookReaderAuthRequest(method, path string) *http.Request {
 	req := httptest.NewRequest(method, path, nil)
 	ctx := apimw.SetClaims(context.Background(), &auth.Claims{
 		UserID:    1,
-		Role:      "user",
 		TokenType: auth.TokenTypeAccess,
 	})
 	ctx = apimw.SetProfileID(ctx, "profile-1")
@@ -421,7 +420,6 @@ func TestEbookReaderSavesProgressForAuthorizedEbookFile(t *testing.T) {
 	)
 	ctx := apimw.SetClaims(context.Background(), &auth.Claims{
 		UserID:    1,
-		Role:      "user",
 		TokenType: auth.TokenTypeAccess,
 	})
 	req = req.WithContext(apimw.SetProfileID(ctx, "profile-9"))
@@ -524,7 +522,6 @@ func TestEbookReaderSavesConfigForAccessibleEbook(t *testing.T) {
 	)
 	ctx := apimw.SetClaims(context.Background(), &auth.Claims{
 		UserID:    1,
-		Role:      "user",
 		TokenType: auth.TokenTypeAccess,
 	})
 	req = req.WithContext(apimw.SetProfileID(ctx, "profile-9"))
@@ -608,7 +605,6 @@ func TestEbookReaderCreatesAnnotationForAccessibleEbook(t *testing.T) {
 	)
 	ctx := apimw.SetClaims(context.Background(), &auth.Claims{
 		UserID:    1,
-		Role:      "user",
 		TokenType: auth.TokenTypeAccess,
 	})
 	req = req.WithContext(apimw.SetProfileID(ctx, "profile-9"))

@@ -30,16 +30,16 @@ func (f fakeTargetLibraryResolver) ResolveMetadataTargetLibraryIDs(context.Conte
 	return f.ids, f.err
 }
 
-func requestWithItemID(role string) *http.Request {
+func requestWithItemID() *http.Request {
 	req := httptest.NewRequest(http.MethodPost, "/admin/items/item-1/refresh-metadata", nil)
-	ctx := SetClaims(req.Context(), &auth.Claims{UserID: 7, Role: role, TokenType: auth.TokenTypeAccess})
+	ctx := SetClaims(req.Context(), &auth.Claims{UserID: 7, TokenType: auth.TokenTypeAccess})
 	routeCtx := chi.NewRouteContext()
 	routeCtx.URLParams.Add("id", "item-1")
 	ctx = context.WithValue(ctx, chi.RouteCtxKey, routeCtx)
 	return req.WithContext(ctx)
 }
 
-func runMetadataCurationMiddleware(user *models.User, libraryIDs []int, role string) int {
+func runMetadataCurationMiddleware(user *models.User, libraryIDs []int) int {
 	mw := NewPermissionMiddleware(
 		fakePermissionUserLoader{user: user},
 		fakeTargetLibraryResolver{ids: libraryIDs},
@@ -48,12 +48,12 @@ func runMetadataCurationMiddleware(user *models.User, libraryIDs []int, role str
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	rec := httptest.NewRecorder()
-	next.ServeHTTP(rec, requestWithItemID(role))
+	next.ServeHTTP(rec, requestWithItemID())
 	return rec.Code
 }
 
 func TestRequireMetadataCurationForItem_AllowsAdmin(t *testing.T) {
-	code := runMetadataCurationMiddleware(nil, nil, "admin")
+	code := runMetadataCurationMiddleware(&models.User{ID: 7, Enabled: true, IsAdmin: true}, nil)
 	if code != http.StatusNoContent {
 		t.Fatalf("status = %d, want %d", code, http.StatusNoContent)
 	}
@@ -61,7 +61,7 @@ func TestRequireMetadataCurationForItem_AllowsAdmin(t *testing.T) {
 
 func TestRequireMetadataCurationForItem_RejectsUserWithoutPermission(t *testing.T) {
 	user := &models.User{ID: 7, Enabled: true, LibraryIDs: []int{1}, Permissions: nil}
-	code := runMetadataCurationMiddleware(user, []int{1}, "user")
+	code := runMetadataCurationMiddleware(user, []int{1})
 	if code != http.StatusForbidden {
 		t.Fatalf("status = %d, want %d", code, http.StatusForbidden)
 	}
@@ -69,7 +69,7 @@ func TestRequireMetadataCurationForItem_RejectsUserWithoutPermission(t *testing.
 
 func TestRequireMetadataCurationForItem_AllowsUnrestrictedCurator(t *testing.T) {
 	user := &models.User{ID: 7, Enabled: true, LibraryIDs: nil, Permissions: []string{"metadata_curation"}}
-	code := runMetadataCurationMiddleware(user, []int{1, 2}, "user")
+	code := runMetadataCurationMiddleware(user, []int{1, 2})
 	if code != http.StatusNoContent {
 		t.Fatalf("status = %d, want %d", code, http.StatusNoContent)
 	}
@@ -77,7 +77,7 @@ func TestRequireMetadataCurationForItem_AllowsUnrestrictedCurator(t *testing.T) 
 
 func TestRequireMetadataCurationForItem_AllowsWhenAllTargetLibrariesAreAllowed(t *testing.T) {
 	user := &models.User{ID: 7, Enabled: true, LibraryIDs: []int{1, 2, 3}, Permissions: []string{"metadata_curation"}}
-	code := runMetadataCurationMiddleware(user, []int{1, 3}, "user")
+	code := runMetadataCurationMiddleware(user, []int{1, 3})
 	if code != http.StatusNoContent {
 		t.Fatalf("status = %d, want %d", code, http.StatusNoContent)
 	}
@@ -85,7 +85,7 @@ func TestRequireMetadataCurationForItem_AllowsWhenAllTargetLibrariesAreAllowed(t
 
 func TestRequireMetadataCurationForItem_RejectsWhenAnyTargetLibraryIsOutsideAccess(t *testing.T) {
 	user := &models.User{ID: 7, Enabled: true, LibraryIDs: []int{1}, Permissions: []string{"metadata_curation"}}
-	code := runMetadataCurationMiddleware(user, []int{1, 2}, "user")
+	code := runMetadataCurationMiddleware(user, []int{1, 2})
 	if code != http.StatusForbidden {
 		t.Fatalf("status = %d, want %d", code, http.StatusForbidden)
 	}
@@ -93,7 +93,7 @@ func TestRequireMetadataCurationForItem_RejectsWhenAnyTargetLibraryIsOutsideAcce
 
 func TestRequireMetadataCurationForItem_NotFoundWhenTargetHasNoLibraries(t *testing.T) {
 	user := &models.User{ID: 7, Enabled: true, LibraryIDs: nil, Permissions: []string{"metadata_curation"}}
-	code := runMetadataCurationMiddleware(user, nil, "user")
+	code := runMetadataCurationMiddleware(user, nil)
 	if code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d", code, http.StatusNotFound)
 	}

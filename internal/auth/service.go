@@ -35,8 +35,9 @@ type SettingsGetter interface {
 	Get(ctx context.Context, key string) (string, error)
 }
 
-// RoleForUser derives the legacy role string carried in JWT claims from the
-// user's group-derived admin flag.
+// RoleForUser derives the legacy role string exposed in API response bodies
+// from the user's group-derived admin flag. It is never used for
+// authorization decisions and is no longer carried in JWT claims.
 func RoleForUser(u *models.User) string {
 	if u != nil && u.IsAdmin {
 		return "admin"
@@ -227,7 +228,6 @@ func (s *Service) CompleteOAuthLogin(ctx context.Context, in OAuthLoginInput) (*
 	}
 	pair, err := s.generateTokenPair(Claims{
 		UserID:    user.ID,
-		Role:      RoleForUser(user),
 		SessionID: sessionID,
 	})
 	if err != nil {
@@ -289,7 +289,6 @@ func (s *Service) loginWithProvider(
 
 	pair, err := s.generateTokenPair(Claims{
 		UserID:    user.ID,
-		Role:      RoleForUser(user),
 		SessionID: sessionID,
 	})
 	if err != nil {
@@ -473,7 +472,6 @@ func (s *Service) StartImpersonation(ctx context.Context, adminUserID, targetUse
 
 	pair, err := s.generateTokenPair(Claims{
 		UserID:             target.ID,
-		Role:               RoleForUser(target),
 		SessionID:          sessionID,
 		ImpersonatorUserID: &impersonatorUserID,
 	})
@@ -546,7 +544,6 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (*TokenPair,
 
 	return s.generateTokenPair(Claims{
 		UserID:             user.ID,
-		Role:               RoleForUser(user),
 		SessionID:          session.ID,
 		ImpersonatorUserID: session.ImpersonatorUserID,
 	})

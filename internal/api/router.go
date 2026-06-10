@@ -277,7 +277,7 @@ func NewRouter(deps Dependencies) chi.Router {
 		}
 		deviceLoginService = auth.NewDeviceLoginService(deps.DB, userRepo, jwtService, sessionRepo)
 		authHandler = handlers.NewAuthHandler(authService, jwtService, deviceLoginService)
-		authMiddleware = apimw.NewAuthMiddleware(jwtService, sessionRepo, apiKeyRepo, userRepo)
+		authMiddleware = apimw.NewAuthMiddleware(jwtService, sessionRepo, apiKeyRepo, userRepo, userRepo)
 		profileTokenService = access.NewProfileTokenService(deps.Config.Auth.JWTSecret, 0)
 		if deps.UserStoreProvider != nil {
 			viewerResolver = access.NewResolver(userRepo, deps.UserStoreProvider, profileTokenService)
@@ -306,7 +306,11 @@ func NewRouter(deps Dependencies) chi.Router {
 	// Build demo guard middleware if server settings are available.
 	var demoGuard *apimw.DemoGuard
 	if settingsRepo != nil {
-		demoGuard = apimw.NewDemoGuard(settingsRepo)
+		var demoUsers apimw.DemoUserLoader
+		if userRepo != nil {
+			demoUsers = userRepo
+		}
+		demoGuard = apimw.NewDemoGuard(settingsRepo, demoUsers)
 	}
 
 	// Build library handler if folder repo is available.
@@ -479,6 +483,9 @@ func NewRouter(deps Dependencies) chi.Router {
 			requestSvc.SetEntitlementResolver(mediarequests.NewAccessEntitlements(viewerResolver))
 		}
 		requestHandler = handlers.NewRequestsHandler(requestSvc)
+		if userRepo != nil {
+			requestHandler.Users = userRepo
+		}
 
 		autoscanRepo := autoscan.NewRepository(deps.DB, deps.SecretCipher)
 		if deps.FolderRepo != nil && deps.LibraryScanQueue != nil && deps.PluginService != nil {
@@ -774,6 +781,9 @@ func NewRouter(deps Dependencies) chi.Router {
 		adminJobsHandler = handlers.NewAdminJobsHandler(jobRepo, privateStore)
 		adminJobsHandler.CancelRegistry = deps.AdminJobCancelRegistry
 		adminJobsHandler.RealtimeHub = deps.RealtimeHub
+		if userRepo != nil {
+			adminJobsHandler.Users = userRepo
+		}
 		if adminHandler != nil && deps.FolderRepo != nil && deps.FileRepo != nil && itemRepo != nil && episodeRepo != nil {
 			adminHandler.JobRepo = jobRepo
 			adminHandler.ItemRefreshResolver = adminjob.NewItemRefreshResolver(
@@ -903,6 +913,9 @@ func NewRouter(deps Dependencies) chi.Router {
 
 		mediaResolver := &pgSubtitleMediaResolver{pool: deps.DB}
 		subtitleSearchHandler = handlers.NewSubtitleSearchHandler(subtitleManager, subtitleRepo, mediaResolver)
+		if userRepo != nil {
+			subtitleSearchHandler.Users = userRepo
+		}
 	}
 
 	if adminSubtitleHandler != nil && deps.DB != nil && subtitleManager != nil {
@@ -977,6 +990,7 @@ func NewRouter(deps Dependencies) chi.Router {
 		aiService.Recover()
 		subtitleAIHandler = handlers.NewSubtitleAIHandler(aiService)
 		subtitleAIHandler.StoreProvider = deps.UserStoreProvider
+		subtitleAIHandler.Users = userRepo
 	}
 
 	// Metadata AI translation (descriptions into the localization tables).
@@ -1313,7 +1327,7 @@ func NewRouter(deps Dependencies) chi.Router {
 					r.Use(authMiddleware.RequireAuth)
 					r.Get("/theme/catalog", themeHandler.HandleCatalog)
 					r.Get("/theme/download", themeHandler.HandleDownload)
-					r.With(apimw.RequireAdmin).Post("/theme/catalog/refresh", themeHandler.HandleCatalogRefresh)
+					r.With(authMiddleware.RequireAdmin).Post("/theme/catalog/refresh", themeHandler.HandleCatalogRefresh)
 				})
 			}
 		}
@@ -1340,7 +1354,7 @@ func NewRouter(deps Dependencies) chi.Router {
 					http.NotFound(w, r)
 					return
 				}
-				authenticated, admin := resolveOptionalPluginAccess(r, jwtService, sessionRepo)
+				authenticated, admin, _ := resolveOptionalPluginAccessUser(r, jwtService, sessionRepo, apiKeyRepo, userRepo)
 				deps.PluginHTTPProxy.ServeAsset(w, r.WithContext(plugins.WithPluginAccess(r.Context(), authenticated, admin)), installationID, assetPath)
 			})
 		}
@@ -1471,6 +1485,7 @@ func NewRouter(deps Dependencies) chi.Router {
 						deps.ScanRegistry,
 						deps.LibraryScanQueue,
 						historyImportSvc,
+						userRepo,
 					)
 					r.Get("/events/ws", eventsHandler.HandleWebSocket)
 				}
@@ -1493,7 +1508,7 @@ func NewRouter(deps Dependencies) chi.Router {
 				// Library management routes (admin-only).
 				if libraryHandler != nil {
 					r.Group(func(r chi.Router) {
-						r.Use(apimw.RequireAdmin)
+						r.Use(authMiddleware.RequireAdmin)
 
 						r.Route("/libraries", func(r chi.Router) {
 							r.Get("/", libraryHandler.HandleListLibraries)
@@ -2005,7 +2020,7 @@ func NewRouter(deps Dependencies) chi.Router {
 				// Admin routes.
 				if adminHandler != nil {
 					r.Route("/admin", func(r chi.Router) {
-						metadataItemAccess := apimw.RequireAdmin
+						metadataItemAccess := authMiddleware.RequireAdmin
 						if permissionMiddleware != nil {
 							metadataItemAccess = permissionMiddleware.RequireMetadataCurationForItem
 						}
@@ -2032,7 +2047,7 @@ func NewRouter(deps Dependencies) chi.Router {
 						}
 
 						r.Group(func(r chi.Router) {
-							r.Use(apimw.RequireAdmin)
+							r.Use(authMiddleware.RequireAdmin)
 
 							r.Get("/users", adminHandler.HandleListUsers)
 							r.Post("/users", adminHandler.HandleCreateUser)
@@ -2453,18 +2468,11 @@ func (r *pgSubtitleMediaResolver) GetMediaFileWithMetadata(ctx context.Context, 
 	return &meta, nil
 }
 
-func resolveOptionalPluginAccess(
-	r *http.Request,
-	jwtService *auth.JWTService,
-	sessionRepo *auth.SessionRepository,
-) (bool, bool) {
-	authenticated, admin, _ := resolveOptionalPluginAccessUser(r, jwtService, sessionRepo, nil, nil)
-	return authenticated, admin
-}
-
-// resolveOptionalPluginAccessUser is like resolveOptionalPluginAccess but also
-// returns the authenticated user's ID, and accepts API-key bearer tokens
-// (sa_*) when apiKeyRepo + userRepo are provided.
+// resolveOptionalPluginAccessUser resolves the optionally authenticated user
+// for plugin HTTP routes and assets. It accepts API-key bearer tokens (sa_*)
+// when apiKeyRepo + userRepo are provided. Admin status is always derived from
+// the freshly loaded user, never from token contents; when userRepo is nil the
+// caller is treated as non-admin.
 func resolveOptionalPluginAccessUser(
 	r *http.Request,
 	jwtService *auth.JWTService,
@@ -2518,7 +2526,14 @@ func resolveOptionalPluginAccessUser(
 	if err != nil || !valid {
 		return false, false, 0
 	}
-	return true, claims.Role == "admin", claims.UserID
+	if userRepo == nil {
+		return true, false, claims.UserID
+	}
+	user, err := userRepo.GetByID(r.Context(), claims.UserID)
+	if err != nil || user == nil || !user.Enabled {
+		return false, false, 0
+	}
+	return true, user.IsAdmin, user.ID
 }
 
 // NewTMDBCollectionFetcher creates a TMDBCollectionFetcher from an API key.

@@ -12,7 +12,6 @@ import (
 
 	"github.com/Silo-Server/silo-server/internal/adminjob"
 	apimw "github.com/Silo-Server/silo-server/internal/api/middleware"
-	"github.com/Silo-Server/silo-server/internal/auth"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/notifications"
 )
@@ -37,6 +36,7 @@ type AdminJobsHandler struct {
 	store          AdminJobArtifactStore
 	CancelRegistry *adminjob.CancelRegistry
 	RealtimeHub    *notifications.Hub
+	Users          adminUserLoader // for server-side admin checks on non-admin-gated routes
 }
 
 func NewAdminJobsHandler(repo adminJobRepository, store AdminJobArtifactStore) *AdminJobsHandler {
@@ -122,13 +122,14 @@ func (h *AdminJobsHandler) HandleGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	claims := apimw.GetClaims(r.Context())
-	if !canReadAdminJob(claims, job) {
+	viewerUserID := apimw.GetUserID(r.Context())
+	viewerIsAdmin := isAdminRequest(r, h.Users)
+	if !canReadAdminJob(viewerUserID, viewerIsAdmin, job) {
 		writeError(w, http.StatusForbidden, "forbidden", "Admin access required")
 		return
 	}
 
-	writeJSON(w, http.StatusOK, adminJobToResponseForClaims(r, job, h.store, claims))
+	writeJSON(w, http.StatusOK, adminJobToResponseForViewer(r, job, h.store, viewerIsAdmin))
 }
 
 func (h *AdminJobsHandler) HandleCancel(w http.ResponseWriter, r *http.Request) {
@@ -264,19 +265,19 @@ func adminJobToResponse(r *http.Request, job *models.AdminJob, store AdminJobArt
 	return resp
 }
 
-func adminJobToResponseForClaims(
+func adminJobToResponseForViewer(
 	r *http.Request,
 	job *models.AdminJob,
 	store AdminJobArtifactStore,
-	claims *auth.Claims,
+	viewerIsAdmin bool,
 ) adminJobResponse {
 	response := adminJobToResponse(r, job, store)
-	sanitizeAdminJobResponseForClaims(&response, claims)
+	sanitizeAdminJobResponseForViewer(&response, viewerIsAdmin)
 	return response
 }
 
-func sanitizeAdminJobResponseForClaims(response *adminJobResponse, claims *auth.Claims) {
-	if response == nil || (claims != nil && claims.Role == "admin") {
+func sanitizeAdminJobResponseForViewer(response *adminJobResponse, viewerIsAdmin bool) {
+	if response == nil || viewerIsAdmin {
 		return
 	}
 	response.RequestPayload = json.RawMessage(`{}`)
@@ -384,12 +385,12 @@ func currentAdminUserID(r *http.Request) int {
 	return claims.UserID
 }
 
-func canReadAdminJob(claims *auth.Claims, job *models.AdminJob) bool {
-	if claims == nil || job == nil {
+func canReadAdminJob(viewerUserID int, viewerIsAdmin bool, job *models.AdminJob) bool {
+	if viewerUserID == 0 || job == nil {
 		return false
 	}
-	if claims.Role == "admin" {
+	if viewerIsAdmin {
 		return true
 	}
-	return job.JobType == adminjob.JobTypeItemRefresh && job.CreatedByUserID == claims.UserID
+	return job.JobType == adminjob.JobTypeItemRefresh && job.CreatedByUserID == viewerUserID
 }

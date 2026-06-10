@@ -18,7 +18,7 @@ func newTestJWTService() *auth.JWTService {
 func TestJWT_GenerateAccessToken(t *testing.T) {
 	svc := newTestJWTService()
 
-	token, err := svc.GenerateAccessToken(42, "admin", "sess-abc-123")
+	token, err := svc.GenerateAccessToken(42, "sess-abc-123")
 	if err != nil {
 		t.Fatalf("GenerateAccessToken() error: %v", err)
 	}
@@ -36,7 +36,7 @@ func TestJWT_GenerateAccessToken(t *testing.T) {
 func TestJWT_GenerateRefreshToken(t *testing.T) {
 	svc := newTestJWTService()
 
-	token, err := svc.GenerateRefreshToken(42, "user", "sess-def-456")
+	token, err := svc.GenerateRefreshToken(42, "sess-def-456")
 	if err != nil {
 		t.Fatalf("GenerateRefreshToken() error: %v", err)
 	}
@@ -48,7 +48,7 @@ func TestJWT_GenerateRefreshToken(t *testing.T) {
 func TestJWT_ValidateAccessToken(t *testing.T) {
 	svc := newTestJWTService()
 
-	token, err := svc.GenerateAccessToken(1, "user", "sess-uuid-1")
+	token, err := svc.GenerateAccessToken(1, "sess-uuid-1")
 	if err != nil {
 		t.Fatalf("GenerateAccessToken() error: %v", err)
 	}
@@ -60,9 +60,6 @@ func TestJWT_ValidateAccessToken(t *testing.T) {
 
 	if claims.UserID != 1 {
 		t.Errorf("UserID = %d, want 1", claims.UserID)
-	}
-	if claims.Role != "user" {
-		t.Errorf("Role = %q, want %q", claims.Role, "user")
 	}
 	if claims.SessionID != "sess-uuid-1" {
 		t.Errorf("SessionID = %q, want %q", claims.SessionID, "sess-uuid-1")
@@ -91,7 +88,7 @@ func TestJWT_ValidateAccessToken(t *testing.T) {
 func TestJWT_ValidateRefreshToken(t *testing.T) {
 	svc := newTestJWTService()
 
-	token, err := svc.GenerateRefreshToken(99, "admin", "sess-uuid-2")
+	token, err := svc.GenerateRefreshToken(99, "sess-uuid-2")
 	if err != nil {
 		t.Fatalf("GenerateRefreshToken() error: %v", err)
 	}
@@ -104,9 +101,6 @@ func TestJWT_ValidateRefreshToken(t *testing.T) {
 	if claims.UserID != 99 {
 		t.Errorf("UserID = %d, want 99", claims.UserID)
 	}
-	if claims.Role != "admin" {
-		t.Errorf("Role = %q, want %q", claims.Role, "admin")
-	}
 	if claims.SessionID != "sess-uuid-2" {
 		t.Errorf("SessionID = %q, want %q", claims.SessionID, "sess-uuid-2")
 	}
@@ -118,12 +112,12 @@ func TestJWT_ValidateRefreshToken(t *testing.T) {
 func TestJWT_AccessTokenExpiry(t *testing.T) {
 	svc := newTestJWTService()
 
-	accessToken, err := svc.GenerateAccessToken(1, "user", "sess-1")
+	accessToken, err := svc.GenerateAccessToken(1, "sess-1")
 	if err != nil {
 		t.Fatalf("GenerateAccessToken() error: %v", err)
 	}
 
-	refreshToken, err := svc.GenerateRefreshToken(1, "user", "sess-1")
+	refreshToken, err := svc.GenerateRefreshToken(1, "sess-1")
 	if err != nil {
 		t.Fatalf("GenerateRefreshToken() error: %v", err)
 	}
@@ -162,7 +156,7 @@ func TestJWT_ExpiredToken(t *testing.T) {
 	// Create a service with a negative expiry so tokens are immediately expired.
 	svc := auth.NewJWTService(testSecret, -1*time.Second, -1*time.Second)
 
-	token, err := svc.GenerateAccessToken(1, "user", "sess-expired")
+	token, err := svc.GenerateAccessToken(1, "sess-expired")
 	if err != nil {
 		t.Fatalf("GenerateAccessToken() error: %v", err)
 	}
@@ -176,7 +170,7 @@ func TestJWT_ExpiredToken(t *testing.T) {
 func TestJWT_TamperedToken(t *testing.T) {
 	svc := newTestJWTService()
 
-	token, err := svc.GenerateAccessToken(1, "user", "sess-tamper")
+	token, err := svc.GenerateAccessToken(1, "sess-tamper")
 	if err != nil {
 		t.Fatalf("GenerateAccessToken() error: %v", err)
 	}
@@ -194,7 +188,7 @@ func TestJWT_WrongSecret(t *testing.T) {
 	svc1 := auth.NewJWTService("secret-one", 15*time.Minute, 7*24*time.Hour)
 	svc2 := auth.NewJWTService("secret-two", 15*time.Minute, 7*24*time.Hour)
 
-	token, err := svc1.GenerateAccessToken(1, "user", "sess-wrong-secret")
+	token, err := svc1.GenerateAccessToken(1, "sess-wrong-secret")
 	if err != nil {
 		t.Fatalf("GenerateAccessToken() error: %v", err)
 	}
@@ -210,7 +204,6 @@ func TestJWT_WrongSigningMethod(t *testing.T) {
 	// We construct a token with alg=none to ensure the validator rejects it.
 	claims := jwt.MapClaims{
 		"user_id":    1,
-		"role":       "admin",
 		"session_id": "sess-none",
 		"token_type": auth.TokenTypeAccess,
 		"exp":        time.Now().Add(1 * time.Hour).Unix(),
@@ -250,12 +243,12 @@ func TestJWT_GarbageToken(t *testing.T) {
 func TestJWT_DifferentUsersGetDifferentTokens(t *testing.T) {
 	svc := newTestJWTService()
 
-	token1, err := svc.GenerateAccessToken(1, "user", "sess-1")
+	token1, err := svc.GenerateAccessToken(1, "sess-1")
 	if err != nil {
 		t.Fatalf("GenerateAccessToken(1) error: %v", err)
 	}
 
-	token2, err := svc.GenerateAccessToken(2, "admin", "sess-2")
+	token2, err := svc.GenerateAccessToken(2, "sess-2")
 	if err != nil {
 		t.Fatalf("GenerateAccessToken(2) error: %v", err)
 	}

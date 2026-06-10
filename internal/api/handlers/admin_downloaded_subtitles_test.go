@@ -27,7 +27,6 @@ func newAdminSubtitleRequest(method, path string, body []byte) *http.Request {
 	req := httptest.NewRequest(method, path, reader)
 	ctx := apimw.SetClaims(context.Background(), &auth.Claims{
 		UserID:    1,
-		Role:      "admin",
 		TokenType: auth.TokenTypeAccess,
 	})
 	return req.WithContext(ctx)

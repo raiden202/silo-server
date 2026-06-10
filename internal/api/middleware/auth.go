@@ -19,6 +19,9 @@ type contextKey string
 // claimsKey is the context key for storing JWT claims.
 const claimsKey contextKey = "claims"
 
+// userKey is the context key for the loaded authenticated user.
+const userKey contextKey = "user"
+
 // SessionValidator checks whether a session is still valid (not revoked/expired).
 type SessionValidator interface {
 	IsValid(ctx context.Context, sessionID string) (bool, error)
@@ -40,6 +43,11 @@ type APIKeyUserLoader interface {
 	GetByID(ctx context.Context, id int) (*models.User, error)
 }
 
+// AdminUserLoader loads a user by ID for server-side admin checks.
+type AdminUserLoader interface {
+	GetByID(ctx context.Context, id int) (*models.User, error)
+}
+
 // AuthMiddleware provides HTTP middleware for JWT-based authentication with
 // session validity caching.
 type AuthMiddleware struct {
@@ -47,16 +55,18 @@ type AuthMiddleware struct {
 	sessionValidator SessionValidator
 	apiKeyValidator  APIKeyValidator  // nil if API keys not configured
 	apiKeyUserLoader APIKeyUserLoader // nil if API keys not configured
+	userLoader       AdminUserLoader  // nil if no user store; RequireAdmin then denies
 }
 
 // NewAuthMiddleware creates a new AuthMiddleware with the given token validator
 // and session validator.
-func NewAuthMiddleware(tv TokenValidator, sv SessionValidator, akv APIKeyValidator, akul APIKeyUserLoader) *AuthMiddleware {
+func NewAuthMiddleware(tv TokenValidator, sv SessionValidator, akv APIKeyValidator, akul APIKeyUserLoader, ul AdminUserLoader) *AuthMiddleware {
 	return &AuthMiddleware{
 		tokenValidator:   tv,
 		sessionValidator: sv,
 		apiKeyValidator:  akv,
 		apiKeyUserLoader: akul,
+		userLoader:       ul,
 	}
 }
 
@@ -105,7 +115,6 @@ func (am *AuthMiddleware) RequireAuth(next http.Handler) http.Handler {
 
 			claims = &auth.Claims{
 				UserID:    user.ID,
-				Role:      auth.RoleForUser(user),
 				SessionID: "",
 				TokenType: auth.TokenTypeAPIKey,
 				APIKeyID:  apiKey.ID,
@@ -144,23 +153,28 @@ func (am *AuthMiddleware) RequireAuth(next http.Handler) http.Handler {
 	})
 }
 
-// RequireAdmin is a standalone HTTP middleware that checks if the authenticated
-// user has the "admin" role. It expects RequireAuth to have already placed
-// claims in the request context.
-func RequireAdmin(next http.Handler) http.Handler {
+// RequireAdmin enforces that the authenticated user currently holds the
+// admin permission. The check is server-side against group-derived policy —
+// never against token contents — so revoking admin takes effect on the next
+// request. The loaded user is stashed in the context for handlers.
+func (am *AuthMiddleware) RequireAdmin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		claims := GetClaims(r.Context())
 		if claims == nil {
 			writeUnauthorized(w, "Authentication required")
 			return
 		}
-
-		if claims.Role != "admin" {
+		if am.userLoader == nil {
 			writeForbidden(w, "Admin access required")
 			return
 		}
-
-		next.ServeHTTP(w, r)
+		user, err := am.userLoader.GetByID(r.Context(), claims.UserID)
+		if err != nil || user == nil || !user.Enabled || !user.IsAdmin {
+			writeForbidden(w, "Admin access required")
+			return
+		}
+		ctx := context.WithValue(r.Context(), userKey, user)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
@@ -181,12 +195,13 @@ func GetClaims(ctx context.Context) *auth.Claims {
 	return claims
 }
 
-// IsAdmin reports whether the context's authenticated user account has the
-// admin role. Returns false when no claims are present. Note this is the
-// account-level role; it says nothing about which household profile is active.
-func IsAdmin(ctx context.Context) bool {
-	claims := GetClaims(ctx)
-	return claims != nil && claims.Role == "admin"
+// GetUser returns the user loaded by RequireAdmin, or nil.
+func GetUser(ctx context.Context) *models.User {
+	user, ok := ctx.Value(userKey).(*models.User)
+	if !ok {
+		return nil
+	}
+	return user
 }
 
 // GetUserID retrieves the user ID from the JWT claims in the context.

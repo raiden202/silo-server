@@ -40,12 +40,19 @@ func (m *PermissionMiddleware) RequireMetadataCurationForItem(next http.Handler)
 			writeUnauthorized(w, "Authentication required")
 			return
 		}
-		if claims.Role == "admin" {
-			next.ServeHTTP(w, r)
-			return
-		}
 		if m == nil || m.users == nil || m.libraries == nil {
 			writeForbidden(w, "Metadata curation permission required")
+			return
+		}
+
+		user, err := m.users.GetByID(r.Context(), claims.UserID)
+		if err != nil || user == nil || !user.Enabled {
+			writeForbidden(w, "Metadata curation permission required")
+			return
+		}
+		// Admins bypass the per-library restriction checks below.
+		if user.IsAdmin {
+			next.ServeHTTP(w, r)
 			return
 		}
 
@@ -55,11 +62,6 @@ func (m *PermissionMiddleware) RequireMetadataCurationForItem(next http.Handler)
 			return
 		}
 
-		user, err := m.users.GetByID(r.Context(), claims.UserID)
-		if err != nil || user == nil || !user.Enabled {
-			writeForbidden(w, "Metadata curation permission required")
-			return
-		}
 		if !auth.HasEffectivePermission(user, auth.PermissionMetadataCuration) {
 			writeForbidden(w, "Metadata curation permission required")
 			return

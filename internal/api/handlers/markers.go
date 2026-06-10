@@ -288,9 +288,6 @@ func (h *MarkersHandler) requireMarkerEdit(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required")
 		return false
 	}
-	if claims.Role == "admin" {
-		return true
-	}
 	if h == nil || h.Users == nil {
 		writeError(w, http.StatusForbidden, "forbidden", "Marker editing permission required")
 		return false

@@ -344,7 +344,7 @@ func (h *AuthHandler) HandlePluginLaunch(w http.ResponseWriter, r *http.Request)
 	}
 
 	const ttl = 5 * time.Minute
-	token, err := h.jwt.GeneratePluginAccessToken(claims.UserID, claims.Role, claims.SessionID, ttl)
+	token, err := h.jwt.GeneratePluginAccessToken(claims.UserID, claims.SessionID, ttl)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to prepare plugin access")
 		return

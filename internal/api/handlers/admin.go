@@ -971,7 +971,7 @@ func (h *AdminHandler) HandleRefreshItemMetadata(w http.ResponseWriter, r *http.
 		publishEventJob(r.Context(), h.RealtimeHub.EventsHub(), "job.created", job)
 	}
 
-	writeJSON(w, http.StatusAccepted, adminJobToResponseForClaims(r, job, nil, apimw.GetClaims(r.Context())))
+	writeJSON(w, http.StatusAccepted, adminJobToResponseForViewer(r, job, nil, isAdminRequest(r, h.userRepo)))
 }
 
 // UpdateItemMetadataRequest contains the fields that can be updated via

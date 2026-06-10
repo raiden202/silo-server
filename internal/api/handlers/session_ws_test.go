@@ -27,7 +27,7 @@ func TestHandleSessionWebSocket_RequiresHelloBeforeRealtimeReady(t *testing.T) {
 
 	router := chi.NewRouter()
 	router.Get("/playback/ws/{session_id}", func(w http.ResponseWriter, r *http.Request) {
-		ctx := apimw.SetClaims(r.Context(), &auth.Claims{UserID: 1, Role: "user", TokenType: auth.TokenTypeAccess})
+		ctx := apimw.SetClaims(r.Context(), &auth.Claims{UserID: 1, TokenType: auth.TokenTypeAccess})
 		handler.HandleSessionWebSocket(w, r.WithContext(ctx))
 	})
 

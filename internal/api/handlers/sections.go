@@ -891,8 +891,8 @@ func (h *SectionHandler) HandleSaveProfileOverrides(w http.ResponseWriter, r *ht
 		allowCustom = v == "true"
 	}
 	isAdmin := false
-	if claims := apimw.GetClaims(r.Context()); claims != nil {
-		isAdmin = claims.Role == "admin"
+	if h.UserRepo != nil {
+		isAdmin = isAdminRequest(r, h.UserRepo)
 	}
 
 	for _, o := range req.Overrides {
