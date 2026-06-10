@@ -476,6 +476,51 @@ func (r *GroupRepository) AddMember(ctx context.Context, groupID, userID int) er
 	return tx.Commit(ctx)
 }
 
+// lastEnabledAdministratorGuard returns ErrLastAdministrator when userID is an
+// enabled member of the administrators group and no other enabled member
+// exists, i.e. when removing, disabling, or deleting userID would leave the
+// server without an enabled administrator. It locks the administrators group
+// row (FOR UPDATE) so concurrent membership/disable/delete mutations
+// serialize; re-locking the same row later in the same transaction is a no-op.
+func lastEnabledAdministratorGuard(ctx context.Context, tx pgx.Tx, excludingUserID int) error {
+	var adminGroupID int
+	if err := tx.QueryRow(ctx, `
+		SELECT id FROM groups WHERE slug = $1 FOR UPDATE`,
+		models.GroupSlugAdministrators).Scan(&adminGroupID); err != nil {
+		return fmt.Errorf("locking administrators group: %w", err)
+	}
+
+	// Only an enabled administrator can be the last enabled administrator;
+	// mutating a non-member or disabled member never breaks the invariant.
+	var enabledMember bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM user_groups ug
+			JOIN users u ON u.id = ug.user_id
+			WHERE ug.group_id = $1 AND ug.user_id = $2 AND u.enabled)`,
+		adminGroupID, excludingUserID).Scan(&enabledMember); err != nil {
+		return fmt.Errorf("checking administrators membership: %w", err)
+	}
+	if !enabledMember {
+		return nil
+	}
+
+	var remaining int
+	if err := tx.QueryRow(ctx, `
+		SELECT COUNT(*)
+		FROM user_groups ug
+		JOIN users u ON u.id = ug.user_id
+		WHERE ug.group_id = $1 AND u.enabled AND ug.user_id <> $2`,
+		adminGroupID, excludingUserID).Scan(&remaining); err != nil {
+		return fmt.Errorf("counting administrators: %w", err)
+	}
+	if remaining == 0 {
+		return ErrLastAdministrator
+	}
+	return nil
+}
+
 // RemoveMember removes a user from a group. Removing the last enabled member
 // of the administrators group is rejected.
 func (r *GroupRepository) RemoveMember(ctx context.Context, groupID, userID int) error {
@@ -491,17 +536,8 @@ func (r *GroupRepository) RemoveMember(ctx context.Context, groupID, userID int)
 		return err
 	}
 	if group.Slug == models.GroupSlugAdministrators {
-		var remaining int
-		if err := tx.QueryRow(ctx, `
-			SELECT COUNT(*)
-			FROM user_groups ug
-			JOIN users u ON u.id = ug.user_id
-			WHERE ug.group_id = $1 AND u.enabled AND ug.user_id <> $2`,
-			groupID, userID).Scan(&remaining); err != nil {
-			return fmt.Errorf("counting administrators: %w", err)
-		}
-		if remaining == 0 {
-			return ErrLastAdministrator
+		if err := lastEnabledAdministratorGuard(ctx, tx, userID); err != nil {
+			return err
 		}
 	}
 	tag, err := tx.Exec(ctx,
@@ -553,25 +589,8 @@ func (r *GroupRepository) replaceUserGroupsTx(ctx context.Context, tx pgx.Tx, us
 		}
 	}
 	if !keepingAdmin {
-		var wasAdmin bool
-		if err := tx.QueryRow(ctx, `
-			SELECT EXISTS (SELECT 1 FROM user_groups WHERE user_id = $1 AND group_id = $2)`,
-			userID, adminGroupID).Scan(&wasAdmin); err != nil {
-			return fmt.Errorf("checking administrators membership: %w", err)
-		}
-		if wasAdmin {
-			var remaining int
-			if err := tx.QueryRow(ctx, `
-				SELECT COUNT(*)
-				FROM user_groups ug
-				JOIN users u ON u.id = ug.user_id
-				WHERE ug.group_id = $1 AND u.enabled AND ug.user_id <> $2`,
-				adminGroupID, userID).Scan(&remaining); err != nil {
-				return fmt.Errorf("counting administrators: %w", err)
-			}
-			if remaining == 0 {
-				return ErrLastAdministrator
-			}
+		if err := lastEnabledAdministratorGuard(ctx, tx, userID); err != nil {
+			return err
 		}
 	}
 

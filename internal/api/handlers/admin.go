@@ -495,6 +495,10 @@ func (h *AdminHandler) HandleDeleteUser(w http.ResponseWriter, r *http.Request) 
 
 	err = h.userRepo.Delete(r.Context(), id)
 	if err != nil {
+		if errors.Is(err, auth.ErrLastAdministrator) {
+			writeError(w, http.StatusConflict, "last_administrator", "Cannot remove the last enabled administrator")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to delete user")
 		return
 	}

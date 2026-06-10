@@ -1,10 +1,69 @@
 package handlers
 
 import (
+	"context"
+	"net/http"
 	"testing"
 
+	"github.com/go-chi/chi/v5"
+
+	"github.com/Silo-Server/silo-server/internal/auth"
 	"github.com/Silo-Server/silo-server/internal/models"
 )
+
+// fakeAdminUserRepo is a configurable in-memory UserRepository for handler
+// tests.
+type fakeAdminUserRepo struct {
+	user      *models.User
+	updateErr error
+	deleteErr error
+}
+
+func (f *fakeAdminUserRepo) List(context.Context) ([]*models.User, error) { return nil, nil }
+
+func (f *fakeAdminUserRepo) Create(context.Context, models.CreateUserInput) (*models.User, error) {
+	return f.user, nil
+}
+
+func (f *fakeAdminUserRepo) Update(context.Context, int, models.UpdateUserInput) error {
+	return f.updateErr
+}
+
+func (f *fakeAdminUserRepo) Delete(context.Context, int) error { return f.deleteErr }
+
+func (f *fakeAdminUserRepo) GetByID(context.Context, int) (*models.User, error) {
+	if f.user == nil {
+		return nil, auth.ErrNotFound
+	}
+	return f.user, nil
+}
+
+// newAdminUsersTestRouter mounts the user-management routes the same way the
+// API router does so tests exercise real chi URL params.
+func newAdminUsersTestRouter(repo UserRepository) chi.Router {
+	h := NewAdminHandler(repo, nil, nil)
+	r := chi.NewRouter()
+	r.Put("/admin/users/{id}", h.HandleUpdateUser)
+	r.Delete("/admin/users/{id}", h.HandleDeleteUser)
+	return r
+}
+
+func TestAdminUpdateUserDisableLastAdministrator(t *testing.T) {
+	repo := &fakeAdminUserRepo{
+		user:      &models.User{ID: 2, Enabled: true},
+		updateErr: auth.ErrLastAdministrator,
+	}
+	rec := doGroupsRequest(t, newAdminUsersTestRouter(repo), http.MethodPut,
+		"/admin/users/2", map[string]any{"enabled": false})
+	assertGroupsError(t, rec, http.StatusConflict, "last_administrator")
+}
+
+func TestAdminDeleteUserLastAdministrator(t *testing.T) {
+	repo := &fakeAdminUserRepo{deleteErr: auth.ErrLastAdministrator}
+	rec := doGroupsRequest(t, newAdminUsersTestRouter(repo), http.MethodDelete,
+		"/admin/users/2", nil)
+	assertGroupsError(t, rec, http.StatusConflict, "last_administrator")
+}
 
 func TestUpdateRequiresSessionRevocation(t *testing.T) {
 	enabled := true

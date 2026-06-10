@@ -247,6 +247,17 @@ func (r *UserRepository) Update(ctx context.Context, id int, input models.Update
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	// Disabling the last enabled administrator would brick admin access just
+	// like removing their membership, so the same transactional guard applies.
+	// It runs before the identity UPDATE so the administrators group row is
+	// always locked before the user row (replaceUserGroupsTx re-locks the same
+	// group row later in this transaction, which is a no-op).
+	if input.Enabled != nil && !*input.Enabled {
+		if err := lastEnabledAdministratorGuard(ctx, tx, id); err != nil {
+			return err
+		}
+	}
+
 	if len(setClauses) == 0 {
 		// Nothing to update on the users row; still verify the user exists.
 		var exists int
@@ -296,17 +307,32 @@ func (r *UserRepository) Update(ctx context.Context, id int, input models.Update
 	return nil
 }
 
-// Delete removes a user by their ID.
+// Delete removes a user by their ID. Deleting the last enabled administrator
+// is rejected with ErrLastAdministrator; the guard and the delete share one
+// transaction so concurrent admin mutations serialize on the administrators
+// group row.
 func (r *UserRepository) Delete(ctx context.Context, id int) error {
-	tag, err := r.pool.Exec(ctx, "DELETE FROM users WHERE id = $1", id)
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("beginning user delete: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if err := lastEnabledAdministratorGuard(ctx, tx, id); err != nil {
+		return err
+	}
+
+	tag, err := tx.Exec(ctx, "DELETE FROM users WHERE id = $1", id)
 	if err != nil {
 		return fmt.Errorf("deleting user: %w", err)
 	}
-
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound
 	}
 
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("committing user delete: %w", err)
+	}
 	return nil
 }
 
