@@ -11,6 +11,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	apimw "github.com/Silo-Server/silo-server/internal/api/middleware"
+	"github.com/Silo-Server/silo-server/internal/auth"
 	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/subtitles/ai"
 	"github.com/Silo-Server/silo-server/internal/userstore"
@@ -28,7 +29,7 @@ type SubtitleAIHandler struct {
 	StoreProvider userstore.UserStoreProvider
 	// Users loads the account server-side for the quota exemption's admin
 	// check; admin status is never read from token contents.
-	Users adminUserLoader
+	Users auth.UserLoader
 }
 
 // NewSubtitleAIHandler creates a handler backed by the given service.
