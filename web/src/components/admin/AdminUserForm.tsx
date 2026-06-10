@@ -2,6 +2,7 @@ import { useId, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import type { AdminGroup, AdminUser, CreateUserRequest, UpdateUserRequest } from "@/api/types";
 import { useAdminGroups } from "@/hooks/queries/admin/groups";
+import { Skeleton } from "@/components/ui/skeleton";
 import { useCreateUser, useUpdateUser } from "@/hooks/queries/admin/users";
 import { EffectiveAccessSummary } from "@/components/admin/EffectiveAccessSummary";
 import { Badge } from "@/components/ui/badge";
@@ -84,7 +85,8 @@ function GroupMembershipSelector({
  * permissions, library access, and limits are managed via group membership.
  */
 export function AdminUserForm({ user, onClose }: { user: AdminUser | null; onClose: () => void }) {
-  const { data: groups = [] } = useAdminGroups();
+  const { data: groups, isLoading: groupsLoading, isError: groupsError } = useAdminGroups();
+  const groupsLoaded = !groupsLoading && !groupsError && groups !== undefined;
   const [username, setUsername] = useState(user?.username ?? "");
   const [email, setEmail] = useState(user?.email ?? "");
   const [password, setPassword] = useState("");
@@ -95,7 +97,7 @@ export function AdminUserForm({ user, onClose }: { user: AdminUser | null; onClo
     user ? user.groups.map((g) => g.id) : null,
   );
   const defaultGroupIds = useMemo(() => {
-    const usersGroup = groups.find((g) => g.slug === USERS_GROUP_SLUG);
+    const usersGroup = groups?.find((g) => g.slug === USERS_GROUP_SLUG);
     return usersGroup ? [usersGroup.id] : [];
   }, [groups]);
   const selectedGroupIds = groupIds ?? defaultGroupIds;
@@ -119,12 +121,17 @@ export function AdminUserForm({ user, onClose }: { user: AdminUser | null; onClo
       if (password) body.password = password;
       updateMutation.mutate({ id: user.id, body }, { onSuccess: onClose });
     } else {
+      // Only include group_ids when the groups list has successfully loaded OR
+      // the admin explicitly touched the selector. If groups are still loading
+      // or errored and the selector was never touched, omit the field entirely
+      // so the backend applies its own default-group provisioning.
+      const includeGroupIds = groupsLoaded || groupIds !== null;
       const body: CreateUserRequest = {
         username,
         email,
         password,
         create_default_profile: true,
-        group_ids: selectedGroupIds,
+        ...(includeGroupIds && { group_ids: selectedGroupIds }),
       };
       createMutation.mutate(body, { onSuccess: onClose });
     }
@@ -196,12 +203,24 @@ export function AdminUserForm({ user, onClose }: { user: AdminUser | null; onClo
           </TabsContent>
 
           <TabsContent value="groups" className="mt-0 space-y-4">
-            <GroupMembershipSelector
-              groups={groups}
-              selectedIds={selectedGroupIds}
-              onChange={setGroupIds}
-            />
-            <p className="text-muted-foreground text-xs">{GROUP_UNION_HINT}</p>
+            {groupsLoading ? (
+              <div className="space-y-2">
+                <Skeleton className="h-[52px] w-full rounded-md" />
+                <Skeleton className="h-[52px] w-full rounded-md" />
+                <Skeleton className="h-[52px] w-full rounded-md" />
+              </div>
+            ) : groupsError ? (
+              <p className="text-muted-foreground text-sm">
+                {"Couldn't load groups — the user will be created in the default group."}
+              </p>
+            ) : (
+              <GroupMembershipSelector
+                groups={groups ?? []}
+                selectedIds={selectedGroupIds}
+                onChange={setGroupIds}
+              />
+            )}
+            {!groupsError && <p className="text-muted-foreground text-xs">{GROUP_UNION_HINT}</p>}
             {user && (
               <div className="space-y-2">
                 <Label>Effective access</Label>
