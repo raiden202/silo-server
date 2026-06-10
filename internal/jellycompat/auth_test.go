@@ -28,7 +28,7 @@ func TestRequireSession_SkipsRefreshWhenNoAuthService(t *testing.T) {
 		StreamAppTokenExpiry:  now.Add(3 * time.Minute),
 	})
 
-	authn := &Authenticator{sessions: store, authService: nil}
+	authn := &Authenticator{sessions: store, authService: nil, users: enabledUserLoader(1)}
 	req := httptest.NewRequest("GET", "/test", nil)
 	req.Header.Set("X-Emby-Token", "valid-tok")
 	rec := httptest.NewRecorder()
@@ -63,7 +63,7 @@ func TestRequireSession_PassesThroughNonExpiringToken(t *testing.T) {
 		StreamAppTokenExpiry: now.Add(30 * time.Minute),
 	})
 
-	authn := &Authenticator{sessions: store}
+	authn := &Authenticator{sessions: store, users: enabledUserLoader(1)}
 	req := httptest.NewRequest("GET", "/test", nil)
 	req.Header.Set("X-Emby-Token", "fresh-tok")
 	rec := httptest.NewRecorder()
@@ -98,7 +98,7 @@ func TestRequireSession_NoAuthService_PassesThroughExpiredStreamAppToken(t *test
 		StreamAppTokenExpiry: now.Add(-1 * time.Hour), // already expired
 	})
 
-	authn := &Authenticator{sessions: store, authService: nil}
+	authn := &Authenticator{sessions: store, authService: nil, users: enabledUserLoader(1)}
 	req := httptest.NewRequest("GET", "/test", nil)
 	req.Header.Set("X-Emby-Token", "expired-tok")
 	rec := httptest.NewRecorder()
@@ -120,6 +120,75 @@ func TestRequireSession_NoAuthService_PassesThroughExpiredStreamAppToken(t *test
 	}
 }
 
+// enabledUserLoader returns a loader serving a single enabled, non-admin user.
+func enabledUserLoader(id int) auth.UserLoader {
+	return &fakeAPIKeyUserLoader{user: &models.User{ID: id, Enabled: true}}
+}
+
+func TestRequireSession_RejectsDisabledUser(t *testing.T) {
+	now := fixedNow()
+	clock := func() time.Time { return now }
+	store := NewSessionStore(30*24*time.Hour, clock)
+	_ = store.Put(Session{Token: "tok", StreamAppUserID: 1})
+
+	cases := map[string]auth.UserLoader{
+		"disabled account": &fakeAPIKeyUserLoader{user: &models.User{ID: 1, Enabled: false}},
+		"deleted account":  &fakeAPIKeyUserLoader{}, // loader returns auth.ErrNotFound
+		"no loader wired":  nil,                     // fail closed
+	}
+	for name, users := range cases {
+		t.Run(name, func(t *testing.T) {
+			authn := &Authenticator{sessions: store, users: users}
+			req := httptest.NewRequest("GET", "/test", nil)
+			req.Header.Set("X-Emby-Token", "tok")
+			rec := httptest.NewRecorder()
+
+			authn.RequireSession(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+				t.Fatal("handler should not run for a disabled/missing account")
+			})).ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want 401 (body: %s)", rec.Code, rec.Body.String())
+			}
+			// The compat session must survive: a transient lookup failure also
+			// denies, and deleting here would force a re-login after recovery.
+			if _, ok := store.Get("tok"); !ok {
+				t.Fatal("compat session must not be deleted by a per-request denial")
+			}
+		})
+	}
+}
+
+func TestPlaybackSessionAuth_RejectsDisabledUser(t *testing.T) {
+	now := fixedNow()
+	clock := func() time.Time { return now }
+	sessions := NewSessionStore(30*24*time.Hour, clock)
+	_ = sessions.Put(Session{Token: "compat-tok", StreamAppUserID: 1})
+	playbackStore := NewPlaybackSessionStore(time.Hour, clock)
+	playbackStore.Put(PlaybackSession{ID: "ps-abc", CompatToken: "compat-tok"})
+
+	disabled := &fakeAPIKeyUserLoader{user: &models.User{ID: 1, Enabled: false}}
+	mw := PlaybackSessionAuth(sessions, playbackStore, nil, disabled)
+
+	// Both the direct-token path and the PlaySessionId fallback must deny.
+	for name, target := range map[string]string{
+		"token":         "/Videos/itm/stream?api_key=compat-tok",
+		"play session":  "/Videos/itm/stream?PlaySessionId=ps-abc",
+		"lowercase psi": "/Videos/itm/stream?playSessionId=ps-abc",
+	} {
+		t.Run(name, func(t *testing.T) {
+			req := httptest.NewRequest("GET", target, nil)
+			rec := httptest.NewRecorder()
+			mw(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+				t.Fatal("handler should not run for a disabled account")
+			})).ServeHTTP(rec, req)
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want 401 (body: %s)", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
 func TestPlaybackSessionAuth_CaseInsensitivePlaySessionId(t *testing.T) {
 	now := fixedNow()
 	clock := func() time.Time { return now }
@@ -128,7 +197,7 @@ func TestPlaybackSessionAuth_CaseInsensitivePlaySessionId(t *testing.T) {
 	playbackStore := NewPlaybackSessionStore(time.Hour, clock)
 	playbackStore.Put(PlaybackSession{ID: "ps-abc", CompatToken: "compat-tok"})
 
-	mw := PlaybackSessionAuth(sessions, playbackStore, nil)
+	mw := PlaybackSessionAuth(sessions, playbackStore, nil, enabledUserLoader(1))
 
 	cases := []struct {
 		name     string

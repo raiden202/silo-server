@@ -12,6 +12,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/auth"
 	evt "github.com/Silo-Server/silo-server/internal/events"
 	"github.com/Silo-Server/silo-server/internal/historyimport"
+	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/scanqueue"
 	"github.com/Silo-Server/silo-server/internal/taskmanager"
 	"github.com/gorilla/websocket"
@@ -31,6 +32,10 @@ type activeScanLister interface {
 	ListActive(ctx context.Context) ([]evt.ScanRun, error)
 }
 
+// viewerRevalidateInterval is how often an open events WebSocket re-loads its
+// user to confirm the account is still enabled and admin status is unchanged.
+const viewerRevalidateInterval = 60 * time.Second
+
 type EventsHandler struct {
 	hub            *evt.Hub
 	jobs           *AdminJobsHandler
@@ -40,6 +45,10 @@ type EventsHandler struct {
 	persistedScans activeScanLister
 	historyImports historyImportActiveLister
 	users          auth.UserLoader
+
+	// revalidateInterval overrides viewerRevalidateInterval in tests; zero
+	// means the default.
+	revalidateInterval time.Duration
 }
 
 func NewEventsHandler(
@@ -128,6 +137,17 @@ func (h *EventsHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) 
 	deadline := time.NewTimer(5 * time.Second)
 	defer deadline.Stop()
 
+	// Channel authorization is decided once at upgrade, so a long-lived
+	// connection must periodically re-load its user: a disabled account or a
+	// changed admin role would otherwise keep its channel set until the
+	// client disconnects on its own.
+	revalidateEvery := h.revalidateInterval
+	if revalidateEvery <= 0 {
+		revalidateEvery = viewerRevalidateInterval
+	}
+	revalidate := time.NewTicker(revalidateEvery)
+	defer revalidate.Stop()
+
 	subscriptions := make(map[evt.EventChannel]struct{})
 	subscribedOnce := false
 
@@ -137,6 +157,33 @@ func (h *EventsHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) 
 			return
 		case <-readDone:
 			return
+		case <-revalidate.C:
+			if h.users == nil {
+				// No loader wired: the viewer was never granted admin
+				// channels (isAdminRequest fails closed), so there is no
+				// stale privilege to revoke.
+				continue
+			}
+			user, err := h.users.GetByID(ctx, claims.UserID)
+			if err != nil && !auth.IsNotFound(err) {
+				// Transient lookup failure: keep the connection and retry on
+				// the next tick rather than dropping every viewer on a DB
+				// blip. A definitive miss (ErrNotFound) leaves user nil and
+				// closes below.
+				slog.Warn("events: viewer revalidation failed; retrying next tick",
+					"user_id", claims.UserID,
+					"error", err,
+				)
+				continue
+			}
+			if closeConn, reason := revalidateViewer(user, viewerIsAdmin); closeConn {
+				_ = writeWebSocketControl(
+					conn,
+					websocket.CloseMessage,
+					websocket.FormatCloseMessage(websocket.CloseNormalClosure, reason),
+				)
+				return
+			}
 		case <-deadline.C:
 			if subscribedOnce {
 				continue
@@ -276,6 +323,25 @@ func (h *EventsHandler) handleEventsClientMessage(
 	}
 
 	return nextSubs, true, true
+}
+
+// revalidateViewer decides whether an open events WebSocket must be closed
+// after its user is re-loaded. The connection closes when the account is gone
+// or disabled, and when admin status changed in either direction — the
+// allowed channel set is fixed at upgrade, so the client must reconnect to
+// receive the correct set; closing on change is simpler and safer than
+// re-assigning channels mid-stream. Other policy changes (AccessPolicyRevision
+// bumps from group/library edits) deliberately keep the connection: event
+// authorization (allowedChannelsForViewer, allowsEventForViewer) depends only
+// on admin status and user ID, never on per-user library or rating policy.
+func revalidateViewer(user *models.User, wasAdmin bool) (closeConn bool, reason string) {
+	if user == nil || !user.Enabled {
+		return true, "account disabled"
+	}
+	if user.IsAdmin != wasAdmin {
+		return true, "permissions changed"
+	}
+	return false, ""
 }
 
 func allowedChannelsForViewer(viewerIsAdmin bool) []evt.EventChannel {

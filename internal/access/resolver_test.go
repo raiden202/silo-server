@@ -256,7 +256,7 @@ func (s stubStore) DeleteLibraryPlaybackPreference(context.Context, string, int)
 
 func TestResolver_UnrestrictedAccountRestrictedProfile(t *testing.T) {
 	resolver := NewResolver(
-		stubUserRepo{user: &models.User{ID: 1, AccessPolicyRevision: 5}},
+		stubUserRepo{user: &models.User{ID: 1, Enabled: true, AccessPolicyRevision: 5}},
 		stubStoreProvider{store: stubStore{profile: &userstore.Profile{
 			ID:                         "prof-1",
 			LibraryRestrictionsEnabled: true,
@@ -285,7 +285,7 @@ func TestResolver_UnrestrictedAccountRestrictedProfile(t *testing.T) {
 
 func TestResolver_RestrictedAccountInheritingProfile(t *testing.T) {
 	resolver := NewResolver(
-		stubUserRepo{user: &models.User{ID: 1, LibraryIDs: []int{1, 3}, MaxPlaybackQuality: "1080p", AccessPolicyRevision: 4}},
+		stubUserRepo{user: &models.User{ID: 1, Enabled: true, LibraryIDs: []int{1, 3}, MaxPlaybackQuality: "1080p", AccessPolicyRevision: 4}},
 		stubStoreProvider{store: stubStore{profile: &userstore.Profile{ID: "prof-1"}}},
 		nil,
 	)
@@ -304,7 +304,7 @@ func TestResolver_RestrictedAccountInheritingProfile(t *testing.T) {
 
 func TestResolver_IntersectsAccountAndProfileLibraries(t *testing.T) {
 	resolver := NewResolver(
-		stubUserRepo{user: &models.User{ID: 1, LibraryIDs: []int{1, 2, 3}, AccessPolicyRevision: 4}},
+		stubUserRepo{user: &models.User{ID: 1, Enabled: true, LibraryIDs: []int{1, 2, 3}, AccessPolicyRevision: 4}},
 		stubStoreProvider{store: stubStore{profile: &userstore.Profile{
 			ID:                         "prof-1",
 			LibraryRestrictionsEnabled: true,
@@ -324,7 +324,7 @@ func TestResolver_IntersectsAccountAndProfileLibraries(t *testing.T) {
 
 func TestResolver_EmptyEffectiveLibraries(t *testing.T) {
 	resolver := NewResolver(
-		stubUserRepo{user: &models.User{ID: 1, LibraryIDs: []int{1}, AccessPolicyRevision: 4}},
+		stubUserRepo{user: &models.User{ID: 1, Enabled: true, LibraryIDs: []int{1}, AccessPolicyRevision: 4}},
 		stubStoreProvider{store: stubStore{profile: &userstore.Profile{
 			ID:                         "prof-1",
 			LibraryRestrictionsEnabled: true,
@@ -344,7 +344,7 @@ func TestResolver_EmptyEffectiveLibraries(t *testing.T) {
 
 func TestResolver_DisabledLibraries_UnrestrictedUser(t *testing.T) {
 	resolver := NewResolver(
-		stubUserRepo{user: &models.User{ID: 1, AccessPolicyRevision: 5}},
+		stubUserRepo{user: &models.User{ID: 1, Enabled: true, AccessPolicyRevision: 5}},
 		stubStoreProvider{store: stubStore{
 			profile:  &userstore.Profile{ID: "prof-1"},
 			settings: map[string]string{"disabled_library_ids": "[3,5]"},
@@ -367,7 +367,7 @@ func TestResolver_DisabledLibraries_UnrestrictedUser(t *testing.T) {
 
 func TestResolver_DisabledLibraries_RestrictedUser(t *testing.T) {
 	resolver := NewResolver(
-		stubUserRepo{user: &models.User{ID: 1, LibraryIDs: []int{1, 2, 3, 4}, AccessPolicyRevision: 5}},
+		stubUserRepo{user: &models.User{ID: 1, Enabled: true, LibraryIDs: []int{1, 2, 3, 4}, AccessPolicyRevision: 5}},
 		stubStoreProvider{store: stubStore{
 			profile:  &userstore.Profile{ID: "prof-1"},
 			settings: map[string]string{"disabled_library_ids": "[2,4]"},
@@ -388,9 +388,22 @@ func TestResolver_DisabledLibraries_RestrictedUser(t *testing.T) {
 	}
 }
 
+func TestResolver_DisabledUserIsDenied(t *testing.T) {
+	resolver := NewResolver(
+		stubUserRepo{user: &models.User{ID: 1, Enabled: false, AccessPolicyRevision: 5}},
+		stubStoreProvider{store: stubStore{profile: &userstore.Profile{ID: "prof-1"}}},
+		nil,
+	)
+
+	_, err := resolver.Resolve(context.Background(), ResolveInput{UserID: 1, ProfileID: "prof-1"})
+	if !errors.Is(err, ErrUserDisabled) {
+		t.Fatalf("Resolve() error = %v, want ErrUserDisabled", err)
+	}
+}
+
 func TestResolver_DisabledLibraries_NoProfile(t *testing.T) {
 	resolver := NewResolver(
-		stubUserRepo{user: &models.User{ID: 1, AccessPolicyRevision: 5}},
+		stubUserRepo{user: &models.User{ID: 1, Enabled: true, AccessPolicyRevision: 5}},
 		stubStoreProvider{store: stubStore{
 			settings: map[string]string{"disabled_library_ids": "[7]"},
 		}},

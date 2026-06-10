@@ -26,12 +26,15 @@ const (
 type Authenticator struct {
 	sessions    *SessionStore
 	authService *auth.Service
+	users       auth.UserLoader
 	now         func() time.Time
 }
 
-// NewAuthenticator creates a new compat authenticator.
-func NewAuthenticator(sessions *SessionStore, authService *auth.Service) *Authenticator {
-	return &Authenticator{sessions: sessions, authService: authService, now: time.Now}
+// NewAuthenticator creates a new compat authenticator. users re-validates the
+// session's account on every request (see compatUserEnabled); a nil loader
+// fails closed.
+func NewAuthenticator(sessions *SessionStore, authService *auth.Service, users auth.UserLoader) *Authenticator {
+	return &Authenticator{sessions: sessions, authService: authService, users: users, now: time.Now}
 }
 
 // ExtractToken extracts a compat token from Jellyfin-style request auth.
@@ -94,6 +97,19 @@ func (a *Authenticator) RequireSession(next http.Handler) http.Handler {
 			return
 		}
 
+		// Compat sessions cache only identity, never account status: the user
+		// is re-loaded on EVERY request so disabling (or deleting) an account
+		// cuts off Jellyfin clients on the next request rather than at
+		// compat-session expiry — matching the native API and the admin
+		// API-key path. The session itself is left in place: transient lookup
+		// failures also deny (fail closed), and deleting here would force a
+		// re-login after a recovered DB blip. Session eviction on disable is
+		// handled separately (OnUserSessionsRevoked).
+		if !compatUserEnabled(r.Context(), a.users, session.StreamAppUserID) {
+			writeError(w, http.StatusUnauthorized, "Unauthorized", "User account is disabled")
+			return
+		}
+
 		// Refresh underlying Silo tokens if they're about to expire.
 		// Use a detached context so a client aborting the request mid-refresh
 		// (common on flaky mobile networks) doesn't revoke the compat session.
@@ -148,15 +164,46 @@ func serveWithSession(next http.Handler, w http.ResponseWriter, r *http.Request,
 	next.ServeHTTP(w, r.WithContext(ctx))
 }
 
+// compatUserEnabled reports whether a compat session's account still exists
+// and is enabled. The user is loaded fresh on every request — never cached on
+// the session — so disabling an account takes effect on the next request.
+// Every failure mode fails closed: a missing user is a definitive deny, and
+// an unexpected lookup error denies rather than serving content for an
+// account whose status cannot be verified. A nil loader also fails closed;
+// production wiring always provides one alongside the database.
+func compatUserEnabled(ctx context.Context, users auth.UserLoader, userID int) bool {
+	if users == nil {
+		return false
+	}
+	user, err := users.GetByID(ctx, userID)
+	if err != nil {
+		if !auth.IsNotFound(err) {
+			slog.Warn("jellycompat auth: user status check failed; denying request",
+				"user_id", userID,
+				"error", err,
+			)
+		}
+		return false
+	}
+	return user != nil && user.Enabled
+}
+
 // resolveCompatToken resolves a token to a compat session: a session-store token
 // (normal login) or, matching Jellyfin, an sa_ admin API key (synthesized
 // session bound to the key user's primary profile). Returns false when the token
-// matches neither. keyAuth may be nil (resolveSession handles a nil receiver).
-func resolveCompatToken(ctx context.Context, sessions *SessionStore, keyAuth *AdminAPIKeyAuthenticator, token string) (*Session, bool) {
+// matches neither or when the session's account is no longer enabled. keyAuth
+// may be nil (resolveSession handles a nil receiver).
+func resolveCompatToken(ctx context.Context, sessions *SessionStore, keyAuth *AdminAPIKeyAuthenticator, users auth.UserLoader, token string) (*Session, bool) {
 	if token == "" {
 		return nil, false
 	}
 	if session, ok := sessions.Get(token); ok {
+		// sa_-key sessions below re-validate the owning user inside
+		// resolveSession; session-store sessions must do it here so a
+		// disabled account cannot keep streaming until session expiry.
+		if !compatUserEnabled(ctx, users, session.StreamAppUserID) {
+			return nil, false
+		}
 		return session, true
 	}
 	if strings.HasPrefix(token, "sa_") {
@@ -170,13 +217,13 @@ func resolveCompatToken(ctx context.Context, sessions *SessionStore, keyAuth *Ad
 // PlaybackSessionAuth creates middleware that falls back to playback session
 // authentication for media stream endpoints where external players (e.g. libmpv)
 // don't forward auth headers or query parameters.
-func PlaybackSessionAuth(sessions *SessionStore, playbackStore *PlaybackSessionStore, keyAuth *AdminAPIKeyAuthenticator) func(next http.Handler) http.Handler {
+func PlaybackSessionAuth(sessions *SessionStore, playbackStore *PlaybackSessionStore, keyAuth *AdminAPIKeyAuthenticator, users auth.UserLoader) func(next http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Try standard token auth first — a compat session token or an sa_
 			// admin key (synthesized session).
 			if token, ok := ExtractToken(r); ok {
-				if session, ok := resolveCompatToken(r.Context(), sessions, keyAuth, token); ok {
+				if session, ok := resolveCompatToken(r.Context(), sessions, keyAuth, users, token); ok {
 					serveWithSession(next, w, r, session)
 					return
 				}
@@ -193,7 +240,7 @@ func PlaybackSessionAuth(sessions *SessionStore, playbackStore *PlaybackSessionS
 			// miss it and 401 the stream — forcing a needless transcode fallback.
 			if playSessionID := newCaseInsensitiveQuery(r.URL.Query()).Get("PlaySessionId"); playSessionID != "" {
 				if playSession, found := playbackStore.Get(playSessionID); found {
-					if session, ok := resolveCompatToken(r.Context(), sessions, keyAuth, playSession.CompatToken); ok {
+					if session, ok := resolveCompatToken(r.Context(), sessions, keyAuth, users, playSession.CompatToken); ok {
 						serveWithSession(next, w, r, session)
 						return
 					}

@@ -46,6 +46,12 @@ func (m *ViewerAccessMiddleware) RequireViewerAccess(next http.Handler) http.Han
 		scope, err := m.resolver.Resolve(r.Context(), input)
 		if err != nil {
 			switch {
+			case errors.Is(err, access.ErrUserDisabled):
+				// Disabling a user also revokes their sessions, so RequireAuth
+				// normally rejects first; this covers any session that is
+				// still live (e.g. the account was disabled out of band).
+				writeUnauthorized(w, "User account is disabled")
+				return
 			case errors.Is(err, access.ErrProfileUnverified):
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusForbidden)

@@ -217,7 +217,7 @@ func NewRouter(deps Dependencies) chi.Router {
 	// Stream routes: use playback-session auth fallback for media players
 	// (e.g. libmpv) that don't forward auth headers or query parameters.
 	r.Group(func(r chi.Router) {
-		r.Use(PlaybackSessionAuth(deps.SessionStore, deps.PlaybackStore, adminAPIKeyAuth))
+		r.Use(PlaybackSessionAuth(deps.SessionStore, deps.PlaybackStore, adminAPIKeyAuth, deps.UserLoader))
 		r.Method(http.MethodHead, "/Items/{id}/Download", http.HandlerFunc(playbackHandler.HandleDownload))
 		r.Get("/Items/{id}/Download", playbackHandler.HandleDownload)
 		r.Method(http.MethodHead, "/Videos/{id}/stream", http.HandlerFunc(playbackHandler.HandleVideoStream))
@@ -335,7 +335,7 @@ func withDefaults(deps Dependencies) Dependencies {
 	}
 
 	if deps.Authenticator == nil && deps.SessionStore != nil {
-		deps.Authenticator = NewAuthenticator(deps.SessionStore, deps.AuthService)
+		deps.Authenticator = NewAuthenticator(deps.SessionStore, deps.AuthService, deps.UserLoader)
 	}
 	return deps
 }

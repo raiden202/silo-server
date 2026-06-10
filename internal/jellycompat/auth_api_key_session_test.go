@@ -254,7 +254,7 @@ func TestPlaybackSessionAuth_APIKeyViaPlaySessionId(t *testing.T) {
 	playback.Put(PlaybackSession{ID: "ps1", CompatToken: "sa_test"})
 
 	var got *Session
-	h := PlaybackSessionAuth(sessions, playback, keyAuth)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := PlaybackSessionAuth(sessions, playback, keyAuth, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got = SessionFromContext(r.Context())
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -283,7 +283,7 @@ func TestPlaybackSessionAuth_RevokedAPIKeyViaPlaySessionId(t *testing.T) {
 	playback := NewPlaybackSessionStore(time.Hour, clock)
 	playback.Put(PlaybackSession{ID: "ps1", CompatToken: "sa_test"})
 
-	h := PlaybackSessionAuth(sessions, playback, keyAuth)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+	h := PlaybackSessionAuth(sessions, playback, keyAuth, nil)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		t.Fatal("handler should not run for a revoked key")
 	}))
 	req := httptest.NewRequest(http.MethodGet, "/Videos/x/hls/p/seg0.ts?PlaySessionId=ps1", nil)

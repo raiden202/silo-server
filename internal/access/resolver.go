@@ -46,6 +46,9 @@ func (r *Resolver) Resolve(ctx context.Context, input ResolveInput) (Scope, erro
 	if err != nil {
 		return Scope{}, fmt.Errorf("loading user %d: %w", input.UserID, err)
 	}
+	if !user.Enabled {
+		return Scope{}, ErrUserDisabled
+	}
 
 	scope := Scope{
 		UserID:              user.ID,
