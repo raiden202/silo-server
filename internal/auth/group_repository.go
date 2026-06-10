@@ -21,6 +21,7 @@ var (
 	ErrBuiltInGroup      = errors.New("built-in group cannot be deleted")
 	ErrAdminPermRequired = errors.New("administrators group must keep the admin permission")
 	ErrLastAdministrator = errors.New("cannot remove the last enabled administrator")
+	ErrUnknownGroup      = errors.New("unknown group")
 )
 
 // GroupRepository provides CRUD and membership operations for groups.
@@ -510,6 +511,15 @@ func (r *GroupRepository) ReplaceUserGroups(ctx context.Context, userID int, gro
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	if err := r.replaceUserGroupsTx(ctx, tx, userID, groupIDs); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// replaceUserGroupsTx performs the membership replacement inside the caller's
+// transaction so it can be composed with other writes atomically.
+func (r *GroupRepository) replaceUserGroupsTx(ctx context.Context, tx pgx.Tx, userID int, groupIDs []int) error {
 	// Lock the administrators group row so concurrent removals serialize.
 	var adminGroupID int
 	if err := tx.QueryRow(ctx, `
@@ -555,6 +565,9 @@ func (r *GroupRepository) ReplaceUserGroups(ctx context.Context, userID int, gro
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2)
 			ON CONFLICT DO NOTHING`, userID, groupID); err != nil {
+			if isForeignKeyError(err) {
+				return fmt.Errorf("%w: group %d", ErrUnknownGroup, groupID)
+			}
 			return fmt.Errorf("adding membership %d: %w", groupID, err)
 		}
 	}
@@ -563,5 +576,5 @@ func (r *GroupRepository) ReplaceUserGroups(ctx context.Context, userID int, gro
 		WHERE id = $1`, userID); err != nil {
 		return fmt.Errorf("bumping user revision: %w", err)
 	}
-	return tx.Commit(ctx)
+	return nil
 }

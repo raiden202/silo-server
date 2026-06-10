@@ -223,15 +223,11 @@ func toAdminUserResponse(u *models.User, groups []models.Group) adminUserRespons
 	for _, g := range groups {
 		refs = append(refs, adminGroupRef{ID: g.ID, Slug: g.Slug, Name: g.Name})
 	}
-	role := "user"
-	if u.IsAdmin {
-		role = "admin"
-	}
 	return adminUserResponse{
 		ID:                       u.ID,
 		Username:                 u.Username,
 		Email:                    u.Email,
-		Role:                     role,
+		Role:                     auth.RoleForUser(u),
 		Permissions:              append([]string{}, u.Permissions...),
 		Enabled:                  u.Enabled,
 		Groups:                   refs,
@@ -395,6 +391,10 @@ func (h *AdminHandler) HandleCreateUser(w http.ResponseWriter, r *http.Request) 
 		},
 	})
 	if err != nil {
+		if errors.Is(err, auth.ErrUnknownGroup) {
+			writeError(w, http.StatusBadRequest, "unknown_group", "One or more group IDs do not exist")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to create user")
 		return
 	}
@@ -453,6 +453,10 @@ func (h *AdminHandler) HandleUpdateUser(w http.ResponseWriter, r *http.Request) 
 		}
 		if errors.Is(err, auth.ErrLastAdministrator) {
 			writeError(w, http.StatusConflict, "last_administrator", "Cannot remove the last enabled administrator")
+			return
+		}
+		if errors.Is(err, auth.ErrUnknownGroup) {
+			writeError(w, http.StatusBadRequest, "unknown_group", "One or more group IDs do not exist")
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to update user")

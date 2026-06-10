@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/Silo-Server/silo-server/internal/models"
@@ -93,14 +94,19 @@ func (p *AccountProvisioner) CreateAccount(
 
 // defaultGroupIDs resolves the configured default group slugs (falling back to
 // the built-in users group) to group IDs. Unknown slugs are skipped so a stale
-// setting never blocks signups.
+// setting never blocks signups; if no configured slug resolves, the built-in
+// users group is used so accounts never start with an empty policy.
 func (p *AccountProvisioner) defaultGroupIDs(ctx context.Context) ([]int, error) {
 	slugs := []string{models.GroupSlugUsers}
 	if p.settings != nil {
 		raw, err := p.settings.Get(ctx, DefaultGroupSlugsSettingKey)
-		if err == nil && strings.TrimSpace(raw) != "" {
+		if err != nil {
+			slog.Warn("reading default group slugs setting failed", "key", DefaultGroupSlugsSettingKey, "error", err)
+		} else if strings.TrimSpace(raw) != "" {
 			var configured []string
-			if jsonErr := json.Unmarshal([]byte(raw), &configured); jsonErr == nil && len(configured) > 0 {
+			if jsonErr := json.Unmarshal([]byte(raw), &configured); jsonErr != nil {
+				slog.Warn("parsing default group slugs setting failed", "key", DefaultGroupSlugsSettingKey, "error", jsonErr)
+			} else if len(configured) > 0 {
 				slugs = configured
 			}
 		}
@@ -110,9 +116,18 @@ func (p *AccountProvisioner) defaultGroupIDs(ctx context.Context) ([]int, error)
 		group, err := p.groups.GetBySlug(ctx, slug)
 		if err != nil {
 			if errors.Is(err, ErrGroupNotFound) {
-				continue // a stale setting must not block signups
+				// A stale setting must not block signups.
+				slog.Warn("skipping unknown default group slug", "slug", slug)
+				continue
 			}
 			return nil, fmt.Errorf("resolving default group %q: %w", slug, err)
+		}
+		ids = append(ids, group.ID)
+	}
+	if len(ids) == 0 {
+		group, err := p.groups.GetBySlug(ctx, models.GroupSlugUsers)
+		if err != nil {
+			return nil, fmt.Errorf("resolving fallback group %q: %w", models.GroupSlugUsers, err)
 		}
 		ids = append(ids, group.ID)
 	}

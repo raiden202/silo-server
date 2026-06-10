@@ -146,6 +146,9 @@ func (r *UserRepository) Create(ctx context.Context, input models.CreateUserInpu
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2)
 			ON CONFLICT DO NOTHING`, id, groupID); err != nil {
+			if isForeignKeyError(err) {
+				return nil, fmt.Errorf("%w: group %d", ErrUnknownGroup, groupID)
+			}
 			return nil, fmt.Errorf("adding membership %d: %w", groupID, err)
 		}
 	}
@@ -236,10 +239,22 @@ func (r *UserRepository) Update(ctx context.Context, id int, input models.Update
 		argIndex++
 	}
 
+	// Identity and membership writes share one transaction so a failure in
+	// either (e.g. ErrLastAdministrator) leaves the user fully unchanged.
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("beginning user update: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
 	if len(setClauses) == 0 {
 		// Nothing to update on the users row; still verify the user exists.
-		if _, err := r.GetByID(ctx, id); err != nil {
-			return err
+		var exists int
+		if err := tx.QueryRow(ctx, `SELECT 1 FROM users WHERE id = $1`, id).Scan(&exists); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("checking user exists: %w", err)
 		}
 	} else {
 		if len(accessPolicyPredicates) > 0 {
@@ -256,7 +271,7 @@ func (r *UserRepository) Update(ctx context.Context, id int, input models.Update
 			strings.Join(setClauses, ", "), argIndex)
 		args = append(args, id)
 
-		tag, err := r.pool.Exec(ctx, query, args...)
+		tag, err := tx.Exec(ctx, query, args...)
 		if err != nil {
 			if isDuplicateKeyError(err) {
 				return fmt.Errorf("%w: %s", ErrDuplicate, extractConstraint(err))
@@ -270,11 +285,14 @@ func (r *UserRepository) Update(ctx context.Context, id int, input models.Update
 	}
 
 	if input.GroupIDs != nil {
-		if err := r.groups.ReplaceUserGroups(ctx, id, *input.GroupIDs); err != nil {
+		if err := r.groups.replaceUserGroupsTx(ctx, tx, id, *input.GroupIDs); err != nil {
 			return err
 		}
 	}
 
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("committing user update: %w", err)
+	}
 	return nil
 }
 
@@ -336,6 +354,15 @@ func isDuplicateKeyError(err error) bool {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {
 		return pgErr.Code == "23505"
+	}
+	return false
+}
+
+// isForeignKeyError checks if the error is a PostgreSQL foreign_key_violation (code 23503).
+func isForeignKeyError(err error) bool {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code == "23503"
 	}
 	return false
 }

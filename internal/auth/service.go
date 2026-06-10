@@ -324,39 +324,27 @@ func (s *Service) SetupInitialUser(
 		return nil, nil, ErrSetupAlreadyComplete
 	}
 
-	created, err := s.accounts.CreateAccount(ctx, CreateAccountInput{
+	adminGroup, err := s.users.Groups().GetBySlug(ctx, models.GroupSlugAdministrators)
+	if err != nil {
+		return nil, nil, fmt.Errorf("loading administrators group: %w", err)
+	}
+
+	if _, err := s.accounts.CreateAccount(ctx, CreateAccountInput{
 		User: models.CreateUserInput{
 			Username: username,
 			Email:    email,
 			Password: password,
-			// Explicit empty memberships: the administrators group is added
-			// below, and the configured signup defaults must not apply.
-			GroupIDs: []int{},
+			// Administrators membership is written inside the same transaction
+			// as the user row, so a failure leaves setup fully retryable. The
+			// explicit list also keeps configured signup defaults from applying.
+			GroupIDs: []int{adminGroup.ID},
 		},
 		DefaultProfile: DefaultProfileOptions{
 			Enabled: createDefaultProfile,
 			Name:    defaultProfileName,
 		},
-	})
-	if err != nil {
+	}); err != nil {
 		return nil, nil, fmt.Errorf("creating initial user: %w", err)
-	}
-
-	// If administrators membership cannot be granted, remove the half-created
-	// user so setup stays retryable instead of leaving a non-admin first user.
-	cleanup := func(cause error) error {
-		if deleteErr := s.users.Delete(ctx, created.ID); deleteErr != nil {
-			return errors.Join(cause, fmt.Errorf("cleanup user: %w", deleteErr))
-		}
-		return cause
-	}
-
-	adminGroup, err := s.users.Groups().GetBySlug(ctx, models.GroupSlugAdministrators)
-	if err != nil {
-		return nil, nil, cleanup(fmt.Errorf("loading administrators group: %w", err))
-	}
-	if err := s.users.Groups().AddMember(ctx, adminGroup.ID, created.ID); err != nil {
-		return nil, nil, cleanup(fmt.Errorf("adding initial user to administrators group: %w", err))
 	}
 
 	// Reuse the standard login flow so setup creates a normal session pair.

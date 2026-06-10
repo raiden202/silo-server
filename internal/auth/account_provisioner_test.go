@@ -344,3 +344,49 @@ func TestAccountProvisionerCreateAccount_SkipsUnknownDefaultSlugs(t *testing.T) 
 		t.Fatalf("GroupIDs = %#v, want [11]", gotInput.GroupIDs)
 	}
 }
+
+func TestAccountProvisionerCreateAccount_AllUnknownSlugsFallBackToUsersGroup(t *testing.T) {
+	var gotInput models.CreateUserInput
+	provisioner := NewAccountProvisioner(
+		stubAccountUsers{
+			createFn: func(_ context.Context, input models.CreateUserInput) (*models.User, error) {
+				gotInput = input
+				return &models.User{ID: 1, Username: "alex"}, nil
+			},
+		},
+		nil,
+		stubSettings{DefaultGroupSlugsSettingKey: `["ghost","phantom"]`},
+		stubGroupResolver{groups: map[string]*models.Group{
+			models.GroupSlugUsers: {ID: 2, Slug: models.GroupSlugUsers},
+		}},
+	)
+
+	if _, err := provisioner.CreateAccount(context.Background(), CreateAccountInput{
+		User: models.CreateUserInput{Username: "alex"},
+	}); err != nil {
+		t.Fatalf("CreateAccount returned error: %v", err)
+	}
+	if !reflect.DeepEqual(gotInput.GroupIDs, []int{2}) {
+		t.Fatalf("GroupIDs = %#v, want [2] (built-in users fallback)", gotInput.GroupIDs)
+	}
+}
+
+func TestAccountProvisionerCreateAccount_FallbackGroupMissingReturnsError(t *testing.T) {
+	provisioner := NewAccountProvisioner(
+		stubAccountUsers{
+			createFn: func(context.Context, models.CreateUserInput) (*models.User, error) {
+				t.Fatal("Create should not be called when no default group resolves")
+				return nil, nil
+			},
+		},
+		nil,
+		stubSettings{DefaultGroupSlugsSettingKey: `["ghost"]`},
+		stubGroupResolver{groups: map[string]*models.Group{}},
+	)
+
+	if _, err := provisioner.CreateAccount(context.Background(), CreateAccountInput{
+		User: models.CreateUserInput{Username: "alex"},
+	}); err == nil {
+		t.Fatal("CreateAccount returned nil error, want fallback resolution failure")
+	}
+}
