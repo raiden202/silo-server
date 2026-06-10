@@ -1,5 +1,6 @@
 import type { User } from "@/api/types";
 
+export const PERMISSION_ADMIN = "admin";
 export const PERMISSION_METADATA_CURATION = "metadata_curation";
 export const PERMISSION_MARKER_EDIT = "marker_edit";
 

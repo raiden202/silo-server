@@ -6,6 +6,7 @@ import {
   LayoutPanelTop,
   PanelsTopLeft,
   Users,
+  Shield,
   MonitorSmartphone,
   History,
   Captions,
@@ -116,6 +117,7 @@ export default function AdminSidebar({ onNavigate }: AdminSidebarProps) {
       label: "Users",
       items: [
         { label: "Users", icon: Users, href: "/admin/users" },
+        { label: "Groups", icon: Shield, href: "/admin/groups" },
         { label: "Devices", icon: MonitorSmartphone, href: "/admin/devices" },
         { label: "Playback History", icon: History, href: "/admin/history" },
         { label: "History Import", icon: Download, href: "/admin/history-import" },
