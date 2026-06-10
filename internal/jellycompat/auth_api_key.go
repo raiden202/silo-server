@@ -172,7 +172,7 @@ func (a *AdminAPIKeyAuthenticator) validate(ctx context.Context, token string) (
 	if err != nil || user == nil || !user.Enabled {
 		return nil, nil, unauthorized
 	}
-	if user.Role != "admin" {
+	if !user.IsAdmin {
 		return nil, nil, adminAPIKeyAuthResult{
 			status:  http.StatusForbidden,
 			code:    "Forbidden",

@@ -2,20 +2,21 @@ package models
 
 import "time"
 
-// User represents a row in the users table.
+// User represents a row in the users table plus the effective access policy
+// derived from the user's group memberships at load time.
 type User struct {
 	ID                        int
 	Email                     string
 	Username                  string
 	PasswordHash              string
 	LocalPasswordLoginEnabled bool
-	Role                      string
-	// IsAdmin and GroupIDs are derived from group membership at load time.
+	// IsAdmin, GroupIDs, and the policy fields below are derived from group
+	// membership at load time (see auth.ApplyEffectivePolicy).
 	IsAdmin                  bool
 	GroupIDs                 []int
 	Permissions              []string
 	Enabled                  bool
-	LibraryIDs               []int // nullable in PG (nil = all libraries)
+	LibraryIDs               []int // effective; nil = all libraries
 	MaxPlaybackQuality       string
 	AccessPolicyRevision     int64
 	MaxStreams               int
@@ -28,20 +29,15 @@ type User struct {
 }
 
 // CreateUserInput contains the fields required to create a new user.
+// Access policy comes from group memberships, not per-user columns.
 type CreateUserInput struct {
 	Email                     string // required
 	Username                  string // required
 	Password                  string // plaintext, will be bcrypt-hashed
 	LocalPasswordLoginEnabled *bool
-	Role                      string // e.g. "admin", "user"
-	Permissions               []string
-	LibraryIDs                []int
-	MaxPlaybackQuality        string
-	MaxStreams                *int  // nil = use DB default (6)
-	MaxTranscodes             *int  // nil = use DB default (2)
-	MaxProfiles               *int  // nil = use DB default (5); minimum 1
-	DownloadAllowed           *bool // nil = use DB default (true)
-	DownloadTranscodeAllowed  *bool // nil = use DB default (false)
+	// GroupIDs are the group memberships to create. nil means the caller
+	// resolves defaults via the AccountProvisioner.
+	GroupIDs []int
 }
 
 // UpdateUserInput contains optional fields for updating a user.
@@ -51,14 +47,7 @@ type UpdateUserInput struct {
 	Username                  *string
 	Password                  *string // plaintext, will be bcrypt-hashed if provided
 	LocalPasswordLoginEnabled *bool
-	Role                      *string
-	Permissions               *[]string
 	Enabled                   *bool
-	LibraryIDs                *[]int
-	MaxPlaybackQuality        *string
-	MaxStreams                *int
-	MaxTranscodes             *int
-	MaxProfiles               *int
-	DownloadAllowed           *bool
-	DownloadTranscodeAllowed  *bool
+	// GroupIDs replaces the user's group memberships. nil = don't update.
+	GroupIDs *[]int
 }

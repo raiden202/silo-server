@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -78,6 +77,7 @@ type ImpersonationService interface {
 // session listing, unmatched files, and system stats.
 type AdminHandler struct {
 	userRepo                     UserRepository
+	groupRepo                    *auth.GroupRepository
 	pool                         *pgxpool.Pool
 	SessionsLoader               *PlaybackSessionsLoader
 	storeProv                    userstore.UserStoreProvider
@@ -103,11 +103,20 @@ func NewAdminHandler(
 	pool *pgxpool.Pool,
 	storeProv userstore.UserStoreProvider,
 ) *AdminHandler {
+	var groupRepo *auth.GroupRepository
+	var groupResolver auth.GroupResolver
+	if pool != nil {
+		groupRepo = auth.NewGroupRepository(pool)
+		groupResolver = groupRepo
+	}
 	return &AdminHandler{
-		userRepo:           userRepo,
-		pool:               pool,
-		storeProv:          storeProv,
-		accountProvisioner: auth.NewAccountProvisioner(userRepo, storeProv),
+		userRepo:  userRepo,
+		groupRepo: groupRepo,
+		pool:      pool,
+		storeProv: storeProv,
+		// No settings dependency at construction time: nil settings makes the
+		// provisioner fall back to the built-in users group for defaults.
+		accountProvisioner: auth.NewAccountProvisioner(userRepo, storeProv, nil, groupResolver),
 	}
 }
 
@@ -115,115 +124,53 @@ func NewAdminHandler(
 
 // createUserRequest represents the JSON body for POST /admin/users.
 type createUserRequest struct {
-	Username                 string                 `json:"username"`
-	Email                    string                 `json:"email"`
-	Password                 string                 `json:"password"`
-	Role                     string                 `json:"role"`
-	Permissions              createStringSliceField `json:"permissions"`
-	CreateDefaultProfile     bool                   `json:"create_default_profile"`
-	DefaultProfileName       string                 `json:"default_profile_name,omitempty"`
-	LibraryIDs               []int                  `json:"library_ids"`
-	MaxPlaybackQuality       string                 `json:"max_playback_quality"`
-	MaxStreams               *int                   `json:"max_streams,omitempty"`
-	MaxTranscodes            *int                   `json:"max_transcodes,omitempty"`
-	MaxProfiles              *int                   `json:"max_profiles,omitempty"`
-	DownloadAllowed          *bool                  `json:"download_allowed,omitempty"`
-	DownloadTranscodeAllowed *bool                  `json:"download_transcode_allowed,omitempty"`
-}
-
-type createStringSliceField struct {
-	Set   bool
-	Value []string
-}
-
-func (f *createStringSliceField) UnmarshalJSON(data []byte) error {
-	f.Set = true
-	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
-		f.Value = []string{}
-		return nil
-	}
-	return json.Unmarshal(data, &f.Value)
-}
-
-type updateLibraryIDsField struct {
-	Set   bool
-	Value []int
-}
-
-func (f *updateLibraryIDsField) UnmarshalJSON(data []byte) error {
-	f.Set = true
-	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
-		f.Value = nil
-		return nil
-	}
-	return json.Unmarshal(data, &f.Value)
-}
-
-func (f updateLibraryIDsField) Ptr() *[]int {
-	if !f.Set {
-		return nil
-	}
-	value := append([]int(nil), f.Value...)
-	return &value
-}
-
-type updateStringSliceField struct {
-	Set   bool
-	Value []string
-}
-
-func (f *updateStringSliceField) UnmarshalJSON(data []byte) error {
-	f.Set = true
-	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
-		f.Value = []string{}
-		return nil
-	}
-	return json.Unmarshal(data, &f.Value)
-}
-
-func (f updateStringSliceField) Ptr() *[]string {
-	if !f.Set {
-		return nil
-	}
-	value := append([]string(nil), f.Value...)
-	return &value
+	Username             string `json:"username"`
+	Email                string `json:"email"`
+	Password             string `json:"password"`
+	CreateDefaultProfile bool   `json:"create_default_profile"`
+	DefaultProfileName   string `json:"default_profile_name,omitempty"`
+	// GroupIDs are the group memberships to assign. Omitted (nil) means the
+	// configured default groups are used.
+	GroupIDs []int `json:"group_ids"`
 }
 
 // updateUserRequest represents the JSON body for PUT /admin/users/{id}.
 type updateUserRequest struct {
-	Username                 *string                `json:"username,omitempty"`
-	Email                    *string                `json:"email,omitempty"`
-	Password                 *string                `json:"password,omitempty"`
-	Role                     *string                `json:"role,omitempty"`
-	Permissions              updateStringSliceField `json:"permissions,omitempty"`
-	Enabled                  *bool                  `json:"enabled,omitempty"`
-	LibraryIDs               updateLibraryIDsField  `json:"library_ids,omitempty"`
-	MaxPlaybackQuality       *string                `json:"max_playback_quality,omitempty"`
-	MaxStreams               *int                   `json:"max_streams,omitempty"`
-	MaxTranscodes            *int                   `json:"max_transcodes,omitempty"`
-	MaxProfiles              *int                   `json:"max_profiles,omitempty"`
-	DownloadAllowed          *bool                  `json:"download_allowed,omitempty"`
-	DownloadTranscodeAllowed *bool                  `json:"download_transcode_allowed,omitempty"`
+	Username *string `json:"username,omitempty"`
+	Email    *string `json:"email,omitempty"`
+	Password *string `json:"password,omitempty"`
+	Enabled  *bool   `json:"enabled,omitempty"`
+	// GroupIDs replaces the user's group memberships. Omitted = unchanged.
+	GroupIDs *[]int `json:"group_ids,omitempty"`
 }
 
-// adminUserResponse represents a user in admin JSON responses.
+// adminGroupRef is a lightweight group reference in admin user responses.
+type adminGroupRef struct {
+	ID   int    `json:"id"`
+	Slug string `json:"slug"`
+	Name string `json:"name"`
+}
+
+// adminUserResponse represents a user in admin JSON responses. The policy
+// fields are the effective values derived from the user's groups.
 type adminUserResponse struct {
-	ID                       int        `json:"id"`
-	Username                 string     `json:"username"`
-	Email                    string     `json:"email"`
-	Role                     string     `json:"role"`
-	Permissions              []string   `json:"permissions"`
-	Enabled                  bool       `json:"enabled"`
-	LibraryIDs               []int      `json:"library_ids"`
-	MaxPlaybackQuality       string     `json:"max_playback_quality"`
-	MaxStreams               int        `json:"max_streams"`
-	MaxTranscodes            int        `json:"max_transcodes"`
-	MaxProfiles              int        `json:"max_profiles"`
-	DownloadAllowed          bool       `json:"download_allowed"`
-	DownloadTranscodeAllowed bool       `json:"download_transcode_allowed"`
-	CreatedAt                time.Time  `json:"created_at"`
-	UpdatedAt                time.Time  `json:"updated_at"`
-	LastActiveAt             *time.Time `json:"last_active_at,omitempty"`
+	ID                       int             `json:"id"`
+	Username                 string          `json:"username"`
+	Email                    string          `json:"email"`
+	Role                     string          `json:"role"`
+	Permissions              []string        `json:"permissions"`
+	Enabled                  bool            `json:"enabled"`
+	Groups                   []adminGroupRef `json:"groups"`
+	LibraryIDs               []int           `json:"library_ids"`
+	MaxPlaybackQuality       string          `json:"max_playback_quality"`
+	MaxStreams               int             `json:"max_streams"`
+	MaxTranscodes            int             `json:"max_transcodes"`
+	MaxProfiles              int             `json:"max_profiles"`
+	DownloadAllowed          bool            `json:"download_allowed"`
+	DownloadTranscodeAllowed bool            `json:"download_transcode_allowed"`
+	CreatedAt                time.Time       `json:"created_at"`
+	UpdatedAt                time.Time       `json:"updated_at"`
+	LastActiveAt             *time.Time      `json:"last_active_at,omitempty"`
 }
 
 type adminPlaybackHistoryRow struct {
@@ -269,15 +216,25 @@ func (h *AdminHandler) presignPosterURL(r *http.Request, path string) string {
 	return ""
 }
 
-// toAdminUserResponse converts a User model to an admin API response.
-func toAdminUserResponse(u *models.User) adminUserResponse {
+// toAdminUserResponse converts a User model and its group memberships to an
+// admin API response.
+func toAdminUserResponse(u *models.User, groups []models.Group) adminUserResponse {
+	refs := make([]adminGroupRef, 0, len(groups))
+	for _, g := range groups {
+		refs = append(refs, adminGroupRef{ID: g.ID, Slug: g.Slug, Name: g.Name})
+	}
+	role := "user"
+	if u.IsAdmin {
+		role = "admin"
+	}
 	return adminUserResponse{
 		ID:                       u.ID,
 		Username:                 u.Username,
 		Email:                    u.Email,
-		Role:                     u.Role,
+		Role:                     role,
 		Permissions:              append([]string{}, u.Permissions...),
 		Enabled:                  u.Enabled,
+		Groups:                   refs,
 		LibraryIDs:               append([]int(nil), u.LibraryIDs...),
 		MaxPlaybackQuality:       access.NormalizePlaybackQuality(u.MaxPlaybackQuality),
 		MaxStreams:               u.MaxStreams,
@@ -288,6 +245,15 @@ func toAdminUserResponse(u *models.User) adminUserResponse {
 		CreatedAt:                u.CreatedAt,
 		UpdatedAt:                u.UpdatedAt,
 	}
+}
+
+// loadUserGroups loads a single user's group memberships. Returns nil when no
+// group repository is configured (e.g. in tests without a database pool).
+func (h *AdminHandler) loadUserGroups(ctx context.Context, userID int) ([]models.Group, error) {
+	if h.groupRepo == nil {
+		return nil, nil
+	}
+	return h.groupRepo.GroupsForUser(ctx, userID)
 }
 
 func (h *AdminHandler) loadUserLastActiveAt(ctx context.Context, userIDs []int) (map[int]time.Time, error) {
@@ -340,11 +306,23 @@ func (h *AdminHandler) HandleListUsers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := make([]adminUserResponse, 0, len(users))
 	userIDs := make([]int, 0, len(users))
 	for _, u := range users {
 		userIDs = append(userIDs, u.ID)
-		resp = append(resp, toAdminUserResponse(u))
+	}
+
+	groupsByUser := map[int][]models.Group{}
+	if h.groupRepo != nil {
+		groupsByUser, err = h.groupRepo.GroupsForUsers(r.Context(), userIDs)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load user groups")
+			return
+		}
+	}
+
+	resp := make([]adminUserResponse, 0, len(users))
+	for _, u := range users {
+		resp = append(resp, toAdminUserResponse(u, groupsByUser[u.ID]))
 	}
 	lastActive, err := h.loadUserLastActiveAt(r.Context(), userIDs)
 	if err != nil {
@@ -372,7 +350,13 @@ func (h *AdminHandler) HandleGetUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := toAdminUserResponse(user)
+	groups, err := h.loadUserGroups(r.Context(), user.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load user groups")
+		return
+	}
+
+	resp := toAdminUserResponse(user, groups)
 	lastActive, err := h.loadUserLastActiveAt(r.Context(), []int{user.ID})
 	if err != nil {
 		slog.Warn("failed to load admin user last activity", "user_id", user.ID, "error", err)
@@ -393,44 +377,17 @@ func (h *AdminHandler) HandleCreateUser(w http.ResponseWriter, r *http.Request) 
 	req.Username = auth.NormalizeUsername(req.Username)
 	req.Email = auth.NormalizeEmail(req.Email)
 
-	if req.Username == "" || req.Email == "" || req.Password == "" || req.Role == "" {
-		writeError(w, http.StatusBadRequest, "bad_request", "Username, email, password, and role are required")
-		return
-	}
-
-	maxPlaybackQuality, ok := access.ParsePlaybackQualityPreset(req.MaxPlaybackQuality)
-	if !ok {
-		writeError(w, http.StatusBadRequest, "bad_request", "Invalid max_playback_quality")
-		return
-	}
-	if req.MaxProfiles != nil && *req.MaxProfiles < 1 {
-		writeError(w, http.StatusBadRequest, "bad_request", "max_profiles must be at least 1")
-		return
-	}
-	permissions := auth.DefaultUserPermissions()
-	if req.Permissions.Set {
-		permissions = req.Permissions.Value
-	}
-	permissions, err := auth.NormalizePermissions(permissions)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+	if req.Username == "" || req.Email == "" || req.Password == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "Username, email, and password are required")
 		return
 	}
 
 	user, err := h.accountProvisioner.CreateAccount(r.Context(), auth.CreateAccountInput{
 		User: models.CreateUserInput{
-			Username:                 req.Username,
-			Email:                    req.Email,
-			Password:                 req.Password,
-			Role:                     req.Role,
-			Permissions:              permissions,
-			LibraryIDs:               req.LibraryIDs,
-			MaxPlaybackQuality:       maxPlaybackQuality,
-			MaxStreams:               req.MaxStreams,
-			MaxTranscodes:            req.MaxTranscodes,
-			MaxProfiles:              req.MaxProfiles,
-			DownloadAllowed:          req.DownloadAllowed,
-			DownloadTranscodeAllowed: req.DownloadTranscodeAllowed,
+			Username: req.Username,
+			Email:    req.Email,
+			Password: req.Password,
+			GroupIDs: req.GroupIDs,
 		},
 		DefaultProfile: auth.DefaultProfileOptions{
 			Enabled: req.CreateDefaultProfile,
@@ -443,7 +400,13 @@ func (h *AdminHandler) HandleCreateUser(w http.ResponseWriter, r *http.Request) 
 	}
 	h.invalidateStats(r.Context(), cache.ChannelAdmin, cache.EventAdminStatsInvalidated, strconv.Itoa(user.ID))
 
-	writeJSON(w, http.StatusCreated, toAdminUserResponse(user))
+	groups, err := h.loadUserGroups(r.Context(), user.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load user groups")
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, toAdminUserResponse(user, groups))
 }
 
 // HandleUpdateUser handles PUT /admin/users/{id}.
@@ -461,43 +424,12 @@ func (h *AdminHandler) HandleUpdateUser(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	var maxPlaybackQuality *string
-	if req.MaxPlaybackQuality != nil {
-		normalized, ok := access.ParsePlaybackQualityPreset(*req.MaxPlaybackQuality)
-		if !ok {
-			writeError(w, http.StatusBadRequest, "bad_request", "Invalid max_playback_quality")
-			return
-		}
-		maxPlaybackQuality = &normalized
-	}
-	if req.MaxProfiles != nil && *req.MaxProfiles < 1 {
-		writeError(w, http.StatusBadRequest, "bad_request", "max_profiles must be at least 1")
-		return
-	}
-	var permissions *[]string
-	if req.Permissions.Set {
-		normalized, err := auth.NormalizePermissions(req.Permissions.Value)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "bad_request", err.Error())
-			return
-		}
-		permissions = &normalized
-	}
-
 	updateInput := models.UpdateUserInput{
-		Username:                 req.Username,
-		Email:                    req.Email,
-		Password:                 req.Password,
-		Role:                     req.Role,
-		Permissions:              permissions,
-		Enabled:                  req.Enabled,
-		LibraryIDs:               req.LibraryIDs.Ptr(),
-		MaxPlaybackQuality:       maxPlaybackQuality,
-		MaxStreams:               req.MaxStreams,
-		MaxTranscodes:            req.MaxTranscodes,
-		MaxProfiles:              req.MaxProfiles,
-		DownloadAllowed:          req.DownloadAllowed,
-		DownloadTranscodeAllowed: req.DownloadTranscodeAllowed,
+		Username: req.Username,
+		Email:    req.Email,
+		Password: req.Password,
+		Enabled:  req.Enabled,
+		GroupIDs: req.GroupIDs,
 	}
 
 	var currentUser *models.User
@@ -519,6 +451,10 @@ func (h *AdminHandler) HandleUpdateUser(w http.ResponseWriter, r *http.Request) 
 			writeError(w, http.StatusNotFound, "not_found", "User not found")
 			return
 		}
+		if errors.Is(err, auth.ErrLastAdministrator) {
+			writeError(w, http.StatusConflict, "last_administrator", "Cannot remove the last enabled administrator")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to update user")
 		return
 	}
@@ -535,7 +471,13 @@ func (h *AdminHandler) HandleUpdateUser(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	writeJSON(w, http.StatusOK, toAdminUserResponse(user))
+	groups, err := h.loadUserGroups(r.Context(), user.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load user groups")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, toAdminUserResponse(user, groups))
 }
 
 // HandleDeleteUser handles DELETE /admin/users/{id}.
@@ -792,10 +734,8 @@ func (h *AdminHandler) HandleListUserProfiles(w http.ResponseWriter, r *http.Req
 
 func updateMayRequireSessionRevocation(input models.UpdateUserInput) bool {
 	return input.Password != nil ||
-		input.Role != nil ||
 		input.Enabled != nil ||
-		input.Permissions != nil ||
-		input.MaxPlaybackQuality != nil
+		input.GroupIDs != nil
 }
 
 func updateRequiresSessionRevocation(current *models.User, input models.UpdateUserInput) bool {
@@ -805,20 +745,26 @@ func updateRequiresSessionRevocation(current *models.User, input models.UpdateUs
 	if current == nil {
 		return updateMayRequireSessionRevocation(input)
 	}
-	if input.Role != nil && *input.Role != current.Role {
-		return true
-	}
 	if input.Enabled != nil && *input.Enabled != current.Enabled {
 		return true
 	}
-	if input.Permissions != nil && !slices.Equal(*input.Permissions, current.Permissions) {
-		return true
-	}
-	if input.MaxPlaybackQuality != nil &&
-		access.NormalizePlaybackQuality(*input.MaxPlaybackQuality) != access.NormalizePlaybackQuality(current.MaxPlaybackQuality) {
+	// Group membership changes alter the effective policy (permissions,
+	// quality ceilings, ...), so a real change revokes sessions.
+	if input.GroupIDs != nil && !equalIntSets(*input.GroupIDs, current.GroupIDs) {
 		return true
 	}
 	return false
+}
+
+// equalIntSets reports whether two int slices contain the same set of values,
+// ignoring order and duplicates.
+func equalIntSets(a, b []int) bool {
+	normalize := func(values []int) []int {
+		out := append([]int(nil), values...)
+		sort.Ints(out)
+		return slices.Compact(out)
+	}
+	return slices.Equal(normalize(a), normalize(b))
 }
 
 func (h *AdminHandler) revokeUserSessions(ctx context.Context, userID int) error {

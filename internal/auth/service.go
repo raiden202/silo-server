@@ -35,6 +35,24 @@ type SettingsGetter interface {
 	Get(ctx context.Context, key string) (string, error)
 }
 
+// RoleForUser derives the legacy role string carried in JWT claims from the
+// user's group-derived admin flag.
+func RoleForUser(u *models.User) string {
+	if u != nil && u.IsAdmin {
+		return "admin"
+	}
+	return "user"
+}
+
+// groupResolverFor returns the user repository's group repository as a
+// GroupResolver, avoiding a typed-nil interface when users is nil.
+func groupResolverFor(users *UserRepository) GroupResolver {
+	if users == nil {
+		return nil
+	}
+	return users.Groups()
+}
+
 type claimsContextKey struct{}
 
 // WithClaims stores auth claims on the context for auth-owned flows.
@@ -100,7 +118,7 @@ func NewService(
 		settings:    settings,
 		providers:   map[string]AuthProvider{},
 		metadata:    map[string]LoginProviderInfo{},
-		accounts:    NewAccountProvisioner(users, storeProvider),
+		accounts:    NewAccountProvisioner(users, storeProvider, settings, groupResolverFor(users)),
 	}
 	if provider != nil {
 		service.RegisterProvider(LoginProviderInfo{
@@ -209,7 +227,7 @@ func (s *Service) CompleteOAuthLogin(ctx context.Context, in OAuthLoginInput) (*
 	}
 	pair, err := s.generateTokenPair(Claims{
 		UserID:    user.ID,
-		Role:      user.Role,
+		Role:      RoleForUser(user),
 		SessionID: sessionID,
 	})
 	if err != nil {
@@ -271,7 +289,7 @@ func (s *Service) loginWithProvider(
 
 	pair, err := s.generateTokenPair(Claims{
 		UserID:    user.ID,
-		Role:      user.Role,
+		Role:      RoleForUser(user),
 		SessionID: sessionID,
 	})
 	if err != nil {
@@ -306,22 +324,43 @@ func (s *Service) SetupInitialUser(
 		return nil, nil, ErrSetupAlreadyComplete
 	}
 
-	if _, err := s.accounts.CreateAccount(ctx, CreateAccountInput{
+	created, err := s.accounts.CreateAccount(ctx, CreateAccountInput{
 		User: models.CreateUserInput{
 			Username: username,
 			Email:    email,
 			Password: password,
-			Role:     "admin",
+			// Explicit empty memberships: the administrators group is added
+			// below, and the configured signup defaults must not apply.
+			GroupIDs: []int{},
 		},
 		DefaultProfile: DefaultProfileOptions{
 			Enabled: createDefaultProfile,
 			Name:    defaultProfileName,
 		},
-	}); err != nil {
+	})
+	if err != nil {
 		return nil, nil, fmt.Errorf("creating initial user: %w", err)
 	}
 
+	// If administrators membership cannot be granted, remove the half-created
+	// user so setup stays retryable instead of leaving a non-admin first user.
+	cleanup := func(cause error) error {
+		if deleteErr := s.users.Delete(ctx, created.ID); deleteErr != nil {
+			return errors.Join(cause, fmt.Errorf("cleanup user: %w", deleteErr))
+		}
+		return cause
+	}
+
+	adminGroup, err := s.users.Groups().GetBySlug(ctx, models.GroupSlugAdministrators)
+	if err != nil {
+		return nil, nil, cleanup(fmt.Errorf("loading administrators group: %w", err))
+	}
+	if err := s.users.Groups().AddMember(ctx, adminGroup.ID, created.ID); err != nil {
+		return nil, nil, cleanup(fmt.Errorf("adding initial user to administrators group: %w", err))
+	}
+
 	// Reuse the standard login flow so setup creates a normal session pair.
+	// Login reloads the user, so the returned user carries the admin policy.
 	return s.Login(ctx, username, password, deviceName, ip)
 }
 
@@ -352,13 +391,13 @@ func (s *Service) Signup(
 		return nil, nil, err
 	}
 
-	// Create the user with standard role and access to all libraries.
+	// Create the user; nil GroupIDs lets the provisioner resolve the
+	// configured default groups.
 	if _, err := s.accounts.CreateAccount(ctx, CreateAccountInput{
 		User: models.CreateUserInput{
 			Username: username,
 			Email:    email,
 			Password: password,
-			Role:     "user",
 		},
 		DefaultProfile: DefaultProfileOptions{
 			Enabled: createDefaultProfile,
@@ -412,7 +451,7 @@ func (s *Service) StartImpersonation(ctx context.Context, adminUserID, targetUse
 		}
 		return nil, nil, nil, fmt.Errorf("getting admin user: %w", err)
 	}
-	if admin.Role != "admin" || !admin.Enabled {
+	if !admin.IsAdmin || !admin.Enabled {
 		return nil, nil, nil, ErrImpersonationNotAllowed
 	}
 	if adminUserID == targetUserID {
@@ -423,7 +462,7 @@ func (s *Service) StartImpersonation(ctx context.Context, adminUserID, targetUse
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("getting target user: %w", err)
 	}
-	if !target.Enabled || target.Role == "admin" {
+	if !target.Enabled || target.IsAdmin {
 		return nil, nil, nil, ErrImpersonationNotAllowed
 	}
 
@@ -446,7 +485,7 @@ func (s *Service) StartImpersonation(ctx context.Context, adminUserID, targetUse
 
 	pair, err := s.generateTokenPair(Claims{
 		UserID:             target.ID,
-		Role:               target.Role,
+		Role:               RoleForUser(target),
 		SessionID:          sessionID,
 		ImpersonatorUserID: &impersonatorUserID,
 	})
@@ -519,7 +558,7 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (*TokenPair,
 
 	return s.generateTokenPair(Claims{
 		UserID:             user.ID,
-		Role:               user.Role,
+		Role:               RoleForUser(user),
 		SessionID:          session.ID,
 		ImpersonatorUserID: session.ImpersonatorUserID,
 	})
@@ -537,7 +576,7 @@ func (s *Service) validateImpersonator(ctx context.Context, impersonatorUserID *
 		}
 		return fmt.Errorf("getting impersonator user: %w", err)
 	}
-	if !impersonator.Enabled || impersonator.Role != "admin" {
+	if !impersonator.Enabled || !impersonator.IsAdmin {
 		return ErrSessionRevoked
 	}
 	return nil

@@ -389,7 +389,7 @@ func (s *DeviceLoginService) Poll(ctx context.Context, deviceCode string) (*Devi
 
 	pair, err := s.generateTokenPair(Claims{
 		UserID:    user.ID,
-		Role:      user.Role,
+		Role:      RoleForUser(user),
 		SessionID: sessionID,
 	})
 	if err != nil {

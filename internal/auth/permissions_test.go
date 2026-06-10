@@ -30,7 +30,7 @@ func TestNormalizePermissions_RejectsUnknownPermission(t *testing.T) {
 }
 
 func TestHasEffectivePermission_AdminImpliesAssignablePermissions(t *testing.T) {
-	user := &models.User{Role: "admin", IsAdmin: true, Enabled: true}
+	user := &models.User{IsAdmin: true, Enabled: true}
 	if !HasEffectivePermission(user, PermissionMetadataCuration) {
 		t.Fatal("admin should have metadata curation")
 	}
@@ -40,21 +40,13 @@ func TestHasEffectivePermission_AdminImpliesAssignablePermissions(t *testing.T) 
 }
 
 func TestHasEffectivePermission_UserRequiresAssignedPermission(t *testing.T) {
-	user := &models.User{Role: "user", Enabled: true}
+	user := &models.User{Enabled: true}
 	if HasEffectivePermission(user, PermissionMetadataCuration) {
 		t.Fatal("plain user should not have metadata curation")
 	}
 	user.Permissions = []string{"metadata_curation"}
 	if !HasEffectivePermission(user, PermissionMetadataCuration) {
 		t.Fatal("assigned user should have metadata curation")
-	}
-}
-
-func TestDefaultUserPermissionsIncludesMarkerEditOnly(t *testing.T) {
-	got := DefaultUserPermissions()
-	want := []string{"marker_edit"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("default permissions = %#v, want %#v", got, want)
 	}
 }
 

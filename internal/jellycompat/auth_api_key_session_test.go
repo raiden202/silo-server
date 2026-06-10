@@ -48,7 +48,7 @@ func (p *fakeUserStoreProvider) Close() error { return nil }
 func adminKeyAuthWithPrimary(t *testing.T, clock func() time.Time) (*AdminAPIKeyAuthenticator, *fakeUserStoreProvider, *fakeAPIKeyValidator) {
 	t.Helper()
 	validator := &fakeAPIKeyValidator{key: &models.APIKey{ID: 1, UserID: 2, Key: "sa_test"}}
-	users := &fakeAPIKeyUserLoader{user: &models.User{ID: 2, Username: "admin", Role: "admin", Enabled: true}}
+	users := &fakeAPIKeyUserLoader{user: &models.User{ID: 2, Username: "admin", IsAdmin: true, Enabled: true}}
 	provider := &fakeUserStoreProvider{store: &fakeUserStore{profiles: []userstore.Profile{
 		{ID: "kids", Name: "Kids", IsPrimary: false},
 		{ID: "p1", Name: "Parent", IsPrimary: true},
@@ -115,7 +115,7 @@ func TestRequireSessionOrAPIKeySession_RejectsNonAdminKey(t *testing.T) {
 	now := fixedNow()
 	clock := func() time.Time { return now }
 	validator := &fakeAPIKeyValidator{key: &models.APIKey{ID: 1, UserID: 2, Key: "sa_test"}}
-	users := &fakeAPIKeyUserLoader{user: &models.User{ID: 2, Username: "bob", Role: "user", Enabled: true}}
+	users := &fakeAPIKeyUserLoader{user: &models.User{ID: 2, Username: "bob", Enabled: true}}
 	provider := &fakeUserStoreProvider{store: &fakeUserStore{profiles: []userstore.Profile{{ID: "p1", IsPrimary: true}}}}
 	keyAuth := NewAdminAPIKeyAuthenticator(validator, users, provider, clock)
 	sessionAuth := &Authenticator{sessions: NewSessionStore(time.Hour, clock)}
@@ -165,7 +165,7 @@ func TestRequireSessionOrAPIKeySession_FallsThroughWhenSynthesisUnavailable(t *t
 		"nil authenticator": nil,
 		"nil provider": NewAdminAPIKeyAuthenticator(
 			&fakeAPIKeyValidator{key: &models.APIKey{ID: 1, UserID: 2, Key: "sa_test"}},
-			&fakeAPIKeyUserLoader{user: &models.User{ID: 2, Role: "admin", Enabled: true}},
+			&fakeAPIKeyUserLoader{user: &models.User{ID: 2, IsAdmin: true, Enabled: true}},
 			nil, clock,
 		),
 	}

@@ -7,28 +7,17 @@ import (
 )
 
 func TestUpdateRequiresSessionRevocation(t *testing.T) {
-	role := "admin"
-	sameRole := "user"
 	enabled := true
 	disabled := false
-	libraryIDs := []int{1, 2}
-	sameLibraryIDs := []int{1}
-	emptyLibraryIDs := []int{}
-	var allLibraryIDs []int
-	maxPlaybackQuality := "1080p"
-	sameMaxPlaybackQuality := "original"
 	password := "new-password"
 	username := "renamed"
-	maxStreams := 4
-	permissions := []string{"metadata_curation"}
-	samePermissions := []string{"download"}
+	newGroups := []int{1, 2}
+	sameGroups := []int{2, 1, 1} // order and duplicates must not matter
+	emptyGroups := []int{}
 
 	current := &models.User{
-		Role:               "user",
-		Permissions:        []string{"download"},
-		Enabled:            false,
-		LibraryIDs:         []int{1},
-		MaxPlaybackQuality: "original",
+		Enabled:  false,
+		GroupIDs: []int{1, 2},
 	}
 
 	tests := []struct {
@@ -36,26 +25,6 @@ func TestUpdateRequiresSessionRevocation(t *testing.T) {
 		in   models.UpdateUserInput
 		want bool
 	}{
-		{
-			name: "permissions set",
-			in:   models.UpdateUserInput{Permissions: &permissions},
-			want: true,
-		},
-		{
-			name: "permissions unchanged",
-			in:   models.UpdateUserInput{Permissions: &samePermissions},
-			want: false,
-		},
-		{
-			name: "role",
-			in:   models.UpdateUserInput{Role: &role},
-			want: true,
-		},
-		{
-			name: "role unchanged",
-			in:   models.UpdateUserInput{Role: &sameRole},
-			want: false,
-		},
 		{
 			name: "enabled",
 			in:   models.UpdateUserInput{Enabled: &enabled},
@@ -67,29 +36,14 @@ func TestUpdateRequiresSessionRevocation(t *testing.T) {
 			want: false,
 		},
 		{
-			name: "library ids does not revoke session",
-			in:   models.UpdateUserInput{LibraryIDs: &libraryIDs},
+			name: "groups unchanged",
+			in:   models.UpdateUserInput{GroupIDs: &sameGroups},
 			want: false,
 		},
 		{
-			name: "library ids unchanged",
-			in:   models.UpdateUserInput{LibraryIDs: &sameLibraryIDs},
-			want: false,
-		},
-		{
-			name: "library ids nil does not revoke session",
-			in:   models.UpdateUserInput{LibraryIDs: &allLibraryIDs},
-			want: false,
-		},
-		{
-			name: "max playback quality",
-			in:   models.UpdateUserInput{MaxPlaybackQuality: &maxPlaybackQuality},
+			name: "groups cleared",
+			in:   models.UpdateUserInput{GroupIDs: &emptyGroups},
 			want: true,
-		},
-		{
-			name: "max playback quality unchanged",
-			in:   models.UpdateUserInput{MaxPlaybackQuality: &sameMaxPlaybackQuality},
-			want: false,
 		},
 		{
 			name: "password",
@@ -98,7 +52,7 @@ func TestUpdateRequiresSessionRevocation(t *testing.T) {
 		},
 		{
 			name: "non access fields",
-			in:   models.UpdateUserInput{Username: &username, MaxStreams: &maxStreams},
+			in:   models.UpdateUserInput{Username: &username},
 			want: false,
 		},
 		{
@@ -116,16 +70,18 @@ func TestUpdateRequiresSessionRevocation(t *testing.T) {
 		})
 	}
 
-	unrestrictedCurrent := *current
-	unrestrictedCurrent.LibraryIDs = nil
-	t.Run("library ids empty does not revoke session", func(t *testing.T) {
-		if got := updateRequiresSessionRevocation(&unrestrictedCurrent, models.UpdateUserInput{LibraryIDs: &emptyLibraryIDs}); got {
-			t.Fatalf("updateRequiresSessionRevocation() = %v, want false", got)
+	memberless := &models.User{Enabled: true, GroupIDs: nil}
+	t.Run("groups assigned to memberless user", func(t *testing.T) {
+		if got := updateRequiresSessionRevocation(memberless, models.UpdateUserInput{GroupIDs: &newGroups}); !got {
+			t.Fatalf("updateRequiresSessionRevocation() = %v, want true", got)
 		}
 	})
 
-	t.Run("library ids nil unchanged", func(t *testing.T) {
-		if got := updateRequiresSessionRevocation(&unrestrictedCurrent, models.UpdateUserInput{LibraryIDs: &allLibraryIDs}); got {
+	t.Run("unknown current user falls back to may-require", func(t *testing.T) {
+		if got := updateRequiresSessionRevocation(nil, models.UpdateUserInput{GroupIDs: &sameGroups}); !got {
+			t.Fatalf("updateRequiresSessionRevocation() = %v, want true", got)
+		}
+		if got := updateRequiresSessionRevocation(nil, models.UpdateUserInput{Username: &username}); got {
 			t.Fatalf("updateRequiresSessionRevocation() = %v, want false", got)
 		}
 	})

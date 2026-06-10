@@ -105,7 +105,7 @@ func (am *AuthMiddleware) RequireAuth(next http.Handler) http.Handler {
 
 			claims = &auth.Claims{
 				UserID:    user.ID,
-				Role:      user.Role,
+				Role:      auth.RoleForUser(user),
 				SessionID: "",
 				TokenType: auth.TokenTypeAPIKey,
 				APIKeyID:  apiKey.ID,

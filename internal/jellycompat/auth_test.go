@@ -176,7 +176,7 @@ func TestExtractToken_CaseInsensitiveAPIKey(t *testing.T) {
 func TestRequireAdminAPIKey_AcceptsAdminKey(t *testing.T) {
 	authn := newAdminAPIKeyAuthForTest(
 		&fakeAPIKeyValidator{key: &models.APIKey{ID: 1, UserID: 2, Key: "sa_test"}},
-		&fakeAPIKeyUserLoader{user: &models.User{ID: 2, Role: "admin", Enabled: true}},
+		&fakeAPIKeyUserLoader{user: &models.User{ID: 2, IsAdmin: true, Enabled: true}},
 	)
 	req := httptest.NewRequest("GET", "/Library/VirtualFolders", nil)
 	req.Header.Set("X-Emby-Token", "sa_test")
@@ -197,7 +197,7 @@ func TestRequireAdminAPIKey_AcceptsAdminKey(t *testing.T) {
 func TestRequireAdminAPIKey_RejectsNonAdminKey(t *testing.T) {
 	authn := newAdminAPIKeyAuthForTest(
 		&fakeAPIKeyValidator{key: &models.APIKey{ID: 1, UserID: 2, Key: "sa_test"}},
-		&fakeAPIKeyUserLoader{user: &models.User{ID: 2, Role: "user", Enabled: true}},
+		&fakeAPIKeyUserLoader{user: &models.User{ID: 2, Enabled: true}},
 	)
 	req := httptest.NewRequest("POST", "/Library/Media/Updated", nil)
 	req.Header.Set("X-Emby-Token", "sa_test")
@@ -215,7 +215,7 @@ func TestRequireAdminAPIKey_RejectsNonAdminKey(t *testing.T) {
 func TestRequireAdminAPIKey_RejectsNilAPIKey(t *testing.T) {
 	authn := newAdminAPIKeyAuthForTest(
 		&fakeAPIKeyValidator{returnNilWithoutError: true},
-		&fakeAPIKeyUserLoader{user: &models.User{ID: 2, Role: "admin", Enabled: true}},
+		&fakeAPIKeyUserLoader{user: &models.User{ID: 2, IsAdmin: true, Enabled: true}},
 	)
 	req := httptest.NewRequest("GET", "/Library/VirtualFolders", nil)
 	req.Header.Set("X-Emby-Token", "sa_test")
@@ -241,7 +241,7 @@ func TestRequireAdminAPIKey_LastUsedUpdateHasDeadline(t *testing.T) {
 				return nil
 			},
 		},
-		&fakeAPIKeyUserLoader{user: &models.User{ID: 2, Role: "admin", Enabled: true}},
+		&fakeAPIKeyUserLoader{user: &models.User{ID: 2, IsAdmin: true, Enabled: true}},
 	)
 	req := httptest.NewRequest("GET", "/Library/VirtualFolders", nil)
 	req.Header.Set("X-Emby-Token", "sa_test")

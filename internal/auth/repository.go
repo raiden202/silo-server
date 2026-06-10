@@ -37,22 +37,25 @@ func CheckPassword(user *models.User, password string) bool {
 	return err == nil
 }
 
-// UserRepository provides CRUD operations for the users table.
+// UserRepository provides CRUD operations for the users table. Effective
+// access policy is derived from group memberships when users are loaded.
 type UserRepository struct {
-	pool *pgxpool.Pool
+	pool   *pgxpool.Pool
+	groups *GroupRepository
 }
 
 // NewUserRepository creates a new UserRepository backed by the given pool.
 func NewUserRepository(pool *pgxpool.Pool) *UserRepository {
-	return &UserRepository{pool: pool}
+	return &UserRepository{pool: pool, groups: NewGroupRepository(pool)}
 }
+
+// Groups exposes the group repository sharing this repository's pool.
+func (r *UserRepository) Groups() *GroupRepository { return r.groups }
 
 // allColumns is the list of columns returned by all SELECT queries.
 // Kept in one place so scanUser stays in sync.
-const allColumns = `id, email, username, password_hash, local_password_login_enabled, role, permissions, enabled,
-	library_ids, max_playback_quality, access_policy_revision,
-	max_streams, max_transcodes, max_profiles, download_allowed,
-	download_transcode_allowed, created_at, updated_at`
+const allColumns = `id, email, username, password_hash, local_password_login_enabled, enabled,
+	access_policy_revision, created_at, updated_at`
 
 // scanUser scans a single row into a *models.User.
 func scanUser(row pgx.Row) (*models.User, error) {
@@ -63,17 +66,8 @@ func scanUser(row pgx.Row) (*models.User, error) {
 		&u.Username,
 		&u.PasswordHash,
 		&u.LocalPasswordLoginEnabled,
-		&u.Role,
-		&u.Permissions,
 		&u.Enabled,
-		&u.LibraryIDs,
-		&u.MaxPlaybackQuality,
 		&u.AccessPolicyRevision,
-		&u.MaxStreams,
-		&u.MaxTranscodes,
-		&u.MaxProfiles,
-		&u.DownloadAllowed,
-		&u.DownloadTranscodeAllowed,
 		&u.CreatedAt,
 		&u.UpdatedAt,
 	)
@@ -83,7 +77,6 @@ func scanUser(row pgx.Row) (*models.User, error) {
 		}
 		return nil, fmt.Errorf("scanning user: %w", err)
 	}
-	u.IsAdmin = u.Role == "admin"
 	return &u, nil
 }
 
@@ -91,32 +84,11 @@ func scanUser(row pgx.Row) (*models.User, error) {
 func scanUsers(rows pgx.Rows) ([]*models.User, error) {
 	var users []*models.User
 	for rows.Next() {
-		var u models.User
-		err := rows.Scan(
-			&u.ID,
-			&u.Email,
-			&u.Username,
-			&u.PasswordHash,
-			&u.LocalPasswordLoginEnabled,
-			&u.Role,
-			&u.Permissions,
-			&u.Enabled,
-			&u.LibraryIDs,
-			&u.MaxPlaybackQuality,
-			&u.AccessPolicyRevision,
-			&u.MaxStreams,
-			&u.MaxTranscodes,
-			&u.MaxProfiles,
-			&u.DownloadAllowed,
-			&u.DownloadTranscodeAllowed,
-			&u.CreatedAt,
-			&u.UpdatedAt,
-		)
+		u, err := scanUser(rows)
 		if err != nil {
 			return nil, fmt.Errorf("scanning user row: %w", err)
 		}
-		u.IsAdmin = u.Role == "admin"
-		users = append(users, &u)
+		users = append(users, u)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterating user rows: %w", err)
@@ -124,77 +96,45 @@ func scanUsers(rows pgx.Rows) ([]*models.User, error) {
 	return users, nil
 }
 
-// Create inserts a new user with a bcrypt-hashed password and returns the created user.
+// hydrate loads the user's group memberships and applies the effective policy.
+func (r *UserRepository) hydrate(ctx context.Context, u *models.User) error {
+	groups, err := r.groups.GroupsForUser(ctx, u.ID)
+	if err != nil {
+		return err
+	}
+	ApplyEffectivePolicy(u, groups)
+	return nil
+}
+
+// Create inserts a new user with a bcrypt-hashed password and the given group
+// memberships, then returns the created user with its effective policy.
 func (r *UserRepository) Create(ctx context.Context, input models.CreateUserInput) (*models.User, error) {
 	hash, err := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
 	if err != nil {
 		return nil, fmt.Errorf("hashing password: %w", err)
 	}
 
-	// Base columns that are always included.
 	localPasswordLoginEnabled := true
 	if input.LocalPasswordLoginEnabled != nil {
 		localPasswordLoginEnabled = *input.LocalPasswordLoginEnabled
 	}
 
-	permissions := append([]string(nil), input.Permissions...)
-	if input.Permissions == nil && input.Role != "admin" {
-		permissions = DefaultUserPermissions()
-	}
-	permissions, err = NormalizePermissions(permissions)
+	tx, err := r.pool.Begin(ctx)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("beginning user create: %w", err)
 	}
+	defer func() { _ = tx.Rollback(ctx) }()
 
-	cols := []string{"email", "username", "password_hash", "local_password_login_enabled", "role", "permissions", "library_ids", "max_playback_quality"}
-	args := []any{
+	var id int
+	err = tx.QueryRow(ctx, `
+		INSERT INTO users (email, username, password_hash, local_password_login_enabled)
+		VALUES ($1, $2, $3, $4)
+		RETURNING id`,
 		NormalizeEmail(input.Email),
 		NormalizeUsername(input.Username),
 		string(hash),
 		localPasswordLoginEnabled,
-		input.Role,
-		permissions,
-		input.LibraryIDs,
-		input.MaxPlaybackQuality,
-	}
-
-	// Optional columns: nil means use DB default.
-	if input.MaxStreams != nil {
-		cols = append(cols, "max_streams")
-		args = append(args, *input.MaxStreams)
-	}
-	if input.MaxTranscodes != nil {
-		cols = append(cols, "max_transcodes")
-		args = append(args, *input.MaxTranscodes)
-	}
-	if input.MaxProfiles != nil {
-		cols = append(cols, "max_profiles")
-		args = append(args, *input.MaxProfiles)
-	}
-	if input.DownloadAllowed != nil {
-		cols = append(cols, "download_allowed")
-		args = append(args, *input.DownloadAllowed)
-	}
-	if input.DownloadTranscodeAllowed != nil {
-		cols = append(cols, "download_transcode_allowed")
-		args = append(args, *input.DownloadTranscodeAllowed)
-	}
-
-	// Build placeholders: $1, $2, ..., $N
-	placeholders := make([]string, len(args))
-	for i := range args {
-		placeholders[i] = fmt.Sprintf("$%d", i+1)
-	}
-
-	query := fmt.Sprintf("INSERT INTO users (%s) VALUES (%s) RETURNING %s",
-		strings.Join(cols, ", "),
-		strings.Join(placeholders, ", "),
-		allColumns,
-	)
-
-	row := r.pool.QueryRow(ctx, query, args...)
-
-	user, err := scanUser(row)
+	).Scan(&id)
 	if err != nil {
 		if isDuplicateKeyError(err) {
 			return nil, fmt.Errorf("%w: %s", ErrDuplicate, extractConstraint(err))
@@ -202,29 +142,63 @@ func (r *UserRepository) Create(ctx context.Context, input models.CreateUserInpu
 		return nil, fmt.Errorf("creating user: %w", err)
 	}
 
-	return user, nil
+	for _, groupID := range input.GroupIDs {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2)
+			ON CONFLICT DO NOTHING`, id, groupID); err != nil {
+			return nil, fmt.Errorf("adding membership %d: %w", groupID, err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("committing user create: %w", err)
+	}
+
+	return r.GetByID(ctx, id)
 }
 
 // GetByID retrieves a user by their numeric ID.
 func (r *UserRepository) GetByID(ctx context.Context, id int) (*models.User, error) {
 	query := `SELECT ` + allColumns + ` FROM users WHERE id = $1`
-	return scanUser(r.pool.QueryRow(ctx, query, id))
+	user, err := scanUser(r.pool.QueryRow(ctx, query, id))
+	if err != nil {
+		return nil, err
+	}
+	if err := r.hydrate(ctx, user); err != nil {
+		return nil, err
+	}
+	return user, nil
 }
 
 // GetByUsername retrieves a user by their username (case-insensitive).
 func (r *UserRepository) GetByUsername(ctx context.Context, username string) (*models.User, error) {
 	query := `SELECT ` + allColumns + ` FROM users WHERE username = $1`
-	return scanUser(r.pool.QueryRow(ctx, query, NormalizeUsername(username)))
+	user, err := scanUser(r.pool.QueryRow(ctx, query, NormalizeUsername(username)))
+	if err != nil {
+		return nil, err
+	}
+	if err := r.hydrate(ctx, user); err != nil {
+		return nil, err
+	}
+	return user, nil
 }
 
 // GetByEmail retrieves a user by their email address (case-insensitive).
 func (r *UserRepository) GetByEmail(ctx context.Context, email string) (*models.User, error) {
 	query := `SELECT ` + allColumns + ` FROM users WHERE email = $1`
-	return scanUser(r.pool.QueryRow(ctx, query, NormalizeEmail(email)))
+	user, err := scanUser(r.pool.QueryRow(ctx, query, NormalizeEmail(email)))
+	if err != nil {
+		return nil, err
+	}
+	if err := r.hydrate(ctx, user); err != nil {
+		return nil, err
+	}
+	return user, nil
 }
 
 // Update modifies a user's fields. Only non-nil fields in the input are updated.
-// If the input contains a Password, it is bcrypt-hashed before storage.
+// If the input contains a Password, it is bcrypt-hashed before storage. A
+// non-nil GroupIDs replaces the user's group memberships.
 func (r *UserRepository) Update(ctx context.Context, id int, input models.UpdateUserInput) error {
 	setClauses := []string{}
 	accessPolicyPredicates := []string{}
@@ -255,97 +229,50 @@ func (r *UserRepository) Update(ctx context.Context, id int, input models.Update
 		args = append(args, *input.LocalPasswordLoginEnabled)
 		argIndex++
 	}
-	if input.Role != nil {
-		setClauses = append(setClauses, fmt.Sprintf("role = $%d", argIndex))
-		accessPolicyPredicates = append(accessPolicyPredicates, fmt.Sprintf("role IS DISTINCT FROM $%d", argIndex))
-		args = append(args, *input.Role)
-		argIndex++
-	}
-	if input.Permissions != nil {
-		permissions, err := NormalizePermissions(*input.Permissions)
-		if err != nil {
-			return err
-		}
-		setClauses = append(setClauses, fmt.Sprintf("permissions = $%d", argIndex))
-		accessPolicyPredicates = append(accessPolicyPredicates, fmt.Sprintf("permissions IS DISTINCT FROM $%d", argIndex))
-		args = append(args, permissions)
-		argIndex++
-	}
 	if input.Enabled != nil {
 		setClauses = append(setClauses, fmt.Sprintf("enabled = $%d", argIndex))
 		accessPolicyPredicates = append(accessPolicyPredicates, fmt.Sprintf("enabled IS DISTINCT FROM $%d", argIndex))
 		args = append(args, *input.Enabled)
 		argIndex++
 	}
-	if input.LibraryIDs != nil {
-		setClauses = append(setClauses, fmt.Sprintf("library_ids = $%d", argIndex))
-		// Library scope is resolved from users.library_ids on each request, so
-		// changing it must not invalidate durable profile/session tokens.
-		args = append(args, *input.LibraryIDs)
-		argIndex++
-	}
-	if input.MaxPlaybackQuality != nil {
-		setClauses = append(setClauses, fmt.Sprintf("max_playback_quality = $%d", argIndex))
-		accessPolicyPredicates = append(accessPolicyPredicates, fmt.Sprintf("max_playback_quality IS DISTINCT FROM $%d", argIndex))
-		args = append(args, *input.MaxPlaybackQuality)
-		argIndex++
-	}
-	if input.MaxStreams != nil {
-		setClauses = append(setClauses, fmt.Sprintf("max_streams = $%d", argIndex))
-		args = append(args, *input.MaxStreams)
-		argIndex++
-	}
-	if input.MaxTranscodes != nil {
-		setClauses = append(setClauses, fmt.Sprintf("max_transcodes = $%d", argIndex))
-		args = append(args, *input.MaxTranscodes)
-		argIndex++
-	}
-	if input.MaxProfiles != nil {
-		setClauses = append(setClauses, fmt.Sprintf("max_profiles = $%d", argIndex))
-		args = append(args, *input.MaxProfiles)
-		argIndex++
-	}
-	if input.DownloadAllowed != nil {
-		setClauses = append(setClauses, fmt.Sprintf("download_allowed = $%d", argIndex))
-		args = append(args, *input.DownloadAllowed)
-		argIndex++
-	}
-	if input.DownloadTranscodeAllowed != nil {
-		setClauses = append(setClauses, fmt.Sprintf("download_transcode_allowed = $%d", argIndex))
-		args = append(args, *input.DownloadTranscodeAllowed)
-		argIndex++
-	}
 
 	if len(setClauses) == 0 {
-		// Nothing to update; still verify the user exists.
-		_, err := r.GetByID(ctx, id)
-		return err
-	}
-
-	if len(accessPolicyPredicates) > 0 {
-		setClauses = append(setClauses, fmt.Sprintf(
-			"access_policy_revision = CASE WHEN %s THEN access_policy_revision + 1 ELSE access_policy_revision END",
-			strings.Join(accessPolicyPredicates, " OR "),
-		))
-	}
-
-	// Always bump updated_at.
-	setClauses = append(setClauses, "updated_at = NOW()")
-
-	query := fmt.Sprintf("UPDATE users SET %s WHERE id = $%d",
-		strings.Join(setClauses, ", "), argIndex)
-	args = append(args, id)
-
-	tag, err := r.pool.Exec(ctx, query, args...)
-	if err != nil {
-		if isDuplicateKeyError(err) {
-			return fmt.Errorf("%w: %s", ErrDuplicate, extractConstraint(err))
+		// Nothing to update on the users row; still verify the user exists.
+		if _, err := r.GetByID(ctx, id); err != nil {
+			return err
 		}
-		return fmt.Errorf("updating user: %w", err)
+	} else {
+		if len(accessPolicyPredicates) > 0 {
+			setClauses = append(setClauses, fmt.Sprintf(
+				"access_policy_revision = CASE WHEN %s THEN access_policy_revision + 1 ELSE access_policy_revision END",
+				strings.Join(accessPolicyPredicates, " OR "),
+			))
+		}
+
+		// Always bump updated_at.
+		setClauses = append(setClauses, "updated_at = NOW()")
+
+		query := fmt.Sprintf("UPDATE users SET %s WHERE id = $%d",
+			strings.Join(setClauses, ", "), argIndex)
+		args = append(args, id)
+
+		tag, err := r.pool.Exec(ctx, query, args...)
+		if err != nil {
+			if isDuplicateKeyError(err) {
+				return fmt.Errorf("%w: %s", ErrDuplicate, extractConstraint(err))
+			}
+			return fmt.Errorf("updating user: %w", err)
+		}
+
+		if tag.RowsAffected() == 0 {
+			return ErrNotFound
+		}
 	}
 
-	if tag.RowsAffected() == 0 {
-		return ErrNotFound
+	if input.GroupIDs != nil {
+		if err := r.groups.ReplaceUserGroups(ctx, id, *input.GroupIDs); err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -374,7 +301,25 @@ func (r *UserRepository) List(ctx context.Context) ([]*models.User, error) {
 	}
 	defer rows.Close()
 
-	return scanUsers(rows)
+	users, err := scanUsers(rows)
+	if err != nil {
+		return nil, err
+	}
+
+	// Bulk-hydrate effective policy with a single membership query.
+	userIDs := make([]int, 0, len(users))
+	for _, u := range users {
+		userIDs = append(userIDs, u.ID)
+	}
+	groupsByUser, err := r.groups.GroupsForUsers(ctx, userIDs)
+	if err != nil {
+		return nil, err
+	}
+	for _, u := range users {
+		ApplyEffectivePolicy(u, groupsByUser[u.ID])
+	}
+
+	return users, nil
 }
 
 // Count returns the number of users in the database.

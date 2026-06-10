@@ -60,7 +60,7 @@ func TestRequireMetadataCurationForItem_AllowsAdmin(t *testing.T) {
 }
 
 func TestRequireMetadataCurationForItem_RejectsUserWithoutPermission(t *testing.T) {
-	user := &models.User{ID: 7, Role: "user", Enabled: true, LibraryIDs: []int{1}, Permissions: nil}
+	user := &models.User{ID: 7, Enabled: true, LibraryIDs: []int{1}, Permissions: nil}
 	code := runMetadataCurationMiddleware(user, []int{1}, "user")
 	if code != http.StatusForbidden {
 		t.Fatalf("status = %d, want %d", code, http.StatusForbidden)
@@ -68,7 +68,7 @@ func TestRequireMetadataCurationForItem_RejectsUserWithoutPermission(t *testing.
 }
 
 func TestRequireMetadataCurationForItem_AllowsUnrestrictedCurator(t *testing.T) {
-	user := &models.User{ID: 7, Role: "user", Enabled: true, LibraryIDs: nil, Permissions: []string{"metadata_curation"}}
+	user := &models.User{ID: 7, Enabled: true, LibraryIDs: nil, Permissions: []string{"metadata_curation"}}
 	code := runMetadataCurationMiddleware(user, []int{1, 2}, "user")
 	if code != http.StatusNoContent {
 		t.Fatalf("status = %d, want %d", code, http.StatusNoContent)
@@ -76,7 +76,7 @@ func TestRequireMetadataCurationForItem_AllowsUnrestrictedCurator(t *testing.T) 
 }
 
 func TestRequireMetadataCurationForItem_AllowsWhenAllTargetLibrariesAreAllowed(t *testing.T) {
-	user := &models.User{ID: 7, Role: "user", Enabled: true, LibraryIDs: []int{1, 2, 3}, Permissions: []string{"metadata_curation"}}
+	user := &models.User{ID: 7, Enabled: true, LibraryIDs: []int{1, 2, 3}, Permissions: []string{"metadata_curation"}}
 	code := runMetadataCurationMiddleware(user, []int{1, 3}, "user")
 	if code != http.StatusNoContent {
 		t.Fatalf("status = %d, want %d", code, http.StatusNoContent)
@@ -84,7 +84,7 @@ func TestRequireMetadataCurationForItem_AllowsWhenAllTargetLibrariesAreAllowed(t
 }
 
 func TestRequireMetadataCurationForItem_RejectsWhenAnyTargetLibraryIsOutsideAccess(t *testing.T) {
-	user := &models.User{ID: 7, Role: "user", Enabled: true, LibraryIDs: []int{1}, Permissions: []string{"metadata_curation"}}
+	user := &models.User{ID: 7, Enabled: true, LibraryIDs: []int{1}, Permissions: []string{"metadata_curation"}}
 	code := runMetadataCurationMiddleware(user, []int{1, 2}, "user")
 	if code != http.StatusForbidden {
 		t.Fatalf("status = %d, want %d", code, http.StatusForbidden)
@@ -92,7 +92,7 @@ func TestRequireMetadataCurationForItem_RejectsWhenAnyTargetLibraryIsOutsideAcce
 }
 
 func TestRequireMetadataCurationForItem_NotFoundWhenTargetHasNoLibraries(t *testing.T) {
-	user := &models.User{ID: 7, Role: "user", Enabled: true, LibraryIDs: nil, Permissions: []string{"metadata_curation"}}
+	user := &models.User{ID: 7, Enabled: true, LibraryIDs: nil, Permissions: []string{"metadata_curation"}}
 	code := runMetadataCurationMiddleware(user, nil, "user")
 	if code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d", code, http.StatusNotFound)

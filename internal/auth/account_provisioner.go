@@ -2,6 +2,8 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -9,9 +11,18 @@ import (
 	"github.com/Silo-Server/silo-server/internal/userstore"
 )
 
+// DefaultGroupSlugsSettingKey is the server setting holding the JSON array of
+// group slugs assigned to newly provisioned accounts.
+const DefaultGroupSlugsSettingKey = "users.default_group_slugs"
+
 type AccountUserRepository interface {
 	Create(ctx context.Context, input models.CreateUserInput) (*models.User, error)
 	Delete(ctx context.Context, id int) error
+}
+
+// GroupResolver resolves group slugs to groups. Implemented by GroupRepository.
+type GroupResolver interface {
+	GetBySlug(ctx context.Context, slug string) (*models.Group, error)
 }
 
 type DefaultProfileOptions struct {
@@ -27,15 +38,21 @@ type CreateAccountInput struct {
 type AccountProvisioner struct {
 	users         AccountUserRepository
 	storeProvider userstore.UserStoreProvider
+	settings      SettingsGetter
+	groups        GroupResolver
 }
 
 func NewAccountProvisioner(
 	users AccountUserRepository,
 	storeProvider userstore.UserStoreProvider,
+	settings SettingsGetter,
+	groups GroupResolver,
 ) *AccountProvisioner {
 	return &AccountProvisioner{
 		users:         users,
 		storeProvider: storeProvider,
+		settings:      settings,
+		groups:        groups,
 	}
 }
 
@@ -43,6 +60,14 @@ func (p *AccountProvisioner) CreateAccount(
 	ctx context.Context,
 	input CreateAccountInput,
 ) (*models.User, error) {
+	if input.User.GroupIDs == nil && p.groups != nil {
+		ids, err := p.defaultGroupIDs(ctx)
+		if err != nil {
+			return nil, err
+		}
+		input.User.GroupIDs = ids
+	}
+
 	user, err := p.users.Create(ctx, input.User)
 	if err != nil {
 		return nil, err
@@ -64,6 +89,34 @@ func (p *AccountProvisioner) CreateAccount(
 	}
 
 	return user, nil
+}
+
+// defaultGroupIDs resolves the configured default group slugs (falling back to
+// the built-in users group) to group IDs. Unknown slugs are skipped so a stale
+// setting never blocks signups.
+func (p *AccountProvisioner) defaultGroupIDs(ctx context.Context) ([]int, error) {
+	slugs := []string{models.GroupSlugUsers}
+	if p.settings != nil {
+		raw, err := p.settings.Get(ctx, DefaultGroupSlugsSettingKey)
+		if err == nil && strings.TrimSpace(raw) != "" {
+			var configured []string
+			if jsonErr := json.Unmarshal([]byte(raw), &configured); jsonErr == nil && len(configured) > 0 {
+				slugs = configured
+			}
+		}
+	}
+	ids := make([]int, 0, len(slugs))
+	for _, slug := range slugs {
+		group, err := p.groups.GetBySlug(ctx, slug)
+		if err != nil {
+			if errors.Is(err, ErrGroupNotFound) {
+				continue // a stale setting must not block signups
+			}
+			return nil, fmt.Errorf("resolving default group %q: %w", slug, err)
+		}
+		ids = append(ids, group.ID)
+	}
+	return ids, nil
 }
 
 func (p *AccountProvisioner) createDefaultProfile(

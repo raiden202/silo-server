@@ -527,7 +527,7 @@ func buildUserResponse(user *models.User, impersonatorUserID *int, impersonator 
 		ID:              user.ID,
 		Username:        user.Username,
 		Email:           user.Email,
-		Role:            user.Role,
+		Role:            auth.RoleForUser(user),
 		Permissions:     auth.EffectivePermissions(user),
 		DownloadAllowed: user.DownloadAllowed,
 	}

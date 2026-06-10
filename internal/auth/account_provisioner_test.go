@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 
 	"github.com/Silo-Server/silo-server/internal/models"
@@ -58,6 +59,8 @@ func TestAccountProvisionerCreateAccount_SkipsProfileByDefault(t *testing.T) {
 			},
 		},
 		nil,
+		nil,
+		nil,
 	)
 
 	user, err := provisioner.CreateAccount(context.Background(), CreateAccountInput{
@@ -90,6 +93,8 @@ func TestAccountProvisionerCreateAccount_CreatesDefaultProfile(t *testing.T) {
 				},
 			},
 		},
+		nil,
+		nil,
 	)
 
 	_, err := provisioner.CreateAccount(context.Background(), CreateAccountInput{
@@ -125,6 +130,8 @@ func TestAccountProvisionerCreateAccount_UsesExplicitProfileName(t *testing.T) {
 				},
 			},
 		},
+		nil,
+		nil,
 	)
 
 	_, err := provisioner.CreateAccount(context.Background(), CreateAccountInput{
@@ -158,6 +165,8 @@ func TestAccountProvisionerCreateAccount_BlankExplicitProfileNameFallsBackToUser
 				},
 			},
 		},
+		nil,
+		nil,
 	)
 
 	_, err := provisioner.CreateAccount(context.Background(), CreateAccountInput{
@@ -194,6 +203,8 @@ func TestAccountProvisionerCreateAccount_DeletesUserWhenProfileCreationFails(t *
 				},
 			},
 		},
+		nil,
+		nil,
 	)
 
 	_, err := provisioner.CreateAccount(context.Background(), CreateAccountInput{
@@ -207,5 +218,129 @@ func TestAccountProvisionerCreateAccount_DeletesUserWhenProfileCreationFails(t *
 	}
 	if deletedUserID != 9 {
 		t.Fatalf("deletedUserID = %d, want 9", deletedUserID)
+	}
+}
+
+type stubGroupResolver struct {
+	groups map[string]*models.Group
+}
+
+func (s stubGroupResolver) GetBySlug(_ context.Context, slug string) (*models.Group, error) {
+	if group, ok := s.groups[slug]; ok {
+		return group, nil
+	}
+	return nil, ErrGroupNotFound
+}
+
+type stubSettings map[string]string
+
+func (s stubSettings) Get(_ context.Context, key string) (string, error) {
+	return s[key], nil
+}
+
+func TestAccountProvisionerCreateAccount_NilGroupIDsResolvesConfiguredDefaults(t *testing.T) {
+	var gotInput models.CreateUserInput
+	provisioner := NewAccountProvisioner(
+		stubAccountUsers{
+			createFn: func(_ context.Context, input models.CreateUserInput) (*models.User, error) {
+				gotInput = input
+				return &models.User{ID: 1, Username: "alex"}, nil
+			},
+		},
+		nil,
+		stubSettings{DefaultGroupSlugsSettingKey: `["family","kids"]`},
+		stubGroupResolver{groups: map[string]*models.Group{
+			"family": {ID: 11, Slug: "family"},
+			"kids":   {ID: 12, Slug: "kids"},
+		}},
+	)
+
+	if _, err := provisioner.CreateAccount(context.Background(), CreateAccountInput{
+		User: models.CreateUserInput{Username: "alex"},
+	}); err != nil {
+		t.Fatalf("CreateAccount returned error: %v", err)
+	}
+	want := []int{11, 12}
+	if !reflect.DeepEqual(gotInput.GroupIDs, want) {
+		t.Fatalf("GroupIDs = %#v, want %#v", gotInput.GroupIDs, want)
+	}
+}
+
+func TestAccountProvisionerCreateAccount_FallsBackToBuiltInUsersGroup(t *testing.T) {
+	var gotInput models.CreateUserInput
+	provisioner := NewAccountProvisioner(
+		stubAccountUsers{
+			createFn: func(_ context.Context, input models.CreateUserInput) (*models.User, error) {
+				gotInput = input
+				return &models.User{ID: 1, Username: "alex"}, nil
+			},
+		},
+		nil,
+		nil, // no settings configured
+		stubGroupResolver{groups: map[string]*models.Group{
+			models.GroupSlugUsers: {ID: 2, Slug: models.GroupSlugUsers},
+		}},
+	)
+
+	if _, err := provisioner.CreateAccount(context.Background(), CreateAccountInput{
+		User: models.CreateUserInput{Username: "alex"},
+	}); err != nil {
+		t.Fatalf("CreateAccount returned error: %v", err)
+	}
+	if !reflect.DeepEqual(gotInput.GroupIDs, []int{2}) {
+		t.Fatalf("GroupIDs = %#v, want [2]", gotInput.GroupIDs)
+	}
+}
+
+func TestAccountProvisionerCreateAccount_ExplicitGroupIDsPassThrough(t *testing.T) {
+	var gotInput models.CreateUserInput
+	provisioner := NewAccountProvisioner(
+		stubAccountUsers{
+			createFn: func(_ context.Context, input models.CreateUserInput) (*models.User, error) {
+				gotInput = input
+				return &models.User{ID: 1, Username: "alex"}, nil
+			},
+		},
+		nil,
+		stubSettings{DefaultGroupSlugsSettingKey: `["family"]`},
+		stubGroupResolver{groups: map[string]*models.Group{
+			"family": {ID: 11, Slug: "family"},
+		}},
+	)
+
+	explicit := []int{99}
+	if _, err := provisioner.CreateAccount(context.Background(), CreateAccountInput{
+		User: models.CreateUserInput{Username: "alex", GroupIDs: explicit},
+	}); err != nil {
+		t.Fatalf("CreateAccount returned error: %v", err)
+	}
+	if !reflect.DeepEqual(gotInput.GroupIDs, explicit) {
+		t.Fatalf("GroupIDs = %#v, want %#v", gotInput.GroupIDs, explicit)
+	}
+}
+
+func TestAccountProvisionerCreateAccount_SkipsUnknownDefaultSlugs(t *testing.T) {
+	var gotInput models.CreateUserInput
+	provisioner := NewAccountProvisioner(
+		stubAccountUsers{
+			createFn: func(_ context.Context, input models.CreateUserInput) (*models.User, error) {
+				gotInput = input
+				return &models.User{ID: 1, Username: "alex"}, nil
+			},
+		},
+		nil,
+		stubSettings{DefaultGroupSlugsSettingKey: `["ghost","family"]`},
+		stubGroupResolver{groups: map[string]*models.Group{
+			"family": {ID: 11, Slug: "family"},
+		}},
+	)
+
+	if _, err := provisioner.CreateAccount(context.Background(), CreateAccountInput{
+		User: models.CreateUserInput{Username: "alex"},
+	}); err != nil {
+		t.Fatalf("CreateAccount returned error: %v", err)
+	}
+	if !reflect.DeepEqual(gotInput.GroupIDs, []int{11}) {
+		t.Fatalf("GroupIDs = %#v, want [11]", gotInput.GroupIDs)
 	}
 }

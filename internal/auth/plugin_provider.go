@@ -54,7 +54,7 @@ func NewPluginProviderWithClientFactory(
 		sessions:     sessions,
 		users:        users,
 		identityPool: pool,
-		accounts:     NewAccountProvisioner(users, nil),
+		accounts:     NewAccountProvisioner(users, nil, nil, groupResolverFor(users)),
 	}
 }
 
@@ -264,7 +264,6 @@ func (p *PluginProvider) autoProvisionUser(
 				Username:                  username,
 				Password:                  password,
 				LocalPasswordLoginEnabled: &localPasswordLoginEnabled,
-				Role:                      "user",
 			},
 		})
 		if err == nil {

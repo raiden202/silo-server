@@ -2507,7 +2507,7 @@ func resolveOptionalPluginAccessUser(
 		if err != nil || !user.Enabled {
 			return false, false, 0
 		}
-		return true, user.Role == "admin", user.ID
+		return true, user.IsAdmin, user.ID
 	}
 
 	claims, err := jwtService.ValidateToken(token)

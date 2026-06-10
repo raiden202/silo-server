@@ -209,7 +209,7 @@ func TestGetItemMarkersUsesFirstAuthorizedFile(t *testing.T) {
 func TestGetFileMarkersDoesNotRequireMarkerEditPermission(t *testing.T) {
 	h := newMarkersHandler(nil)
 	h.Users = fakeMarkerUsers{
-		7: &models.User{ID: 7, Role: "user", Enabled: true, Permissions: nil},
+		7: &models.User{ID: 7, Enabled: true, Permissions: nil},
 	}
 	req := httptest.NewRequest(http.MethodGet, "/markers/files/5", nil)
 	rctx := chi.NewRouteContext()
@@ -229,7 +229,7 @@ func TestSetFileMarkersRejectsUserWithoutMarkerEditPermission(t *testing.T) {
 	writer := &fakeMarkerWriter{}
 	h := newMarkersHandler(writer)
 	h.Users = fakeMarkerUsers{
-		7: &models.User{ID: 7, Role: "user", Enabled: true, Permissions: nil},
+		7: &models.User{ID: 7, Enabled: true, Permissions: nil},
 	}
 	req := markerPutRequest(`{"intro":{"start":0,"end":60}}`)
 	req = req.WithContext(apimw.SetClaims(req.Context(), &auth.Claims{UserID: 7, Role: "user", TokenType: auth.TokenTypeAccess}))
@@ -249,7 +249,7 @@ func TestSetFileMarkersAllowsUserWithMarkerEditPermission(t *testing.T) {
 	writer := &fakeMarkerWriter{}
 	h := newMarkersHandler(writer)
 	h.Users = fakeMarkerUsers{
-		7: &models.User{ID: 7, Role: "user", Enabled: true, Permissions: []string{"marker_edit"}},
+		7: &models.User{ID: 7, Enabled: true, Permissions: []string{"marker_edit"}},
 	}
 	req := markerPutRequest(`{"intro":{"start":0,"end":60}}`)
 	req = req.WithContext(apimw.SetClaims(req.Context(), &auth.Claims{UserID: 7, Role: "user", TokenType: auth.TokenTypeAccess}))

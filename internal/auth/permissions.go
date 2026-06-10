@@ -62,10 +62,6 @@ func NormalizePermissions(values []string) ([]string, error) {
 	return out, nil
 }
 
-func DefaultUserPermissions() []string {
-	return []string{string(PermissionMarkerEdit)}
-}
-
 func HasAssignedPermission(user *models.User, permission Permission) bool {
 	if user == nil {
 		return false
