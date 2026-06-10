@@ -50,6 +50,19 @@ func scanGroupFields(row pgx.Row, g *models.Group, extra ...any) error {
 	return row.Scan(dest...)
 }
 
+// scanGroupFieldsPre scans pre-fields followed by all group fields into g.
+// Use this when the query selects extra columns before the group columns
+// (e.g. SELECT ug.user_id, <groupColumns> ...).
+func scanGroupFieldsPre(row pgx.Row, g *models.Group, pre ...any) error {
+	dest := append(pre, //nolint:gocritic // intentional prepend into new slice
+		&g.ID, &g.Slug, &g.Name, &g.Description, &g.BuiltIn, &g.Permissions,
+		&g.LibraryIDs, &g.MaxStreams, &g.MaxTranscodes, &g.MaxProfiles,
+		&g.MaxPlaybackQuality, &g.DownloadAllowed, &g.DownloadTranscodeAllowed,
+		&g.CreatedAt, &g.UpdatedAt,
+	)
+	return row.Scan(dest...)
+}
+
 func scanGroup(row pgx.Row) (*models.Group, error) {
 	var g models.Group
 	if err := scanGroupFields(row, &g); err != nil {
@@ -164,13 +177,7 @@ func (r *GroupRepository) GroupsForUsers(ctx context.Context, userIDs []int) (ma
 	for rows.Next() {
 		var userID int
 		var g models.Group
-		if err := rows.Scan(
-			&userID,
-			&g.ID, &g.Slug, &g.Name, &g.Description, &g.BuiltIn, &g.Permissions,
-			&g.LibraryIDs, &g.MaxStreams, &g.MaxTranscodes, &g.MaxProfiles,
-			&g.MaxPlaybackQuality, &g.DownloadAllowed, &g.DownloadTranscodeAllowed,
-			&g.CreatedAt, &g.UpdatedAt,
-		); err != nil {
+		if err := scanGroupFieldsPre(rows, &g, &userID); err != nil {
 			return nil, fmt.Errorf("scanning user group row: %w", err)
 		}
 		out[userID] = append(out[userID], g)
@@ -251,16 +258,24 @@ func (r *GroupRepository) Update(ctx context.Context, id int, input models.Updat
 		return nil, err
 	}
 
-	if input.Permissions != nil && current.Slug == models.GroupSlugAdministrators {
-		hasAdmin := false
-		for _, p := range *input.Permissions {
-			if p == string(PermissionAdmin) {
-				hasAdmin = true
-				break
-			}
+	var normalizedPerms []string
+	if input.Permissions != nil {
+		var err error
+		normalizedPerms, err = NormalizePermissions(*input.Permissions)
+		if err != nil {
+			return nil, err
 		}
-		if !hasAdmin {
-			return nil, ErrAdminPermRequired
+		if current.Slug == models.GroupSlugAdministrators {
+			hasAdmin := false
+			for _, p := range normalizedPerms {
+				if p == string(PermissionAdmin) {
+					hasAdmin = true
+					break
+				}
+			}
+			if !hasAdmin {
+				return nil, ErrAdminPermRequired
+			}
 		}
 	}
 
@@ -283,11 +298,7 @@ func (r *GroupRepository) Update(ctx context.Context, id int, input models.Updat
 		add("description", *input.Description, false)
 	}
 	if input.Permissions != nil {
-		permissions, err := NormalizePermissions(*input.Permissions)
-		if err != nil {
-			return nil, err
-		}
-		add("permissions", permissions, true)
+		add("permissions", normalizedPerms, true)
 	}
 	if input.LibraryIDs != nil {
 		add("library_ids", *input.LibraryIDs, true)
