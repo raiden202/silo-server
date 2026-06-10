@@ -100,7 +100,7 @@ A user's **effective policy** is the most-permissive union of their groups:
 
 **Zero groups → empty policy**: no permissions, no libraries (lockout is enforced by the empty library list, so stream/transcode limits are irrelevant; `max_profiles` is floored at 1 since 0 would mean unlimited profile creation). The user can authenticate but sees an empty server. This is deliberate ("groups only grant") and gives admins a soft-disable distinct from `enabled = false`.
 
-**Where computed:** the user repository (`internal/auth/repository.go`) aggregates group policy in the same query that loads the user (join over `user_groups`/`groups`; cost is O(memberships per user), independent of total user count). `models.User` keeps its existing policy fields (`LibraryIDs`, `MaxStreams`, `Permissions`, …) but they become **effective** values populated from the aggregate. The ~25 consumer packages (playback, catalog access filters, jellycompat, sections, audiobooks, requests, …) keep working unchanged. `Role` is replaced by `IsAdmin bool` derived from effective permissions. Assigned memberships are exposed separately (`GroupIDs`) for the admin API.
+**Where computed:** the user repository (`internal/auth/repository.go`) aggregates group policy in the same load path as the user row (a second indexed query over `user_groups`/`groups`, batched for list views; cost is O(memberships per user), independent of total user count). `models.User` keeps its existing policy fields (`LibraryIDs`, `MaxStreams`, `Permissions`, …) but they become **effective** values populated from the aggregate. The ~25 consumer packages (playback, catalog access filters, jellycompat, sections, audiobooks, requests, …) keep working unchanged. `Role` is replaced by `IsAdmin bool` derived from effective permissions. Assigned memberships are exposed separately (`GroupIDs`) for the admin API.
 
 **Invalidation:** unchanged mechanism, new triggers:
 
@@ -132,7 +132,7 @@ All new endpoints behind `RequireAdmin`, under the existing admin API namespace:
 
 Changed endpoints:
 
-- `POST`/`PATCH` admin user endpoints: per-user policy fields removed from request bodies, replaced by `group_ids`. Responses gain `groups: [{id, slug, name}]` and a read-only `effective_policy` object.
+- `POST`/`PATCH` admin user endpoints: per-user policy fields removed from request bodies, replaced by `group_ids`. Responses gain `groups: [{id, slug, name}]`; the existing top-level policy fields (`library_ids`, `max_streams`, …) become read-only effective values derived from group membership.
 - User-facing account/session responses keep a **derived** `role` field (`"admin"`/`"user"` from `IsAdmin`) so `silo-android` and `silo-apple` need no immediate changes; group info is added alongside.
 
 Default-group setting rides the existing server-settings endpoints.
