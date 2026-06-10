@@ -2019,6 +2019,64 @@ export interface RequestListParams {
 }
 
 // Admin
+export interface AdminGroupRef {
+  id: number;
+  slug: string;
+  name: string;
+}
+
+export interface AdminGroup {
+  id: number;
+  slug: string;
+  name: string;
+  description: string;
+  built_in: boolean;
+  permissions: string[];
+  /** null = access to all libraries */
+  library_ids: number[] | null;
+  max_streams: number;
+  max_transcodes: number;
+  max_profiles: number;
+  max_playback_quality: string;
+  download_allowed: boolean;
+  download_transcode_allowed: boolean;
+  member_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateGroupRequest {
+  name: string;
+  description?: string;
+  permissions?: string[];
+  /** null/omitted = access to all libraries */
+  library_ids?: number[] | null;
+  max_streams?: number;
+  max_transcodes?: number;
+  max_profiles?: number;
+  max_playback_quality?: string;
+  download_allowed?: boolean;
+  download_transcode_allowed?: boolean;
+}
+
+export type UpdateGroupRequest = Partial<CreateGroupRequest>;
+
+export interface GroupMember {
+  user_id: number;
+  username: string;
+  email: string;
+  enabled: boolean;
+}
+
+export interface GroupMembersPage {
+  members: GroupMember[];
+  total: number;
+  offset: number;
+  limit: number;
+}
+
+// AdminUser policy fields (role, permissions, library_ids, max_*, download_*)
+// are READ-ONLY effective values derived from the user's groups.
 export interface AdminUser {
   id: number;
   username: string;
@@ -2026,6 +2084,7 @@ export interface AdminUser {
   role: string;
   permissions: string[];
   enabled: boolean;
+  groups: AdminGroupRef[];
   library_ids: number[] | null;
   max_playback_quality: string;
   max_streams: number;
@@ -2042,16 +2101,27 @@ export interface CreateUserRequest {
   username: string;
   email: string;
   password: string;
-  role: string;
-  permissions?: string[];
   create_default_profile?: boolean;
   default_profile_name?: string;
+  /** Group memberships to assign. Omitted = configured default groups. */
+  group_ids?: number[];
+  /** @deprecated removed by group-based permissions; cleaned up in users-page rework */
+  role?: string;
+  /** @deprecated removed by group-based permissions; cleaned up in users-page rework */
+  permissions?: string[];
+  /** @deprecated removed by group-based permissions; cleaned up in users-page rework */
   library_ids?: number[] | null;
+  /** @deprecated removed by group-based permissions; cleaned up in users-page rework */
   max_playback_quality?: string;
+  /** @deprecated removed by group-based permissions; cleaned up in users-page rework */
   max_streams?: number;
+  /** @deprecated removed by group-based permissions; cleaned up in users-page rework */
   max_transcodes?: number;
+  /** @deprecated removed by group-based permissions; cleaned up in users-page rework */
   max_profiles?: number;
+  /** @deprecated removed by group-based permissions; cleaned up in users-page rework */
   download_allowed?: boolean;
+  /** @deprecated removed by group-based permissions; cleaned up in users-page rework */
   download_transcode_allowed?: boolean;
 }
 
@@ -2059,15 +2129,26 @@ export interface UpdateUserRequest {
   username?: string;
   email?: string;
   password?: string;
-  role?: string;
-  permissions?: string[];
   enabled?: boolean;
+  /** Replaces the user's group memberships. Omitted = unchanged. */
+  group_ids?: number[];
+  /** @deprecated removed by group-based permissions; cleaned up in users-page rework */
+  role?: string;
+  /** @deprecated removed by group-based permissions; cleaned up in users-page rework */
+  permissions?: string[];
+  /** @deprecated removed by group-based permissions; cleaned up in users-page rework */
   library_ids?: number[] | null;
+  /** @deprecated removed by group-based permissions; cleaned up in users-page rework */
   max_playback_quality?: string;
+  /** @deprecated removed by group-based permissions; cleaned up in users-page rework */
   max_streams?: number;
+  /** @deprecated removed by group-based permissions; cleaned up in users-page rework */
   max_transcodes?: number;
+  /** @deprecated removed by group-based permissions; cleaned up in users-page rework */
   max_profiles?: number;
+  /** @deprecated removed by group-based permissions; cleaned up in users-page rework */
   download_allowed?: boolean;
+  /** @deprecated removed by group-based permissions; cleaned up in users-page rework */
   download_transcode_allowed?: boolean;
 }
 

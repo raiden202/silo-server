@@ -325,6 +325,10 @@ export const adminKeys = {
     ["admin", "users", userId, "deviceSettings", key] as const,
   userSubtitleDeviceSettings: (userId: number) =>
     ["admin", "users", userId, "deviceSettings", "subtitle_appearance"] as const,
+  groups: () => ["admin", "groups"] as const,
+  groupDetail: (groupId: number) => ["admin", "groups", groupId] as const,
+  groupMembers: (groupId: number, offset: number, limit: number) =>
+    ["admin", "groups", groupId, "members", offset, limit] as const,
   devices: () => ["admin", "devices"] as const,
   deviceDetail: (userId: number, deviceId: string) =>
     ["admin", "devices", userId, deviceId] as const,
