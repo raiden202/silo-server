@@ -21,8 +21,14 @@ func TestApplyEffectivePolicyZeroGroups(t *testing.T) {
 	if u.LibraryIDs == nil || len(u.LibraryIDs) != 0 {
 		t.Errorf("library ids = %v, want empty non-nil (access to none)", u.LibraryIDs)
 	}
-	if u.MaxStreams != 0 || u.MaxTranscodes != 0 || u.MaxProfiles != 0 {
-		t.Error("limits must be zero for zero groups")
+	// Lockout comes from the empty library list; stream/transcode limits are
+	// irrelevant and stay 0. MaxProfiles is floored at 1 because 0 means
+	// unlimited at the profile-creation check.
+	if u.MaxStreams != 0 || u.MaxTranscodes != 0 {
+		t.Errorf("stream limits = %d/%d, want 0/0", u.MaxStreams, u.MaxTranscodes)
+	}
+	if u.MaxProfiles != 1 {
+		t.Errorf("max profiles = %d, want 1 (0 would mean unlimited)", u.MaxProfiles)
 	}
 	if u.DownloadAllowed || u.DownloadTranscodeAllowed {
 		t.Error("downloads must be denied for zero groups")
@@ -69,6 +75,43 @@ func TestApplyEffectivePolicyUnion(t *testing.T) {
 	}
 }
 
+func TestApplyEffectivePolicyUnlimitedLimitWins(t *testing.T) {
+	// 0 means unlimited at enforcement for all three limits, so a group with
+	// 0 must win the most-permissive union over any finite cap.
+	u := &models.User{}
+	ApplyEffectivePolicy(u, []models.Group{
+		{ID: 1, MaxStreams: 5, MaxTranscodes: 5, MaxProfiles: 5},
+		{ID: 2, MaxStreams: 0, MaxTranscodes: 0, MaxProfiles: 0},
+	})
+	if u.MaxStreams != 0 || u.MaxTranscodes != 0 || u.MaxProfiles != 0 {
+		t.Errorf("limits = %d/%d/%d, want 0/0/0 (unlimited wins)",
+			u.MaxStreams, u.MaxTranscodes, u.MaxProfiles)
+	}
+
+	// Order must not matter: unlimited in the first group sticks.
+	u = &models.User{}
+	ApplyEffectivePolicy(u, []models.Group{
+		{ID: 2, MaxStreams: 0, MaxTranscodes: 0, MaxProfiles: 0},
+		{ID: 1, MaxStreams: 5, MaxTranscodes: 5, MaxProfiles: 5},
+	})
+	if u.MaxStreams != 0 || u.MaxTranscodes != 0 || u.MaxProfiles != 0 {
+		t.Errorf("limits = %d/%d/%d, want 0/0/0 (unlimited wins regardless of order)",
+			u.MaxStreams, u.MaxTranscodes, u.MaxProfiles)
+	}
+}
+
+func TestApplyEffectivePolicyFiniteLimitsTakeMax(t *testing.T) {
+	u := &models.User{}
+	ApplyEffectivePolicy(u, []models.Group{
+		{ID: 1, MaxStreams: 5, MaxTranscodes: 2, MaxProfiles: 4},
+		{ID: 2, MaxStreams: 2, MaxTranscodes: 5, MaxProfiles: 1},
+	})
+	if u.MaxStreams != 5 || u.MaxTranscodes != 5 || u.MaxProfiles != 4 {
+		t.Errorf("limits = %d/%d/%d, want 5/5/4 (max of finite caps)",
+			u.MaxStreams, u.MaxTranscodes, u.MaxProfiles)
+	}
+}
+
 func TestApplyEffectivePolicyNilLibrariesMeansAll(t *testing.T) {
 	u := &models.User{}
 	ApplyEffectivePolicy(u, []models.Group{
@@ -94,6 +137,12 @@ func TestApplyEffectivePolicyAdminShortCircuit(t *testing.T) {
 	}
 	if u.MaxPlaybackQuality != "" {
 		t.Error("admin must be quality-unrestricted")
+	}
+	// Admin does not bypass stream/transcode/profile limits (matching the
+	// pre-group behavior where admins were subject to per-user limits); the
+	// merged group values stand.
+	if u.MaxStreams != 1 {
+		t.Errorf("max streams = %d, want 1 (admin keeps merged group limits)", u.MaxStreams)
 	}
 }
 

@@ -94,11 +94,11 @@ A user's **effective policy** is the most-permissive union of their groups:
 |---|---|
 | `permissions` | set union; `admin` present → every permission granted |
 | `library_ids` | union; any group with `NULL` (all) or `admin` → unrestricted |
-| `max_streams`, `max_transcodes`, `max_profiles` | max across groups |
+| `max_streams`, `max_transcodes`, `max_profiles` | 0 means unlimited at enforcement, so any group with 0 wins; otherwise max across groups |
 | `max_playback_quality` | highest wins; `''` (unrestricted) beats everything (ordering as in `internal/access/quality.go`) |
 | `download_allowed`, `download_transcode_allowed` | OR |
 
-**Zero groups → empty policy**: no permissions, no libraries, zero streams. The user can authenticate but sees an empty server. This is deliberate ("groups only grant") and gives admins a soft-disable distinct from `enabled = false`.
+**Zero groups → empty policy**: no permissions, no libraries (lockout is enforced by the empty library list, so stream/transcode limits are irrelevant; `max_profiles` is floored at 1 since 0 would mean unlimited profile creation). The user can authenticate but sees an empty server. This is deliberate ("groups only grant") and gives admins a soft-disable distinct from `enabled = false`.
 
 **Where computed:** the user repository (`internal/auth/repository.go`) aggregates group policy in the same query that loads the user (join over `user_groups`/`groups`; cost is O(memberships per user), independent of total user count). `models.User` keeps its existing policy fields (`LibraryIDs`, `MaxStreams`, `Permissions`, …) but they become **effective** values populated from the aggregate. The ~25 consumer packages (playback, catalog access filters, jellycompat, sections, audiobooks, requests, …) keep working unchanged. `Role` is replaced by `IsAdmin bool` derived from effective permissions. Assigned memberships are exposed separately (`GroupIDs`) for the admin API.
 

@@ -440,10 +440,11 @@ function GroupForm({ group, onClose }: { group: AdminGroup | null; onClose: () =
                 <Input
                   id={maxProfilesId}
                   type="number"
-                  min={1}
+                  min={0}
                   value={maxProfiles}
                   onChange={(e) => setMaxProfiles(Number(e.target.value))}
                 />
+                <p className="text-muted-foreground text-xs">0 = unlimited</p>
               </div>
               <div className="space-y-1 sm:col-span-2">
                 <Label htmlFor={maxPlaybackQualityId}>Max Playback Quality</Label>

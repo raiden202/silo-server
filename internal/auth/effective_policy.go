@@ -12,13 +12,19 @@ import (
 //
 //   - permissions: set union; "admin" implies everything
 //   - libraries:   union; any nil (= all) or admin makes it unrestricted
-//   - limits:      max across groups
+//   - limits:      0 means unlimited at enforcement, so any group with 0
+//     wins; otherwise max across groups
 //   - quality:     most permissive; "" (unrestricted) wins
 //   - booleans:    OR
 //
 // Zero groups yields the empty policy: no permissions, an empty non-nil
-// library list (access to none), zero limits, downloads denied. The quality
-// ceiling is moot at zero streams and left at the lowest concrete value.
+// library list, downloads denied. Lockout is enforced by the empty library
+// list (access to no content), which makes the stream/transcode limits
+// irrelevant; they stay at 0. MaxProfiles is the exception: 0 means
+// unlimited at the profile-creation check, which is independent of library
+// access, so it is floored at 1 to keep zero-group accounts from creating
+// profiles freely. The quality ceiling is moot with no accessible content
+// and is left at the lowest concrete value.
 func ApplyEffectivePolicy(u *models.User, groups []models.Group) {
 	u.GroupIDs = make([]int, 0, len(groups))
 	u.IsAdmin = false
@@ -29,6 +35,7 @@ func ApplyEffectivePolicy(u *models.User, groups []models.Group) {
 	u.LibraryIDs = []int{}
 
 	if len(groups) == 0 {
+		u.MaxProfiles = 1
 		return
 	}
 
@@ -48,24 +55,26 @@ func ApplyEffectivePolicy(u *models.User, groups []models.Group) {
 				libSet[id] = struct{}{}
 			}
 		}
-		if g.MaxStreams > u.MaxStreams {
-			u.MaxStreams = g.MaxStreams
-		}
-		if g.MaxTranscodes > u.MaxTranscodes {
-			u.MaxTranscodes = g.MaxTranscodes
-		}
-		if g.MaxProfiles > u.MaxProfiles {
-			u.MaxProfiles = g.MaxProfiles
-		}
 		if i == 0 {
+			u.MaxStreams = g.MaxStreams
+			u.MaxTranscodes = g.MaxTranscodes
+			u.MaxProfiles = g.MaxProfiles
 			u.MaxPlaybackQuality = g.MaxPlaybackQuality
 		} else {
+			u.MaxStreams = mergeLimit(u.MaxStreams, g.MaxStreams)
+			u.MaxTranscodes = mergeLimit(u.MaxTranscodes, g.MaxTranscodes)
+			u.MaxProfiles = mergeLimit(u.MaxProfiles, g.MaxProfiles)
 			u.MaxPlaybackQuality = access.MaxQuality(u.MaxPlaybackQuality, g.MaxPlaybackQuality)
 		}
 		u.DownloadAllowed = u.DownloadAllowed || g.DownloadAllowed
 		u.DownloadTranscodeAllowed = u.DownloadTranscodeAllowed || g.DownloadTranscodeAllowed
 	}
 
+	// Admin implies unrestricted libraries, quality, and downloads. Stream,
+	// transcode, and profile limits intentionally keep the merged group
+	// values: before groups, admins were subject to their per-user limits
+	// (default 6 streams) with no bypass, and the playback session manager
+	// still enforces whatever it is handed.
 	if _, ok := permSet[string(PermissionAdmin)]; ok {
 		u.IsAdmin = true
 		allLibraries = true
@@ -88,4 +97,17 @@ func ApplyEffectivePolicy(u *models.User, groups []models.Group) {
 		}
 		sort.Ints(u.LibraryIDs)
 	}
+}
+
+// mergeLimit folds group limits where 0 means unlimited at enforcement
+// (max_streams, max_transcodes, max_profiles), so any unlimited group wins
+// the most-permissive union; otherwise the higher cap wins.
+func mergeLimit(current, next int) int {
+	if current == 0 || next == 0 {
+		return 0
+	}
+	if next > current {
+		return next
+	}
+	return current
 }
