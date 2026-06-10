@@ -15,10 +15,10 @@ type ScopeResolver interface {
 }
 
 // NewScopeAccessFilter returns an AccessFilterResolver backed by the shared
-// access scope resolver, so account-level library restrictions
-// (users.library_ids), profile library restrictions, user-disabled
-// libraries, content-rating ceilings, and playback-quality ceilings all
-// apply to the Jellyfin-compat API exactly as they do to the native API.
+// access scope resolver, so account-level library restrictions (derived from
+// group membership), profile library restrictions, user-disabled libraries,
+// content-rating ceilings, and playback-quality ceilings all apply to the
+// Jellyfin-compat API exactly as they do to the native API.
 //
 // PIN verification is skipped because compat login already verified the
 // profile PIN (password#pin convention). Resolution failures fail closed:
