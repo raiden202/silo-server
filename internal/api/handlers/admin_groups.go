@@ -183,6 +183,8 @@ func writeGroupError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, auth.ErrGroupNotFound):
 		writeError(w, http.StatusNotFound, "not_found", "Group not found")
+	case errors.Is(err, auth.ErrUnknownUser):
+		writeError(w, http.StatusNotFound, "unknown_user", "User not found")
 	case errors.Is(err, auth.ErrBuiltInGroup):
 		writeError(w, http.StatusConflict, "built_in_group", "Built-in groups cannot be deleted")
 	case errors.Is(err, auth.ErrAdminPermRequired):
@@ -344,6 +346,11 @@ func (h *AdminGroupsHandler) HandleDelete(w http.ResponseWriter, r *http.Request
 func (h *AdminGroupsHandler) HandleListMembers(w http.ResponseWriter, r *http.Request) {
 	id, ok := parseGroupIDParam(w, r, "id")
 	if !ok {
+		return
+	}
+
+	if _, err := h.store.GetByID(r.Context(), id); err != nil {
+		writeGroupError(w, err)
 		return
 	}
 

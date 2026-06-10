@@ -22,6 +22,7 @@ var (
 	ErrAdminPermRequired = errors.New("administrators group must keep the admin permission")
 	ErrLastAdministrator = errors.New("cannot remove the last enabled administrator")
 	ErrUnknownGroup      = errors.New("unknown group")
+	ErrUnknownUser       = errors.New("unknown user")
 )
 
 // GroupRepository provides CRUD and membership operations for groups.
@@ -456,6 +457,9 @@ func (r *GroupRepository) AddMember(ctx context.Context, groupID, userID int) er
 		INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2)
 		ON CONFLICT DO NOTHING`, userID, groupID)
 	if err != nil {
+		if isForeignKeyError(err) {
+			return ErrUnknownUser
+		}
 		return fmt.Errorf("adding member: %w", err)
 	}
 	if tag.RowsAffected() > 0 {

@@ -477,3 +477,74 @@ func TestAdminGroupsRemoveMember(t *testing.T) {
 		t.Fatalf("RemoveMember(%d, %d), want (7, 12)", store.removeGroupID, store.removeUserID)
 	}
 }
+
+func TestAdminGroupsAddMemberUnknownUser(t *testing.T) {
+	store := &fakeGroupStore{addErr: auth.ErrUnknownUser}
+	rec := doGroupsRequest(t, newGroupsTestRouter(store), http.MethodPut, "/groups/7/members/999", nil)
+	assertGroupsError(t, rec, http.StatusNotFound, "unknown_user")
+}
+
+func TestAdminGroupsListMembersNotFound(t *testing.T) {
+	store := &fakeGroupStore{getErr: auth.ErrGroupNotFound}
+	rec := doGroupsRequest(t, newGroupsTestRouter(store), http.MethodGet, "/groups/999/members", nil)
+	assertGroupsError(t, rec, http.StatusNotFound, "not_found")
+}
+
+func TestAdminGroupsPatchPermissionsSemantics(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want func(t *testing.T, input *models.UpdateGroupInput)
+	}{
+		{
+			name: "explicit permissions reach store as pointer to slice",
+			body: `{"permissions":["marker_edit"]}`,
+			want: func(t *testing.T, input *models.UpdateGroupInput) {
+				if input.Permissions == nil {
+					t.Fatal("Permissions = nil, want pointer to [\"marker_edit\"]")
+				}
+				perms := *input.Permissions
+				if len(perms) != 1 || perms[0] != "marker_edit" {
+					t.Fatalf("*Permissions = %v, want [\"marker_edit\"]", perms)
+				}
+			},
+		},
+		{
+			name: "null permissions reaches store as pointer to empty slice",
+			body: `{"permissions":null}`,
+			want: func(t *testing.T, input *models.UpdateGroupInput) {
+				if input.Permissions == nil {
+					t.Fatal("Permissions = nil, want pointer to empty slice")
+				}
+				if len(*input.Permissions) != 0 {
+					t.Fatalf("*Permissions = %v, want empty slice", *input.Permissions)
+				}
+			},
+		},
+		{
+			name: "absent permissions reaches store as nil (no change)",
+			body: `{"name":"Renamed"}`,
+			want: func(t *testing.T, input *models.UpdateGroupInput) {
+				if input.Permissions != nil {
+					t.Fatalf("Permissions = %v, want nil (no change)", input.Permissions)
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &fakeGroupStore{updateGroup: testGroup()}
+			router := newGroupsTestRouter(store)
+			req := httptest.NewRequest(http.MethodPatch, "/groups/7", bytes.NewReader([]byte(tt.body)))
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200 (body %q)", rec.Code, rec.Body.String())
+			}
+			if store.updateInput == nil {
+				t.Fatal("store.Update was not called")
+			}
+			tt.want(t, store.updateInput)
+		})
+	}
+}
