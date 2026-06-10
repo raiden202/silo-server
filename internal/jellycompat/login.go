@@ -131,6 +131,9 @@ func (r *LoginResolver) Resolve(ctx context.Context, combinedUsername, password,
 		StreamAppRefreshToken: tokenPair.RefreshToken,
 		StreamAppTokenExpiry:  now.Add(time.Duration(tokenPair.ExpiresIn) * time.Second),
 		CreatedAt:             now,
+		IsAdmin:               user.IsAdmin,
+		DownloadAllowed:       user.DownloadAllowed,
+		LibraryIDs:            user.LibraryIDs,
 	}
 	if err := r.sessions.Put(session); err != nil {
 		return nil, err

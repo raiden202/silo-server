@@ -33,6 +33,14 @@ type Session struct {
 	StreamAppTokenExpiry  time.Time
 	CreatedAt             time.Time
 	ExpiresAt             time.Time
+
+	// Effective policy fields copied from models.User at session-creation time.
+	// IsAdmin: whether the user has administrator privileges.
+	// DownloadAllowed: whether the user may download media.
+	// LibraryIDs: allowed library IDs; nil means all libraries.
+	IsAdmin         bool
+	DownloadAllowed bool
+	LibraryIDs      []int
 }
 
 // SessionStore keeps compat sessions in memory.

@@ -173,6 +173,36 @@ func TestExtractToken_CaseInsensitiveAPIKey(t *testing.T) {
 	}
 }
 
+func TestUserPolicyFromEffectivePolicy(t *testing.T) {
+	u := &models.User{
+		ID: 7, Enabled: true, IsAdmin: false,
+		LibraryIDs:      []int{3, 5},
+		DownloadAllowed: false,
+	}
+	policy := buildUserPolicy(u)
+	if policy.IsAdministrator {
+		t.Error("non-admin must not be administrator")
+	}
+	if policy.EnableAllFolders {
+		t.Error("restricted user must not see all folders")
+	}
+	if policy.EnableContentDownloading {
+		t.Error("downloads disabled must map through")
+	}
+	if len(policy.EnabledFolders) != 2 {
+		t.Errorf("enabled folders = %v, want 2 entries", policy.EnabledFolders)
+	}
+
+	admin := &models.User{ID: 1, Enabled: true, IsAdmin: true, LibraryIDs: nil, DownloadAllowed: true}
+	adminPolicy := buildUserPolicy(admin)
+	if !adminPolicy.IsAdministrator || !adminPolicy.EnableAllFolders || !adminPolicy.EnableContentDownloading {
+		t.Error("admin policy must be unrestricted")
+	}
+	if len(adminPolicy.EnabledFolders) != 0 {
+		t.Errorf("unrestricted policy must not enumerate folders, got %v", adminPolicy.EnabledFolders)
+	}
+}
+
 func TestRequireAdminAPIKey_AcceptsAdminKey(t *testing.T) {
 	authn := newAdminAPIKeyAuthForTest(
 		&fakeAPIKeyValidator{key: &models.APIKey{ID: 1, UserID: 2, Key: "sa_test"}},

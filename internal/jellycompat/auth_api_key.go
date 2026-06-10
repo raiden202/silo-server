@@ -248,6 +248,9 @@ func (a *AdminAPIKeyAuthenticator) resolveSession(ctx context.Context, token str
 		PseudoUserID:    PseudoUserID(user.ID, profile.ID),
 		StreamAppUserID: user.ID,
 		CreatedAt:       a.now(),
+		IsAdmin:         user.IsAdmin,
+		DownloadAllowed: user.DownloadAllowed,
+		LibraryIDs:      user.LibraryIDs,
 	}, adminAPIKeyAuthResult{ok: true}, true
 }
 

@@ -10,6 +10,7 @@ import (
 
 	"github.com/Silo-Server/silo-server/internal/clientip"
 	"github.com/Silo-Server/silo-server/internal/config"
+	"github.com/Silo-Server/silo-server/internal/models"
 )
 
 type authenticateByNameRequest struct {
@@ -222,6 +223,15 @@ func (h *AuthHandler) HandleLogout(w http.ResponseWriter, r *http.Request) {
 func (h *AuthHandler) userDTO(session *Session) userDTOResponse {
 	name := session.Username
 
+	// Reconstruct the effective-policy view from the session's cached policy
+	// fields so buildUserPolicy can operate on a models.User without a DB round-trip.
+	u := &models.User{
+		ID:              session.StreamAppUserID,
+		IsAdmin:         session.IsAdmin,
+		DownloadAllowed: session.DownloadAllowed,
+		LibraryIDs:      session.LibraryIDs,
+	}
+
 	return userDTOResponse{
 		ID:                        session.PseudoUserID.String(),
 		Name:                      name,
@@ -229,40 +239,7 @@ func (h *AuthHandler) userDTO(session *Session) userDTOResponse {
 		HasPassword:               true,
 		HasConfiguredPassword:     true,
 		HasConfiguredEasyPassword: false,
-		Policy: userPolicyResponse{
-			IsAdministrator:                 false,
-			IsHidden:                        false,
-			EnableCollectionManagement:      false,
-			EnableSubtitleManagement:        false,
-			EnableLyricManagement:           false,
-			IsDisabled:                      false,
-			EnableUserPreferenceAccess:      true,
-			EnableRemoteControlOfOtherUsers: false,
-			EnableSharedDeviceControl:       false,
-			EnableRemoteAccess:              true,
-			EnableLiveTVManagement:          false,
-			EnableLiveTVAccess:              false,
-			EnableMediaPlayback:             true,
-			EnableAudioPlaybackTranscoding:  true,
-			EnableVideoPlaybackTranscoding:  true,
-			EnablePlaybackRemuxing:          true,
-			ForceRemoteSourceTranscoding:    false,
-			EnableContentDeletion:           false,
-			EnableContentDownloading:        true,
-			EnableSyncTranscoding:           false,
-			EnableMediaConversion:           false,
-			EnableAllDevices:                true,
-			EnableAllChannels:               false,
-			EnableAllFolders:                true,
-			InvalidLoginAttemptCount:        0,
-			LoginAttemptsBeforeLockout:      0,
-			MaxActiveSessions:               0,
-			EnablePublicSharing:             false,
-			RemoteClientBitrateLimit:        0,
-			AuthenticationProviderID:        "silo-local",
-			PasswordResetProviderID:         "silo-local",
-			SyncPlayAccess:                  "None",
-		},
+		Policy:                    buildUserPolicy(u),
 		Configuration: userConfigurationResponse{
 			PlayDefaultAudioTrack:      true,
 			DisplayMissingEpisodes:     false,
@@ -279,6 +256,53 @@ func (h *AuthHandler) userDTO(session *Session) userDTOResponse {
 			EnableNextEpisodeAutoPlay:  true,
 		},
 	}
+}
+
+// buildUserPolicy maps Silo's group-derived effective policy onto the
+// Jellyfin UserPolicy shape.
+func buildUserPolicy(u *models.User) userPolicyResponse {
+	policy := userPolicyResponse{
+		IsAdministrator:                 u.IsAdmin,
+		IsHidden:                        false,
+		EnableCollectionManagement:      false,
+		EnableSubtitleManagement:        false,
+		EnableLyricManagement:           false,
+		IsDisabled:                      false,
+		EnableUserPreferenceAccess:      true,
+		EnableRemoteControlOfOtherUsers: false,
+		EnableSharedDeviceControl:       false,
+		EnableRemoteAccess:              true,
+		EnableLiveTVManagement:          false,
+		EnableLiveTVAccess:              false,
+		EnableMediaPlayback:             true,
+		EnableAudioPlaybackTranscoding:  true,
+		EnableVideoPlaybackTranscoding:  true,
+		EnablePlaybackRemuxing:          true,
+		ForceRemoteSourceTranscoding:    false,
+		EnableContentDeletion:           false,
+		EnableContentDownloading:        u.DownloadAllowed,
+		EnableSyncTranscoding:           false,
+		EnableMediaConversion:           false,
+		EnableAllDevices:                true,
+		EnableAllChannels:               false,
+		EnableAllFolders:                u.LibraryIDs == nil,
+		InvalidLoginAttemptCount:        0,
+		LoginAttemptsBeforeLockout:      0,
+		MaxActiveSessions:               0,
+		EnablePublicSharing:             false,
+		RemoteClientBitrateLimit:        0,
+		AuthenticationProviderID:        "silo-local",
+		PasswordResetProviderID:         "silo-local",
+		SyncPlayAccess:                  "None",
+	}
+	if u.LibraryIDs != nil {
+		folders := make([]string, len(u.LibraryIDs))
+		for i, id := range u.LibraryIDs {
+			folders[i] = EncodeNumericID(EncodedIDLibrary, uint64(id)).String()
+		}
+		policy.EnabledFolders = folders
+	}
+	return policy
 }
 
 func (h *AuthHandler) sessionInfo(session *Session) *sessionInfoResponse {
