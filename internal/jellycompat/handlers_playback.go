@@ -32,6 +32,10 @@ import (
 	"github.com/Silo-Server/silo-server/internal/userstore"
 )
 
+// audioSpatialFormatNone is the Jellyfin AudioSpatialFormat value for streams
+// without spatial audio metadata.
+const audioSpatialFormatNone = "None"
+
 type playbackInfoRequest struct {
 	UserID               string          `json:"UserId"`
 	MediaSourceID        string          `json:"MediaSourceId"`
@@ -665,7 +669,7 @@ func buildMediaStreamsWithSelection(routeItemID, mediaSourceID string, version c
 			ColorSpace:             track.ColorSpace,
 			ColorTransfer:          track.ColorTransfer,
 			PixelFormat:            track.PixelFormat,
-			AudioSpatialFormat:     "None",
+			AudioSpatialFormat:     audioSpatialFormatNone,
 			AverageFrameRate:       parseCompatFrameRate(track.FrameRate),
 			RealFrameRate:          parseCompatFrameRate(track.FrameRate),
 			ReferenceFrameRate:     parseCompatFrameRate(track.FrameRate),
@@ -695,7 +699,7 @@ func buildMediaStreamsWithSelection(routeItemID, mediaSourceID string, version c
 			IsHearingImpaired:      false,
 			IsTextSubtitleStream:   false,
 			SupportsExternalStream: false,
-			AudioSpatialFormat:     "None",
+			AudioSpatialFormat:     audioSpatialFormatNone,
 			Channels:               track.Channels,
 			BitRate:                track.Bitrate,
 		})
@@ -722,7 +726,7 @@ func buildMediaStreamsWithSelection(routeItemID, mediaSourceID string, version c
 			IsHearingImpaired:      track.HearingImpaired,
 			IsTextSubtitleStream:   true,
 			SupportsExternalStream: track.External,
-			AudioSpatialFormat:     "None",
+			AudioSpatialFormat:     audioSpatialFormatNone,
 			DeliveryURL:            subtitleDeliveryURL(routeItemID, mediaSourceID, streamIndex, format, compatToken, playSessionID),
 			DeliveryMethod:         subtitleDeliveryMethod(track.External),
 			Path:                   subtitlePath(track, routeItemID, mediaSourceID, streamIndex, format),

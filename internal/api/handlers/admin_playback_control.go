@@ -111,7 +111,7 @@ func (h *AdminPlaybackControlHandler) HandleMessageSession(w http.ResponseWriter
 		return
 	}
 	command.Reason = req.Reason
-	command.IssuedBy = &playback.CommandIssuedBy{Kind: "admin"}
+	command.IssuedBy = &playback.CommandIssuedBy{Kind: playback.IssuedByKindAdmin}
 
 	result := h.playback.CommandDispatcher.DispatchToSession(command, 0, nil)
 	if result.DispatchErr != nil {
@@ -173,7 +173,7 @@ func (h *AdminPlaybackControlHandler) handleSessionCommand(w http.ResponseWriter
 		return
 	}
 	command.Reason = req.Reason
-	command.IssuedBy = &playback.CommandIssuedBy{Kind: "admin"}
+	command.IssuedBy = &playback.CommandIssuedBy{Kind: playback.IssuedByKindAdmin}
 	deadline := boundedPlaybackControlDeadline(req.DeadlineMS)
 	command.DeadlineMS = int(deadline / time.Millisecond)
 

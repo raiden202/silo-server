@@ -35,14 +35,22 @@ type SettingsGetter interface {
 	Get(ctx context.Context, key string) (string, error)
 }
 
+// Legacy role strings exposed in API response bodies. Presentation-only;
+// intentionally distinct from Permission values even though "admin" overlaps
+// textually.
+const (
+	roleAdmin = "admin"
+	roleUser  = "user"
+)
+
 // RoleForUser derives the legacy role string exposed in API response bodies
 // from the user's group-derived admin flag. It is never used for
 // authorization decisions and is no longer carried in JWT claims.
 func RoleForUser(u *models.User) string {
 	if u != nil && u.IsAdmin {
-		return "admin"
+		return roleAdmin
 	}
-	return "user"
+	return roleUser
 }
 
 // groupResolverFor returns the user repository's group repository as a

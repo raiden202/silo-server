@@ -388,6 +388,9 @@ type CommandIssuedBy struct {
 	Kind string `json:"kind"`
 }
 
+// IssuedByKindAdmin marks commands issued by an administrator action.
+const IssuedByKindAdmin = "admin"
+
 // NewCommandEnvelope creates a validated command envelope.
 func NewCommandEnvelope(sessionID, commandID string, name CommandName, payload json.RawMessage) (CommandEnvelope, error) {
 	normalizedPayload, err := normalizeJSONPayload(payload)

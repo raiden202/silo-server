@@ -118,7 +118,7 @@ func (h *ServerControlHandler) notifyPlaybackSessions(req serverRestartRequest) 
 		if command.Reason == "" {
 			command.Reason = "server_restart_requested"
 		}
-		command.IssuedBy = &playback.CommandIssuedBy{Kind: "admin"}
+		command.IssuedBy = &playback.CommandIssuedBy{Kind: playback.IssuedByKindAdmin}
 		return command, 0, nil, nil
 	})
 
