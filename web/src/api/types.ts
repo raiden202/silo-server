@@ -2105,24 +2105,6 @@ export interface CreateUserRequest {
   default_profile_name?: string;
   /** Group memberships to assign. Omitted = configured default groups. */
   group_ids?: number[];
-  /** @deprecated removed by group-based permissions; cleaned up in users-page rework */
-  role?: string;
-  /** @deprecated removed by group-based permissions; cleaned up in users-page rework */
-  permissions?: string[];
-  /** @deprecated removed by group-based permissions; cleaned up in users-page rework */
-  library_ids?: number[] | null;
-  /** @deprecated removed by group-based permissions; cleaned up in users-page rework */
-  max_playback_quality?: string;
-  /** @deprecated removed by group-based permissions; cleaned up in users-page rework */
-  max_streams?: number;
-  /** @deprecated removed by group-based permissions; cleaned up in users-page rework */
-  max_transcodes?: number;
-  /** @deprecated removed by group-based permissions; cleaned up in users-page rework */
-  max_profiles?: number;
-  /** @deprecated removed by group-based permissions; cleaned up in users-page rework */
-  download_allowed?: boolean;
-  /** @deprecated removed by group-based permissions; cleaned up in users-page rework */
-  download_transcode_allowed?: boolean;
 }
 
 export interface UpdateUserRequest {
@@ -2132,24 +2114,6 @@ export interface UpdateUserRequest {
   enabled?: boolean;
   /** Replaces the user's group memberships. Omitted = unchanged. */
   group_ids?: number[];
-  /** @deprecated removed by group-based permissions; cleaned up in users-page rework */
-  role?: string;
-  /** @deprecated removed by group-based permissions; cleaned up in users-page rework */
-  permissions?: string[];
-  /** @deprecated removed by group-based permissions; cleaned up in users-page rework */
-  library_ids?: number[] | null;
-  /** @deprecated removed by group-based permissions; cleaned up in users-page rework */
-  max_playback_quality?: string;
-  /** @deprecated removed by group-based permissions; cleaned up in users-page rework */
-  max_streams?: number;
-  /** @deprecated removed by group-based permissions; cleaned up in users-page rework */
-  max_transcodes?: number;
-  /** @deprecated removed by group-based permissions; cleaned up in users-page rework */
-  max_profiles?: number;
-  /** @deprecated removed by group-based permissions; cleaned up in users-page rework */
-  download_allowed?: boolean;
-  /** @deprecated removed by group-based permissions; cleaned up in users-page rework */
-  download_transcode_allowed?: boolean;
 }
 
 export interface AdminStats {

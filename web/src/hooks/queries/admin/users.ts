@@ -73,6 +73,8 @@ export function useCreateUser() {
     onSuccess: () => {
       toast.success("User created");
       queryClient.invalidateQueries({ queryKey: adminKeys.users() });
+      // Membership changes alter group member counts.
+      queryClient.invalidateQueries({ queryKey: adminKeys.groups() });
     },
     onError: (err) => {
       toast.error(err instanceof Error ? err.message : "Failed to save");
@@ -93,6 +95,8 @@ export function useUpdateUser() {
       queryClient.invalidateQueries({ queryKey: adminKeys.users() });
       queryClient.invalidateQueries({ queryKey: adminKeys.userDetail(variables.id) });
       queryClient.invalidateQueries({ queryKey: adminKeys.userProfiles(variables.id) });
+      // group_ids changes alter group member counts.
+      queryClient.invalidateQueries({ queryKey: adminKeys.groups() });
     },
     onError: (err) => {
       toast.error(err instanceof Error ? err.message : "Failed to save");
@@ -107,6 +111,8 @@ export function useDeleteUser() {
     onSuccess: () => {
       toast.success("User deleted");
       queryClient.invalidateQueries({ queryKey: adminKeys.users() });
+      // Deleting a user removes their group memberships.
+      queryClient.invalidateQueries({ queryKey: adminKeys.groups() });
     },
     onError: (err) => {
       toast.error(err instanceof Error ? err.message : "Failed to delete");

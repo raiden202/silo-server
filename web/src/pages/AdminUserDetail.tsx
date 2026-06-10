@@ -1,10 +1,8 @@
-import { useId, useMemo, useState } from "react";
-import type { FormEvent } from "react";
+import { useMemo, useState } from "react";
 import { useParams, Link } from "react-router";
 import {
   type AdminDeviceSetting,
   useAdminUser,
-  useUpdateUser,
   useDeleteUser,
   useImpersonateUser,
   useAdminUserDeviceSettings,
@@ -17,21 +15,13 @@ import {
 } from "@/hooks/queries/admin/users";
 import { useAdminUserProfiles } from "@/hooks/queries/admin/history";
 import { useAdminPlaybackHistory } from "@/hooks/queries/admin/history";
-import { useAdminLibraries } from "@/hooks/queries/admin/libraries";
 import { useUserIPs } from "@/hooks/queries/admin/ips";
-import type {
-  AdminSettingEntry,
-  AdminUser,
-  AdminUserProfile,
-  UpdateUserRequest,
-  UserIPEntry,
-} from "@/api/types";
+import type { AdminSettingEntry, AdminUser, AdminUserProfile, UserIPEntry } from "@/api/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { LibraryAccessSelector } from "@/components/LibraryAccessSelector";
+import { AdminUserForm } from "@/components/admin/AdminUserForm";
+import { EffectiveAccessSummary } from "@/components/admin/EffectiveAccessSummary";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
   Table,
@@ -48,30 +38,10 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { ArrowUpRight, ChevronRight, Pencil, RotateCcw, Settings2, UserCircle } from "lucide-react";
 import { useNavigate } from "react-router";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useAuth } from "@/hooks/useAuth";
-import {
-  PLAYBACK_QUALITY_OPTIONS,
-  formatPlaybackQualityPreset,
-  playbackQualityPresetFromValue,
-  playbackQualityValueFromPreset,
-  type PlaybackQualityPreset,
-} from "@/lib/playback-quality";
-import {
-  PERMISSION_MARKER_EDIT,
-  PERMISSION_METADATA_CURATION,
-  hasAssignedPermission,
-  setAssignedPermission,
-} from "@/lib/permissions";
 import { RegistrySettingControl } from "@/components/settings/RegistrySettingControl";
 import { formatSettingValue, getSettingDefinition } from "@/lib/settingsManifest";
 import {
@@ -156,7 +126,7 @@ export default function AdminUserDetail() {
               <DialogHeader>
                 <DialogTitle>Edit User</DialogTitle>
               </DialogHeader>
-              <EditUserForm user={user} onClose={() => setEditOpen(false)} />
+              <AdminUserForm user={user} onClose={() => setEditOpen(false)} />
             </DialogContent>
           </Dialog>
           <Button
@@ -245,20 +215,6 @@ export default function AdminUserDetail() {
 }
 
 function OverviewTab({ user }: { user: AdminUser }) {
-  const { data: libraries = [] } = useAdminLibraries();
-
-  const libraryNames =
-    user.library_ids === null
-      ? "All libraries"
-      : user.library_ids.length === 0
-        ? "None"
-        : user.library_ids
-            .map((id) => {
-              const lib = libraries.find((l) => l.id === id);
-              return lib ? lib.name : `#${id}`;
-            })
-            .join(", ");
-
   return (
     <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
       <div className="surface-panel overflow-hidden rounded-2xl border-0">
@@ -270,6 +226,20 @@ function OverviewTab({ user }: { user: AdminUser }) {
           <DetailRow label="Email" value={user.email} />
           <DetailRow label="Role" value={user.role} />
           <DetailRow label="Status" value={user.enabled ? "Active" : "Disabled"} />
+          <div className="flex items-center justify-between gap-4 px-4 py-2.5">
+            <span className="text-muted-foreground text-sm">Groups</span>
+            {user.groups.length === 0 ? (
+              <span className="text-muted-foreground text-sm">None</span>
+            ) : (
+              <div className="flex flex-wrap justify-end gap-1">
+                {user.groups.map((group) => (
+                  <Badge key={group.id} variant="outline">
+                    {group.name}
+                  </Badge>
+                ))}
+              </div>
+            )}
+          </div>
           <DetailRow label="Created" value={formatDate(user.created_at)} />
           <DetailRow label="Updated" value={formatDate(user.updated_at)} />
         </div>
@@ -277,45 +247,9 @@ function OverviewTab({ user }: { user: AdminUser }) {
 
       <div className="surface-panel overflow-hidden rounded-2xl border-0">
         <div className="border-border border-b px-4 py-3">
-          <h3 className="text-sm font-medium">Permissions & Limits</h3>
+          <h3 className="text-sm font-medium">Effective Access</h3>
         </div>
-        <div className="divide-border divide-y">
-          <DetailRow label="Library Access" value={libraryNames} />
-          <DetailRow
-            label="Marker Editing"
-            value={
-              hasAssignedPermission(user.permissions, PERMISSION_MARKER_EDIT)
-                ? "Allowed"
-                : "Not allowed"
-            }
-          />
-          <DetailRow
-            label="Metadata Curation"
-            value={
-              hasAssignedPermission(user.permissions, PERMISSION_METADATA_CURATION)
-                ? "Allowed"
-                : "Not allowed"
-            }
-          />
-          <DetailRow
-            label="Max Playback Quality"
-            value={formatPlaybackQualityPreset(user.max_playback_quality)}
-          />
-          <DetailRow
-            label="Max Streams"
-            value={user.max_streams === 0 ? "Unlimited" : String(user.max_streams)}
-          />
-          <DetailRow
-            label="Max Transcodes"
-            value={user.max_transcodes === 0 ? "Unlimited" : String(user.max_transcodes)}
-          />
-          <DetailRow label="Max Profiles" value={String(user.max_profiles)} />
-          <DetailRow label="Downloads" value={user.download_allowed ? "Allowed" : "Not allowed"} />
-          <DetailRow
-            label="Download Transcode"
-            value={user.download_transcode_allowed ? "Allowed" : "Not allowed"}
-          />
-        </div>
+        <EffectiveAccessSummary user={user} />
       </div>
     </div>
   );
@@ -890,242 +824,6 @@ function DeviceOverridesTab({ userId }: { userId: number }) {
         </div>
       )}
     </div>
-  );
-}
-
-function EditUserForm({ user, onClose }: { user: AdminUser; onClose: () => void }) {
-  const { data: libraries = [] } = useAdminLibraries();
-  const [username, setUsername] = useState(user.username);
-  const [email, setEmail] = useState(user.email);
-  const [password, setPassword] = useState("");
-  const [role, setRole] = useState(user.role);
-  const [enabled, setEnabled] = useState(user.enabled);
-  const [permissions, setPermissions] = useState<string[]>(user.permissions ?? []);
-  const [libraryIDs, setLibraryIDs] = useState<number[] | null>(user.library_ids);
-  const [maxStreams, setMaxStreams] = useState(user.max_streams);
-  const [maxTranscodes, setMaxTranscodes] = useState(user.max_transcodes);
-  const [maxProfiles, setMaxProfiles] = useState(user.max_profiles);
-  const [maxPlaybackQualityPreset, setMaxPlaybackQualityPreset] = useState<PlaybackQualityPreset>(
-    playbackQualityPresetFromValue(user.max_playback_quality),
-  );
-  const [downloadAllowed, setDownloadAllowed] = useState(user.download_allowed);
-  const [downloadTranscodeAllowed, setDownloadTranscodeAllowed] = useState(
-    user.download_transcode_allowed,
-  );
-  const markerEditId = useId();
-  const metadataCurationId = useId();
-  const updateMutation = useUpdateUser();
-
-  function handleSubmit(e: FormEvent) {
-    e.preventDefault();
-    const body: UpdateUserRequest = {
-      username,
-      email,
-      role,
-      permissions,
-      enabled,
-      library_ids: libraryIDs,
-      max_streams: maxStreams,
-      max_transcodes: maxTranscodes,
-      max_profiles: maxProfiles,
-      max_playback_quality: playbackQualityValueFromPreset(maxPlaybackQualityPreset),
-      download_allowed: downloadAllowed,
-      download_transcode_allowed: downloadTranscodeAllowed,
-    };
-    if (password) body.password = password;
-    updateMutation.mutate({ id: user.id, body }, { onSuccess: onClose });
-  }
-
-  return (
-    <form onSubmit={handleSubmit} className="flex max-h-[70vh] flex-col">
-      <Tabs defaultValue="account" className="min-h-0 flex-1">
-        <TabsList variant="line" className="border-border mb-4 w-full justify-start border-b pb-1">
-          <TabsTrigger value="account" className="flex-none px-1">
-            Account
-          </TabsTrigger>
-          <TabsTrigger value="access" className="flex-none px-1">
-            Access
-          </TabsTrigger>
-          <TabsTrigger value="limits" className="flex-none px-1">
-            Limits
-          </TabsTrigger>
-        </TabsList>
-
-        <div className="min-h-0 flex-1 overflow-y-auto pr-1">
-          <TabsContent value="account" className="mt-0 space-y-4">
-            <div className="grid gap-3 sm:grid-cols-2">
-              <div className="space-y-2">
-                <Label>Username</Label>
-                <Input value={username} onChange={(e) => setUsername(e.target.value)} required />
-              </div>
-              <div className="space-y-2">
-                <Label>Email</Label>
-                <Input
-                  type="email"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  required
-                />
-              </div>
-              <div className="space-y-2">
-                <Label>Password (leave blank to keep current)</Label>
-                <Input
-                  type="password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                />
-              </div>
-              <div className="space-y-2">
-                <Label>Role</Label>
-                <Select value={role} onValueChange={setRole}>
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="user">User</SelectItem>
-                    <SelectItem value="admin">Admin</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-            </div>
-            <div className="border-border flex items-center justify-between rounded-md border px-3 py-2">
-              <div>
-                <div className="text-sm font-medium">Account status</div>
-                <div className="text-muted-foreground text-xs">
-                  Disable access without deleting the user.
-                </div>
-              </div>
-              <div className="flex items-center gap-2">
-                <Label className="text-xs">Enabled</Label>
-                <Switch checked={enabled} onCheckedChange={setEnabled} />
-              </div>
-            </div>
-          </TabsContent>
-
-          <TabsContent value="access" className="mt-0 space-y-4">
-            <LibraryAccessSelector
-              libraries={libraries}
-              value={libraryIDs}
-              onChange={setLibraryIDs}
-            />
-            <div className="border-border flex items-center justify-between rounded-md border px-3 py-2">
-              <div>
-                <Label htmlFor={markerEditId}>Marker Editing</Label>
-                <p className="text-muted-foreground text-xs">
-                  Edit intro, recap, credits, and preview markers within assigned libraries.
-                </p>
-              </div>
-              <Switch
-                id={markerEditId}
-                checked={hasAssignedPermission(permissions, PERMISSION_MARKER_EDIT)}
-                onCheckedChange={(checked) =>
-                  setPermissions((current) =>
-                    setAssignedPermission(current, PERMISSION_MARKER_EDIT, checked),
-                  )
-                }
-              />
-            </div>
-            <div className="border-border flex items-center justify-between rounded-md border px-3 py-2">
-              <div>
-                <Label htmlFor={metadataCurationId}>Metadata Curation</Label>
-                <p className="text-muted-foreground text-xs">
-                  Edit, refresh, and rematch metadata within assigned libraries.
-                </p>
-              </div>
-              <Switch
-                id={metadataCurationId}
-                checked={hasAssignedPermission(permissions, PERMISSION_METADATA_CURATION)}
-                onCheckedChange={(checked) =>
-                  setPermissions((current) =>
-                    setAssignedPermission(current, PERMISSION_METADATA_CURATION, checked),
-                  )
-                }
-              />
-            </div>
-            <div className="grid gap-2 sm:grid-cols-2">
-              <div className="border-border flex items-center justify-between rounded-md border px-3 py-2">
-                <Label>Downloads Allowed</Label>
-                <Switch checked={downloadAllowed} onCheckedChange={setDownloadAllowed} />
-              </div>
-              <div className="border-border flex items-center justify-between rounded-md border px-3 py-2">
-                <Label>Download Transcode Allowed</Label>
-                <Switch
-                  checked={downloadTranscodeAllowed}
-                  onCheckedChange={setDownloadTranscodeAllowed}
-                />
-              </div>
-            </div>
-          </TabsContent>
-
-          <TabsContent value="limits" className="mt-0 space-y-4">
-            <div className="grid gap-3 sm:grid-cols-2">
-              <div className="space-y-1">
-                <Label>Max Streams</Label>
-                <Input
-                  type="number"
-                  min={0}
-                  value={maxStreams}
-                  onChange={(e) => setMaxStreams(Number(e.target.value))}
-                />
-                <p className="text-muted-foreground text-xs">0 = unlimited</p>
-              </div>
-              <div className="space-y-1">
-                <Label>Max Transcodes</Label>
-                <Input
-                  type="number"
-                  min={0}
-                  value={maxTranscodes}
-                  onChange={(e) => setMaxTranscodes(Number(e.target.value))}
-                />
-                <p className="text-muted-foreground text-xs">0 = unlimited</p>
-              </div>
-              <div className="space-y-1">
-                <Label>Max Profiles</Label>
-                <Input
-                  type="number"
-                  min={1}
-                  value={maxProfiles}
-                  onChange={(e) => setMaxProfiles(Number(e.target.value))}
-                />
-              </div>
-              <div className="space-y-1 sm:col-span-2">
-                <Label>Max Playback Quality</Label>
-                <Select
-                  value={maxPlaybackQualityPreset}
-                  onValueChange={(value) =>
-                    setMaxPlaybackQualityPreset(value as PlaybackQualityPreset)
-                  }
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {PLAYBACK_QUALITY_OPTIONS.map((option) => (
-                      <SelectItem key={option.value} value={option.value}>
-                        {option.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <p className="text-muted-foreground text-xs">
-                  {
-                    PLAYBACK_QUALITY_OPTIONS.find(
-                      (option) => option.value === maxPlaybackQualityPreset,
-                    )?.description
-                  }
-                </p>
-              </div>
-            </div>
-          </TabsContent>
-        </div>
-      </Tabs>
-
-      <div className="border-border mt-4 border-t pt-4">
-        <Button type="submit" className="w-full" disabled={updateMutation.isPending}>
-          {updateMutation.isPending ? "Saving..." : "Save"}
-        </Button>
-      </div>
-    </form>
   );
 }
 

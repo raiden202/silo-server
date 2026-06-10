@@ -4,6 +4,16 @@ export const PERMISSION_ADMIN = "admin";
 export const PERMISSION_METADATA_CURATION = "metadata_curation";
 export const PERMISSION_MARKER_EDIT = "marker_edit";
 
+const PERMISSION_LABELS: Record<string, string> = {
+  [PERMISSION_ADMIN]: "Administrator",
+  [PERMISSION_MARKER_EDIT]: "Marker Editing",
+  [PERMISSION_METADATA_CURATION]: "Metadata Curation",
+};
+
+export function permissionLabel(permission: string) {
+  return PERMISSION_LABELS[permission] ?? permission;
+}
+
 export function hasPermission(
   user: Pick<User, "role" | "permissions"> | null | undefined,
   permission: string,

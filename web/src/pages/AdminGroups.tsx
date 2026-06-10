@@ -57,6 +57,7 @@ import {
   PERMISSION_MARKER_EDIT,
   PERMISSION_METADATA_CURATION,
   hasAssignedPermission,
+  permissionLabel,
   setAssignedPermission,
 } from "@/lib/permissions";
 
@@ -66,24 +67,20 @@ const MEMBERS_PAGE_SIZE = 50;
 const PERMISSION_OPTIONS: Array<{ id: string; label: string; description: string }> = [
   {
     id: PERMISSION_ADMIN,
-    label: "Administrator",
+    label: permissionLabel(PERMISSION_ADMIN),
     description: "Full access to all features and settings.",
   },
   {
     id: PERMISSION_MARKER_EDIT,
-    label: "Marker Editing",
+    label: permissionLabel(PERMISSION_MARKER_EDIT),
     description: "Edit intro, recap, credits, and preview markers within assigned libraries.",
   },
   {
     id: PERMISSION_METADATA_CURATION,
-    label: "Metadata Curation",
+    label: permissionLabel(PERMISSION_METADATA_CURATION),
     description: "Edit, refresh, and rematch metadata within assigned libraries.",
   },
 ];
-
-function permissionLabel(permission: string) {
-  return PERMISSION_OPTIONS.find((option) => option.id === permission)?.label ?? permission;
-}
 
 export default function AdminGroups() {
   const { data: groups = [], isLoading } = useAdminGroups();
