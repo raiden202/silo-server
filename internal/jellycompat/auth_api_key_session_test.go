@@ -315,8 +315,9 @@ func TestValidatePseudoUser(t *testing.T) {
 }
 
 func TestHandleUsers_ReturnsCallerAsSingleElement(t *testing.T) {
-	h := NewAuthHandler(&config.Config{}, nil, nil)
-	session := &Session{PseudoUserID: PseudoUserID(2, "p1"), Username: "admin"}
+	h := NewAuthHandler(&config.Config{}, nil, nil,
+		&fakeAPIKeyUserLoader{user: &models.User{ID: 2, Username: "admin", IsAdmin: true, Enabled: true}})
+	session := &Session{PseudoUserID: PseudoUserID(2, "p1"), StreamAppUserID: 2, Username: "admin"}
 
 	req := httptest.NewRequest(http.MethodGet, "/Users", nil)
 	req = req.WithContext(context.WithValue(req.Context(), compatSessionKey, session))
@@ -342,7 +343,7 @@ func TestHandleUsers_ReturnsCallerAsSingleElement(t *testing.T) {
 }
 
 func TestHandleUsers_RequiresSession(t *testing.T) {
-	h := NewAuthHandler(&config.Config{}, nil, nil)
+	h := NewAuthHandler(&config.Config{}, nil, nil, nil)
 	rec := httptest.NewRecorder()
 	h.HandleUsers(rec, httptest.NewRequest(http.MethodGet, "/Users", nil))
 	if rec.Code != http.StatusUnauthorized {

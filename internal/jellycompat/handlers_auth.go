@@ -3,6 +3,9 @@ package jellycompat
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -119,14 +122,17 @@ type AuthHandler struct {
 	cfg           *config.Config
 	loginResolver loginResolver
 	authenticator *Authenticator
+	users         userLoader
 }
 
-// NewAuthHandler creates a new auth handler.
-func NewAuthHandler(cfg *config.Config, loginResolver loginResolver, authenticator *Authenticator) *AuthHandler {
+// NewAuthHandler creates a new auth handler. users supplies the freshly
+// loaded effective policy for user DTOs; user routes fail when it is absent.
+func NewAuthHandler(cfg *config.Config, loginResolver loginResolver, authenticator *Authenticator, users userLoader) *AuthHandler {
 	return &AuthHandler{
 		cfg:           cfg,
 		loginResolver: loginResolver,
 		authenticator: authenticator,
+		users:         users,
 	}
 }
 
@@ -159,10 +165,17 @@ func (h *AuthHandler) HandleAuthenticateByName(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	dto, err := h.userDTO(r.Context(), session)
+	if err != nil {
+		slog.Error("jellycompat login user dto failed", "user_id", session.StreamAppUserID, "error", err)
+		writeError(w, http.StatusInternalServerError, "ServerError", "Failed to load user")
+		return
+	}
+
 	writeJSON(w, http.StatusOK, authenticateByNameResponse{
 		AccessToken: session.Token,
 		ServerID:    h.cfg.JellyfinCompat.ServerID,
-		User:        h.userDTO(session),
+		User:        dto,
 		SessionInfo: h.sessionInfo(session),
 	})
 }
@@ -174,7 +187,13 @@ func (h *AuthHandler) HandleCurrentUser(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusUnauthorized, "Unauthorized", "Missing authentication token")
 		return
 	}
-	writeJSON(w, http.StatusOK, h.userDTO(session))
+	dto, err := h.userDTO(r.Context(), session)
+	if err != nil {
+		slog.Error("jellycompat current user dto failed", "user_id", session.StreamAppUserID, "error", err)
+		writeError(w, http.StatusInternalServerError, "ServerError", "Failed to load user")
+		return
+	}
+	writeJSON(w, http.StatusOK, dto)
 }
 
 // HandleUsers serves GET /Users.
@@ -191,7 +210,13 @@ func (h *AuthHandler) HandleUsers(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "Unauthorized", "Missing authentication token")
 		return
 	}
-	writeJSON(w, http.StatusOK, []userDTOResponse{h.userDTO(session)})
+	dto, err := h.userDTO(r.Context(), session)
+	if err != nil {
+		slog.Error("jellycompat users list dto failed", "user_id", session.StreamAppUserID, "error", err)
+		writeError(w, http.StatusInternalServerError, "ServerError", "Failed to load user")
+		return
+	}
+	writeJSON(w, http.StatusOK, []userDTOResponse{dto})
 }
 
 // HandleUserByID serves GET /Users/{id}.
@@ -206,7 +231,13 @@ func (h *AuthHandler) HandleUserByID(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "NotFound", "User not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, h.userDTO(session))
+	dto, err := h.userDTO(r.Context(), session)
+	if err != nil {
+		slog.Error("jellycompat user by id dto failed", "user_id", session.StreamAppUserID, "error", err)
+		writeError(w, http.StatusInternalServerError, "ServerError", "Failed to load user")
+		return
+	}
+	writeJSON(w, http.StatusOK, dto)
 }
 
 // HandleLogout serves POST /Sessions/Logout.
@@ -220,26 +251,33 @@ func (h *AuthHandler) HandleLogout(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (h *AuthHandler) userDTO(session *Session) userDTOResponse {
-	name := session.Username
-
-	// Reconstruct the effective-policy view from the session's cached policy
-	// fields so buildUserPolicy can operate on a models.User without a DB round-trip.
-	u := &models.User{
-		ID:              session.StreamAppUserID,
-		IsAdmin:         session.IsAdmin,
-		DownloadAllowed: session.DownloadAllowed,
-		LibraryIDs:      session.LibraryIDs,
+// userDTO builds the Jellyfin user DTO for a compat session. The user is
+// loaded fresh on every call so the policy always reflects the current
+// group-derived effective policy: compat sessions are long-lived (and
+// persisted without policy), so anything cached at login would go stale the
+// moment group membership changes. Callers must fail the request on error
+// rather than fall back to permissive defaults. These are cold paths (login,
+// /Users/Me, /Users listings), so the extra query is fine.
+func (h *AuthHandler) userDTO(ctx context.Context, session *Session) (userDTOResponse, error) {
+	if h.users == nil {
+		return userDTOResponse{}, errors.New("user loader not configured")
+	}
+	user, err := h.users.GetByID(ctx, session.StreamAppUserID)
+	if err != nil {
+		return userDTOResponse{}, fmt.Errorf("load user %d: %w", session.StreamAppUserID, err)
+	}
+	if user == nil {
+		return userDTOResponse{}, fmt.Errorf("user %d not found", session.StreamAppUserID)
 	}
 
 	return userDTOResponse{
 		ID:                        session.PseudoUserID.String(),
-		Name:                      name,
+		Name:                      session.Username,
 		ServerID:                  h.cfg.JellyfinCompat.ServerID,
 		HasPassword:               true,
 		HasConfiguredPassword:     true,
 		HasConfiguredEasyPassword: false,
-		Policy:                    buildUserPolicy(u),
+		Policy:                    buildUserPolicy(user),
 		Configuration: userConfigurationResponse{
 			PlayDefaultAudioTrack:      true,
 			DisplayMissingEpisodes:     false,
@@ -255,7 +293,7 @@ func (h *AuthHandler) userDTO(session *Session) userDTOResponse {
 			RememberSubtitleSelections: true,
 			EnableNextEpisodeAutoPlay:  true,
 		},
-	}
+	}, nil
 }
 
 // buildUserPolicy maps Silo's group-derived effective policy onto the

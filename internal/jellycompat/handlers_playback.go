@@ -119,6 +119,7 @@ type PlaybackHandler struct {
 	sessionMgr              SessionManagerInterface
 	fileResolver            FilePathResolver
 	storeProvider           userstore.UserStoreProvider
+	users                   userLoader // fresh effective-policy loads for download enforcement
 	NodePlanner             nodepool.SessionPlanner
 	JWTSecret               string
 	profileStaler           profileStaler

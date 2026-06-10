@@ -66,7 +66,7 @@ func NewRouter(deps Dependencies) chi.Router {
 	if err != nil {
 		slog.Error("jellycompat web bundle unavailable", "error", err)
 	}
-	authHandler := NewAuthHandler(deps.Config, deps.LoginResolver, deps.Authenticator)
+	authHandler := NewAuthHandler(deps.Config, deps.LoginResolver, deps.Authenticator, deps.UserLoader)
 	nextUpRepo := catalog.NewNextUpRepository(deps.DB, deps.UserStoreProvider)
 	var subtitleRepo subtitles.Repository
 	if deps.SubtitleRepo != nil {
@@ -82,7 +82,7 @@ func NewRouter(deps Dependencies) chi.Router {
 	itemsHandler.posterPresigner = deps.PosterPresigner
 	itemsHandler.presignTTL = deps.PresignTTL
 	autoscanHandler := NewAutoscanHandler(deps.FolderRepo, deps.ScanQueue, deps.IDCodec, itemsHandler)
-	adminAPIKeyAuth := NewAdminAPIKeyAuthenticator(deps.APIKeyValidator, deps.APIKeyUserLoader, deps.UserStoreProvider, deps.Now)
+	adminAPIKeyAuth := NewAdminAPIKeyAuthenticator(deps.APIKeyValidator, deps.UserLoader, deps.UserStoreProvider, deps.Now)
 	autoscanVirtualFoldersRegistered := false
 	if deps.Authenticator != nil && adminAPIKeyAuth != nil && autoscanHandler != nil {
 		r.With(RequireSessionOrAdminAPIKey(deps.Authenticator, adminAPIKeyAuth)).
@@ -93,6 +93,7 @@ func NewRouter(deps Dependencies) chi.Router {
 	}
 	userDataHandler := NewUserDataHandler(deps.ContentService, deps.UserDataService, deps.IDCodec, deps.Config)
 	playbackHandler := NewPlaybackHandler(deps.Config, deps.ContentService, deps.IDCodec, deps.DeviceProfiles, deps.PlaybackStore, deps.SessionMgr, deps.FileResolver, deps.UserStoreProvider)
+	playbackHandler.users = deps.UserLoader
 	if deps.DB != nil {
 		playbackHandler.profileStaler = recommendations.NewRepo(deps.DB)
 	}

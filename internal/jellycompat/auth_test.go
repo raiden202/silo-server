@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
 	"time"
 
@@ -189,8 +190,16 @@ func TestUserPolicyFromEffectivePolicy(t *testing.T) {
 	if policy.EnableContentDownloading {
 		t.Error("downloads disabled must map through")
 	}
-	if len(policy.EnabledFolders) != 2 {
-		t.Errorf("enabled folders = %v, want 2 entries", policy.EnabledFolders)
+	// Pin the Jellyfin folder GUID encoding: EncodeNumericID packs the
+	// EncodedIDLibrary type byte (0x01) into byte 0 and the library ID
+	// big-endian into bytes 8-15. Clients persist these GUIDs, so the
+	// encoding must stay stable.
+	wantFolders := []string{
+		"01000000-0000-0000-0000-000000000003",
+		"01000000-0000-0000-0000-000000000005",
+	}
+	if !slices.Equal(policy.EnabledFolders, wantFolders) {
+		t.Errorf("enabled folders = %v, want %v", policy.EnabledFolders, wantFolders)
 	}
 
 	admin := &models.User{ID: 1, Enabled: true, IsAdmin: true, LibraryIDs: nil, DownloadAllowed: true}
@@ -296,7 +305,7 @@ func TestRequireAdminAPIKey_LastUsedUpdateHasDeadline(t *testing.T) {
 
 // newAdminAPIKeyAuthForTest builds an authenticator without a UserStoreProvider,
 // exercising the admin-bool path only (no session synthesis).
-func newAdminAPIKeyAuthForTest(keys apiKeyValidator, users apiKeyUserLoader) *AdminAPIKeyAuthenticator {
+func newAdminAPIKeyAuthForTest(keys apiKeyValidator, users userLoader) *AdminAPIKeyAuthenticator {
 	return NewAdminAPIKeyAuthenticator(keys, users, nil, nil)
 }
 

@@ -45,9 +45,11 @@ type Dependencies struct {
 	AuthService     *auth.Service
 
 	// Autoscan / admin compatibility support.
-	APIKeyValidator  apiKeyValidator
-	APIKeyUserLoader apiKeyUserLoader
-	ScanQueue        scantrigger.Queuer
+	APIKeyValidator apiKeyValidator
+	// UserLoader loads users with their effective policy hydrated. Required
+	// for API-key auth, user DTO policy, and download permission enforcement.
+	UserLoader userLoader
+	ScanQueue  scantrigger.Queuer
 
 	// Catalog repos (for ContentService construction)
 	BrowseRepo     *catalog.BrowseRepository

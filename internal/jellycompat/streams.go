@@ -122,10 +122,29 @@ func (h *PlaybackHandler) HandleVideoStream(w http.ResponseWriter, r *http.Reque
 // load-bearing for Infuse: it refuses Direct Play (Static=true streaming)
 // for items it believes it cannot download, so the flag must stay true and
 // this route must exist.
+//
+// The requesting user's group-derived DownloadAllowed policy is enforced
+// here from a fresh user load (never a session-cached value), failing closed
+// on any load error. For allowed users the route behavior is unchanged.
 func (h *PlaybackHandler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 	session := SessionFromContext(r.Context())
 	if session == nil {
 		writeError(w, http.StatusUnauthorized, "Unauthorized", "Missing authentication token")
+		return
+	}
+
+	if h.users == nil {
+		writeError(w, http.StatusInternalServerError, "ServerError", "User loader not available")
+		return
+	}
+	user, err := h.users.GetByID(r.Context(), session.StreamAppUserID)
+	if err != nil || user == nil {
+		slog.Error("jellycompat download user load failed", "user_id", session.StreamAppUserID, "error", err)
+		writeError(w, http.StatusInternalServerError, "ServerError", "Failed to resolve user")
+		return
+	}
+	if !user.DownloadAllowed {
+		writeError(w, http.StatusForbidden, "Forbidden", "Downloads are not permitted for this user")
 		return
 	}
 
