@@ -306,7 +306,7 @@ func NewRouter(deps Dependencies) chi.Router {
 	// Build demo guard middleware if server settings are available.
 	var demoGuard *apimw.DemoGuard
 	if settingsRepo != nil {
-		var demoUsers apimw.DemoUserLoader
+		var demoUsers auth.UserLoader
 		if userRepo != nil {
 			demoUsers = userRepo
 		}

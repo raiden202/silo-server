@@ -30,6 +30,11 @@ func IsDuplicate(err error) bool {
 	return errors.Is(err, ErrDuplicate)
 }
 
+// UserLoader loads a user by ID with effective policy hydrated.
+type UserLoader interface {
+	GetByID(ctx context.Context, id int) (*models.User, error)
+}
+
 // CheckPassword verifies a plaintext password against the user's bcrypt hash.
 // This is a standalone function, not a repository method.
 func CheckPassword(user *models.User, password string) bool {
@@ -103,6 +108,7 @@ func (r *UserRepository) hydrate(ctx context.Context, u *models.User) error {
 		return err
 	}
 	ApplyEffectivePolicy(u, groups)
+	u.Groups = groups
 	return nil
 }
 
@@ -142,14 +148,15 @@ func (r *UserRepository) Create(ctx context.Context, input models.CreateUserInpu
 		return nil, fmt.Errorf("creating user: %w", err)
 	}
 
-	for _, groupID := range input.GroupIDs {
+	if len(input.GroupIDs) > 0 {
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2)
-			ON CONFLICT DO NOTHING`, id, groupID); err != nil {
+			INSERT INTO user_groups (user_id, group_id)
+			SELECT $1, unnest($2::int[])
+			ON CONFLICT DO NOTHING`, id, input.GroupIDs); err != nil {
 			if isForeignKeyError(err) {
-				return nil, fmt.Errorf("%w: group %d", ErrUnknownGroup, groupID)
+				return nil, fmt.Errorf("%w", ErrUnknownGroup)
 			}
-			return nil, fmt.Errorf("adding membership %d: %w", groupID, err)
+			return nil, fmt.Errorf("adding memberships: %w", err)
 		}
 	}
 
@@ -360,7 +367,9 @@ func (r *UserRepository) List(ctx context.Context) ([]*models.User, error) {
 		return nil, err
 	}
 	for _, u := range users {
-		ApplyEffectivePolicy(u, groupsByUser[u.ID])
+		groups := groupsByUser[u.ID]
+		ApplyEffectivePolicy(u, groups)
+		u.Groups = groups
 	}
 
 	return users, nil

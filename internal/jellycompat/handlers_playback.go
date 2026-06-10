@@ -21,6 +21,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/Silo-Server/silo-server/internal/access"
+	"github.com/Silo-Server/silo-server/internal/auth"
 	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/config"
 	"github.com/Silo-Server/silo-server/internal/models"
@@ -123,7 +124,7 @@ type PlaybackHandler struct {
 	sessionMgr              SessionManagerInterface
 	fileResolver            FilePathResolver
 	storeProvider           userstore.UserStoreProvider
-	users                   userLoader // fresh effective-policy loads for download enforcement
+	users                   auth.UserLoader // fresh effective-policy loads for download enforcement
 	NodePlanner             nodepool.SessionPlanner
 	JWTSecret               string
 	profileStaler           profileStaler

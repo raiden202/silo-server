@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -39,51 +38,6 @@ type AdminGroupsHandler struct {
 // group store.
 func NewAdminGroupsHandler(store GroupStore) *AdminGroupsHandler {
 	return &AdminGroupsHandler{store: store}
-}
-
-// --- JSON field wrappers ---
-
-// optionalIntSliceField distinguishes an absent JSON field from an explicit
-// null or array value. Absent = don't update; null = nil slice ("all
-// libraries"); [] = empty slice ("none").
-type optionalIntSliceField struct {
-	Set   bool
-	Value []int
-}
-
-func (f *optionalIntSliceField) UnmarshalJSON(data []byte) error {
-	f.Set = true
-	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
-		f.Value = nil
-		return nil
-	}
-	return json.Unmarshal(data, &f.Value)
-}
-
-// Ptr returns nil when the field was absent, otherwise a pointer to the
-// decoded slice (which may itself be nil for JSON null).
-func (f optionalIntSliceField) Ptr() *[]int {
-	if !f.Set {
-		return nil
-	}
-	value := f.Value
-	return &value
-}
-
-// optionalStringSliceField distinguishes an absent JSON field from an
-// explicit null or array value. JSON null decodes to an empty slice.
-type optionalStringSliceField struct {
-	Set   bool
-	Value []string
-}
-
-func (f *optionalStringSliceField) UnmarshalJSON(data []byte) error {
-	f.Set = true
-	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
-		f.Value = []string{}
-		return nil
-	}
-	return json.Unmarshal(data, &f.Value)
 }
 
 // --- Request/Response types ---

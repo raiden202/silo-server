@@ -52,6 +52,7 @@ import {
   playbackQualityValueFromPreset,
   type PlaybackQualityPreset,
 } from "@/lib/playback-quality";
+import { formatLibraryAccess, formatLimit } from "@/lib/group-policy";
 import {
   PERMISSION_ADMIN,
   PERMISSION_MARKER_EDIT,
@@ -193,13 +194,7 @@ export default function AdminGroups() {
                       </div>
                     )}
                   </TableCell>
-                  <TableCell>
-                    {group.library_ids === null
-                      ? "All libraries"
-                      : `${group.library_ids.length} ${
-                          group.library_ids.length === 1 ? "library" : "libraries"
-                        }`}
-                  </TableCell>
+                  <TableCell>{formatLibraryAccess(group.library_ids)}</TableCell>
                   <TableCell>
                     {formatLimit(group.max_streams)} / {formatLimit(group.max_transcodes)}
                   </TableCell>
@@ -273,10 +268,6 @@ export default function AdminGroups() {
       </TooltipProvider>
     </div>
   );
-}
-
-function formatLimit(value: number) {
-  return value === 0 ? "∞" : String(value);
 }
 
 function GroupForm({ group, onClose }: { group: AdminGroup | null; onClose: () => void }) {
@@ -513,11 +504,12 @@ function GroupForm({ group, onClose }: { group: AdminGroup | null; onClose: () =
 
 function GroupMembersSection({ group }: { group: AdminGroup }) {
   const [offset, setOffset] = useState(0);
+  const [search, setSearch] = useState("");
   const { data, isLoading } = useGroupMembers(group.id, offset, MEMBERS_PAGE_SIZE);
-  const { data: users = [] } = useAdminUsers();
+  // Only fetch the user list once the admin starts typing a search.
+  const { data: users = [] } = useAdminUsers({ enabled: search.trim().length > 0 });
   const addMutation = useAddGroupMember();
   const removeMutation = useRemoveGroupMember();
-  const [search, setSearch] = useState("");
 
   const members = data?.members ?? [];
   const total = data?.total ?? 0;

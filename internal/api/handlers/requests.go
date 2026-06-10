@@ -13,6 +13,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	apimw "github.com/Silo-Server/silo-server/internal/api/middleware"
+	"github.com/Silo-Server/silo-server/internal/auth"
 	mediarequests "github.com/Silo-Server/silo-server/internal/requests"
 )
 
@@ -50,7 +51,7 @@ type RequestService interface {
 
 type RequestsHandler struct {
 	service RequestService
-	Users   adminUserLoader // for server-side admin checks
+	Users   auth.UserLoader // for server-side admin checks
 }
 
 func NewRequestsHandler(service RequestService) *RequestsHandler {

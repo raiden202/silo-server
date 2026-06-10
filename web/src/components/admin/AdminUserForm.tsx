@@ -11,6 +11,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { formatLibraryAccess, formatLimit } from "@/lib/group-policy";
 import { formatPlaybackQualityPreset } from "@/lib/playback-quality";
 import { permissionLabel } from "@/lib/permissions";
 
@@ -27,12 +28,8 @@ function groupPolicySummary(group: AdminGroup): string {
       ? "No permissions"
       : group.permissions.map(permissionLabel).join(", "),
   );
-  parts.push(
-    group.library_ids === null
-      ? "All libraries"
-      : `${group.library_ids.length} ${group.library_ids.length === 1 ? "library" : "libraries"}`,
-  );
-  parts.push(`${group.max_streams === 0 ? "∞" : group.max_streams} streams`);
+  parts.push(formatLibraryAccess(group.library_ids));
+  parts.push(`${formatLimit(group.max_streams)} streams`);
   parts.push(`${formatPlaybackQualityPreset(group.max_playback_quality)} quality`);
   parts.push(group.download_allowed ? "Downloads" : "No downloads");
   return parts.join(" · ");

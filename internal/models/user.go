@@ -24,8 +24,10 @@ type User struct {
 	MaxProfiles              int
 	DownloadAllowed          bool
 	DownloadTranscodeAllowed bool
-	CreatedAt                time.Time
-	UpdatedAt                time.Time
+	// Groups carries the loaded group memberships (set at load time, not a column).
+	Groups    []Group
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // CreateUserInput contains the fields required to create a new user.

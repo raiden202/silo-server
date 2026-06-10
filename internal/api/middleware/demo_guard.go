@@ -5,18 +5,12 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/Silo-Server/silo-server/internal/models"
+	"github.com/Silo-Server/silo-server/internal/auth"
 )
 
 // DemoSettingsReader is the subset of ServerSettingsStore needed by DemoGuard.
 type DemoSettingsReader interface {
 	Get(ctx context.Context, key string) (string, error)
-}
-
-// DemoUserLoader loads a user by ID so DemoGuard can check admin status
-// server-side instead of trusting token contents.
-type DemoUserLoader interface {
-	GetByID(ctx context.Context, id int) (*models.User, error)
 }
 
 // DemoGuard blocks destructive mutations for non-admin users when demo mode
@@ -28,11 +22,11 @@ type DemoUserLoader interface {
 // Blocked: API key management, downloads, history imports, subtitle downloads.
 type DemoGuard struct {
 	settings DemoSettingsReader
-	users    DemoUserLoader // nil means no admin bypass
+	users    auth.UserLoader // nil means no admin bypass
 }
 
 // NewDemoGuard creates a new DemoGuard.
-func NewDemoGuard(settings DemoSettingsReader, users DemoUserLoader) *DemoGuard {
+func NewDemoGuard(settings DemoSettingsReader, users auth.UserLoader) *DemoGuard {
 	return &DemoGuard{settings: settings, users: users}
 }
 
@@ -102,8 +96,12 @@ func (dg *DemoGuard) Guard(next http.Handler) http.Handler {
 }
 
 // isAdmin reports whether the request's authenticated user currently holds
-// the admin permission.
+// the admin permission. It first consults the user stashed in the context by
+// RequireAdmin and falls back to a fresh load.
 func (dg *DemoGuard) isAdmin(r *http.Request) bool {
+	if user := GetUser(r.Context()); user != nil {
+		return user.Enabled && user.IsAdmin
+	}
 	if dg.users == nil {
 		return false
 	}

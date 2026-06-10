@@ -305,7 +305,7 @@ func TestRequireAdminAPIKey_LastUsedUpdateHasDeadline(t *testing.T) {
 
 // newAdminAPIKeyAuthForTest builds an authenticator without a UserStoreProvider,
 // exercising the admin-bool path only (no session synthesis).
-func newAdminAPIKeyAuthForTest(keys apiKeyValidator, users userLoader) *AdminAPIKeyAuthenticator {
+func newAdminAPIKeyAuthForTest(keys apiKeyValidator, users auth.UserLoader) *AdminAPIKeyAuthenticator {
 	return NewAdminAPIKeyAuthenticator(keys, users, nil, nil)
 }
 

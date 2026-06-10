@@ -38,29 +38,19 @@ type APIKeyValidator interface {
 	UpdateLastUsed(ctx context.Context, id int64) error
 }
 
-// APIKeyUserLoader loads a user by ID for API key authentication.
-type APIKeyUserLoader interface {
-	GetByID(ctx context.Context, id int) (*models.User, error)
-}
-
-// AdminUserLoader loads a user by ID for server-side admin checks.
-type AdminUserLoader interface {
-	GetByID(ctx context.Context, id int) (*models.User, error)
-}
-
 // AuthMiddleware provides HTTP middleware for JWT-based authentication with
 // session validity caching.
 type AuthMiddleware struct {
 	tokenValidator   TokenValidator
 	sessionValidator SessionValidator
-	apiKeyValidator  APIKeyValidator  // nil if API keys not configured
-	apiKeyUserLoader APIKeyUserLoader // nil if API keys not configured
-	userLoader       AdminUserLoader  // nil if no user store; RequireAdmin then denies
+	apiKeyValidator  APIKeyValidator // nil if API keys not configured
+	apiKeyUserLoader auth.UserLoader // nil if API keys not configured
+	userLoader       auth.UserLoader // nil if no user store; RequireAdmin then denies
 }
 
 // NewAuthMiddleware creates a new AuthMiddleware with the given token validator
 // and session validator.
-func NewAuthMiddleware(tv TokenValidator, sv SessionValidator, akv APIKeyValidator, akul APIKeyUserLoader, ul AdminUserLoader) *AuthMiddleware {
+func NewAuthMiddleware(tv TokenValidator, sv SessionValidator, akv APIKeyValidator, akul auth.UserLoader, ul auth.UserLoader) *AuthMiddleware {
 	return &AuthMiddleware{
 		tokenValidator:   tv,
 		sessionValidator: sv,

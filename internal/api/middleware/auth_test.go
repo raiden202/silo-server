@@ -11,7 +11,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/models"
 )
 
-// fakeAdminUserLoader implements AdminUserLoader for unit tests.
+// fakeAdminUserLoader implements auth.UserLoader for unit tests.
 type fakeAdminUserLoader struct {
 	user *models.User
 	err  error
@@ -23,7 +23,7 @@ func (f *fakeAdminUserLoader) GetByID(_ context.Context, _ int) (*models.User, e
 
 // newTestAuthMiddleware returns an AuthMiddleware wired only with a userLoader;
 // the JWT/session fields are unused by RequireAdmin.
-func newTestAuthMiddleware(ul AdminUserLoader) *AuthMiddleware {
+func newTestAuthMiddleware(ul auth.UserLoader) *AuthMiddleware {
 	return NewAuthMiddleware(nil, nil, nil, nil, ul)
 }
 
@@ -37,7 +37,7 @@ func TestRequireAdmin(t *testing.T) {
 	tests := []struct {
 		name       string
 		setupReq   func(*http.Request) *http.Request
-		loader     AdminUserLoader
+		loader     auth.UserLoader
 		wantStatus int
 		checkUser  bool // if true, assert GetUser is non-nil inside the next handler
 	}{

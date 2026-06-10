@@ -56,19 +56,6 @@ func scanGroupFields(row pgx.Row, g *models.Group, extra ...any) error {
 	return row.Scan(dest...)
 }
 
-// scanGroupFieldsPre scans pre-fields followed by all group fields into g.
-// Use this when the query selects extra columns before the group columns
-// (e.g. SELECT ug.user_id, <groupColumns> ...).
-func scanGroupFieldsPre(row pgx.Row, g *models.Group, pre ...any) error {
-	dest := append(pre, //nolint:gocritic // intentional prepend into new slice
-		&g.ID, &g.Slug, &g.Name, &g.Description, &g.BuiltIn, &g.Permissions,
-		&g.LibraryIDs, &g.MaxStreams, &g.MaxTranscodes, &g.MaxProfiles,
-		&g.MaxPlaybackQuality, &g.DownloadAllowed, &g.DownloadTranscodeAllowed,
-		&g.CreatedAt, &g.UpdatedAt,
-	)
-	return row.Scan(dest...)
-}
-
 func scanGroup(row pgx.Row) (*models.Group, error) {
 	var g models.Group
 	if err := scanGroupFields(row, &g); err != nil {
@@ -170,7 +157,7 @@ func (r *GroupRepository) GroupsForUsers(ctx context.Context, userIDs []int) (ma
 		return out, nil
 	}
 	rows, err := r.pool.Query(ctx, `
-		SELECT ug.user_id, `+groupColumns+`
+		SELECT `+groupColumns+`, ug.user_id
 		FROM groups
 		JOIN user_groups ug ON ug.group_id = groups.id
 		WHERE ug.user_id = ANY($1::int[])
@@ -183,7 +170,7 @@ func (r *GroupRepository) GroupsForUsers(ctx context.Context, userIDs []int) (ma
 	for rows.Next() {
 		var userID int
 		var g models.Group
-		if err := scanGroupFieldsPre(rows, &g, &userID); err != nil {
+		if err := scanGroupFields(rows, &g, &userID); err != nil {
 			return nil, fmt.Errorf("scanning user group row: %w", err)
 		}
 		out[userID] = append(out[userID], g)
@@ -597,14 +584,15 @@ func (r *GroupRepository) replaceUserGroupsTx(ctx context.Context, tx pgx.Tx, us
 	if _, err := tx.Exec(ctx, `DELETE FROM user_groups WHERE user_id = $1`, userID); err != nil {
 		return fmt.Errorf("clearing memberships: %w", err)
 	}
-	for _, groupID := range groupIDs {
+	if len(groupIDs) > 0 {
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2)
-			ON CONFLICT DO NOTHING`, userID, groupID); err != nil {
+			INSERT INTO user_groups (user_id, group_id)
+			SELECT $1, unnest($2::int[])
+			ON CONFLICT DO NOTHING`, userID, groupIDs); err != nil {
 			if isForeignKeyError(err) {
-				return fmt.Errorf("%w: group %d", ErrUnknownGroup, groupID)
+				return fmt.Errorf("%w", ErrUnknownGroup)
 			}
-			return fmt.Errorf("adding membership %d: %w", groupID, err)
+			return fmt.Errorf("adding memberships: %w", err)
 		}
 	}
 	if _, err := tx.Exec(ctx, `

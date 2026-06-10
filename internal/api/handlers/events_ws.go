@@ -39,7 +39,7 @@ type EventsHandler struct {
 	scans          *evt.ScanRegistry
 	persistedScans activeScanLister
 	historyImports historyImportActiveLister
-	users          adminUserLoader
+	users          auth.UserLoader
 }
 
 func NewEventsHandler(
@@ -50,7 +50,7 @@ func NewEventsHandler(
 	scans *evt.ScanRegistry,
 	persistedScans *scanqueue.Service,
 	historyImports historyImportActiveLister,
-	users adminUserLoader,
+	users auth.UserLoader,
 ) *EventsHandler {
 	return &EventsHandler{
 		hub:            hub,

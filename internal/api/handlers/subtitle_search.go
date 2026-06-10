@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	apimw "github.com/Silo-Server/silo-server/internal/api/middleware"
+	"github.com/Silo-Server/silo-server/internal/auth"
 	"github.com/Silo-Server/silo-server/internal/subtitles"
 	"github.com/go-chi/chi/v5"
 )
@@ -63,7 +64,7 @@ type SubtitleSearchHandler struct {
 	repo           subtitles.Repository
 	mediaResolver  SubtitleMediaResolver
 	FileAuthorizer *MediaFileAuthorizer
-	Users          adminUserLoader // for server-side admin checks
+	Users          auth.UserLoader // for server-side admin checks
 }
 
 // NewSubtitleSearchHandler creates a new SubtitleSearchHandler.

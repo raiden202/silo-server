@@ -12,6 +12,7 @@ import (
 
 	"github.com/Silo-Server/silo-server/internal/adminjob"
 	apimw "github.com/Silo-Server/silo-server/internal/api/middleware"
+	"github.com/Silo-Server/silo-server/internal/auth"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/notifications"
 )
@@ -36,7 +37,7 @@ type AdminJobsHandler struct {
 	store          AdminJobArtifactStore
 	CancelRegistry *adminjob.CancelRegistry
 	RealtimeHub    *notifications.Hub
-	Users          adminUserLoader // for server-side admin checks on non-admin-gated routes
+	Users          auth.UserLoader // for server-side admin checks on non-admin-gated routes
 }
 
 func NewAdminJobsHandler(repo adminJobRepository, store AdminJobArtifactStore) *AdminJobsHandler {

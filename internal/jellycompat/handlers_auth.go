@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/Silo-Server/silo-server/internal/auth"
 	"github.com/Silo-Server/silo-server/internal/clientip"
 	"github.com/Silo-Server/silo-server/internal/config"
 	"github.com/Silo-Server/silo-server/internal/models"
@@ -122,12 +123,12 @@ type AuthHandler struct {
 	cfg           *config.Config
 	loginResolver loginResolver
 	authenticator *Authenticator
-	users         userLoader
+	users         auth.UserLoader
 }
 
 // NewAuthHandler creates a new auth handler. users supplies the freshly
 // loaded effective policy for user DTOs; user routes fail when it is absent.
-func NewAuthHandler(cfg *config.Config, loginResolver loginResolver, authenticator *Authenticator, users userLoader) *AuthHandler {
+func NewAuthHandler(cfg *config.Config, loginResolver loginResolver, authenticator *Authenticator, users auth.UserLoader) *AuthHandler {
 	return &AuthHandler{
 		cfg:           cfg,
 		loginResolver: loginResolver,

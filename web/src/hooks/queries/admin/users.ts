@@ -46,11 +46,12 @@ function invalidateAdminDeviceCaches(
   queryClient.invalidateQueries({ queryKey: adminKeys.devices() });
 }
 
-export function useAdminUsers() {
+export function useAdminUsers(options?: { enabled?: boolean }) {
   return useQuery({
     queryKey: adminKeys.users(),
     queryFn: () => api<AdminUser[]>("/admin/users").then((d) => d ?? []),
     staleTime: ADMIN_STALE_TIME,
+    enabled: options?.enabled ?? true,
   });
 }
 

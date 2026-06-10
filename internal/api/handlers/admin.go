@@ -77,7 +77,6 @@ type ImpersonationService interface {
 // session listing, unmatched files, and system stats.
 type AdminHandler struct {
 	userRepo                     UserRepository
-	groupRepo                    *auth.GroupRepository
 	pool                         *pgxpool.Pool
 	SessionsLoader               *PlaybackSessionsLoader
 	storeProv                    userstore.UserStoreProvider
@@ -103,15 +102,12 @@ func NewAdminHandler(
 	pool *pgxpool.Pool,
 	storeProv userstore.UserStoreProvider,
 ) *AdminHandler {
-	var groupRepo *auth.GroupRepository
 	var groupResolver auth.GroupResolver
 	if pool != nil {
-		groupRepo = auth.NewGroupRepository(pool)
-		groupResolver = groupRepo
+		groupResolver = auth.NewGroupRepository(pool)
 	}
 	return &AdminHandler{
 		userRepo:  userRepo,
-		groupRepo: groupRepo,
 		pool:      pool,
 		storeProv: storeProv,
 		// No settings dependency at construction time: nil settings makes the
@@ -216,11 +212,11 @@ func (h *AdminHandler) presignPosterURL(r *http.Request, path string) string {
 	return ""
 }
 
-// toAdminUserResponse converts a User model and its group memberships to an
-// admin API response.
-func toAdminUserResponse(u *models.User, groups []models.Group) adminUserResponse {
-	refs := make([]adminGroupRef, 0, len(groups))
-	for _, g := range groups {
+// toAdminUserResponse converts a User model (with its group memberships
+// loaded into u.Groups at load time) to an admin API response.
+func toAdminUserResponse(u *models.User) adminUserResponse {
+	refs := make([]adminGroupRef, 0, len(u.Groups))
+	for _, g := range u.Groups {
 		refs = append(refs, adminGroupRef{ID: g.ID, Slug: g.Slug, Name: g.Name})
 	}
 	return adminUserResponse{
@@ -241,15 +237,6 @@ func toAdminUserResponse(u *models.User, groups []models.Group) adminUserRespons
 		CreatedAt:                u.CreatedAt,
 		UpdatedAt:                u.UpdatedAt,
 	}
-}
-
-// loadUserGroups loads a single user's group memberships. Returns nil when no
-// group repository is configured (e.g. in tests without a database pool).
-func (h *AdminHandler) loadUserGroups(ctx context.Context, userID int) ([]models.Group, error) {
-	if h.groupRepo == nil {
-		return nil, nil
-	}
-	return h.groupRepo.GroupsForUser(ctx, userID)
 }
 
 func (h *AdminHandler) loadUserLastActiveAt(ctx context.Context, userIDs []int) (map[int]time.Time, error) {
@@ -307,18 +294,9 @@ func (h *AdminHandler) HandleListUsers(w http.ResponseWriter, r *http.Request) {
 		userIDs = append(userIDs, u.ID)
 	}
 
-	groupsByUser := map[int][]models.Group{}
-	if h.groupRepo != nil {
-		groupsByUser, err = h.groupRepo.GroupsForUsers(r.Context(), userIDs)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load user groups")
-			return
-		}
-	}
-
 	resp := make([]adminUserResponse, 0, len(users))
 	for _, u := range users {
-		resp = append(resp, toAdminUserResponse(u, groupsByUser[u.ID]))
+		resp = append(resp, toAdminUserResponse(u))
 	}
 	lastActive, err := h.loadUserLastActiveAt(r.Context(), userIDs)
 	if err != nil {
@@ -346,13 +324,7 @@ func (h *AdminHandler) HandleGetUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	groups, err := h.loadUserGroups(r.Context(), user.ID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load user groups")
-		return
-	}
-
-	resp := toAdminUserResponse(user, groups)
+	resp := toAdminUserResponse(user)
 	lastActive, err := h.loadUserLastActiveAt(r.Context(), []int{user.ID})
 	if err != nil {
 		slog.Warn("failed to load admin user last activity", "user_id", user.ID, "error", err)
@@ -400,13 +372,7 @@ func (h *AdminHandler) HandleCreateUser(w http.ResponseWriter, r *http.Request) 
 	}
 	h.invalidateStats(r.Context(), cache.ChannelAdmin, cache.EventAdminStatsInvalidated, strconv.Itoa(user.ID))
 
-	groups, err := h.loadUserGroups(r.Context(), user.ID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load user groups")
-		return
-	}
-
-	writeJSON(w, http.StatusCreated, toAdminUserResponse(user, groups))
+	writeJSON(w, http.StatusCreated, toAdminUserResponse(user))
 }
 
 // HandleUpdateUser handles PUT /admin/users/{id}.
@@ -475,13 +441,7 @@ func (h *AdminHandler) HandleUpdateUser(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	groups, err := h.loadUserGroups(r.Context(), user.ID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load user groups")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, toAdminUserResponse(user, groups))
+	writeJSON(w, http.StatusOK, toAdminUserResponse(user))
 }
 
 // HandleDeleteUser handles DELETE /admin/users/{id}.

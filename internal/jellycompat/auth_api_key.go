@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Silo-Server/silo-server/internal/auth"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/userstore"
 )
@@ -22,17 +23,9 @@ type apiKeyValidator interface {
 	UpdateLastUsed(ctx context.Context, id int64) error
 }
 
-// userLoader loads a Silo user by ID with its group-derived effective policy
-// hydrated (IsAdmin, DownloadAllowed, LibraryIDs). Policy is always read from
-// a freshly loaded user — never cached on sessions — so group edits and role
-// changes take effect on the next request.
-type userLoader interface {
-	GetByID(ctx context.Context, id int) (*models.User, error)
-}
-
 type AdminAPIKeyAuthenticator struct {
 	keys     apiKeyValidator
-	users    userLoader
+	users    auth.UserLoader
 	provider userstore.UserStoreProvider
 	now      func() time.Time
 
@@ -57,7 +50,12 @@ type adminAPIKeyAuthResult struct {
 // when present, an admin key can synthesize a compat session (see
 // resolveSession); when nil, only the admin-bool path (RequireAdminAPIKey /
 // RequireSessionOrAdminAPIKey) is available.
-func NewAdminAPIKeyAuthenticator(keys apiKeyValidator, users userLoader, provider userstore.UserStoreProvider, now func() time.Time) *AdminAPIKeyAuthenticator {
+//
+// users loads Silo users by ID with their group-derived effective policy
+// hydrated (IsAdmin, DownloadAllowed, LibraryIDs). Policy is always read from
+// a freshly loaded user — never cached on sessions — so group edits and role
+// changes take effect on the next request.
+func NewAdminAPIKeyAuthenticator(keys apiKeyValidator, users auth.UserLoader, provider userstore.UserStoreProvider, now func() time.Time) *AdminAPIKeyAuthenticator {
 	if keys == nil || users == nil {
 		return nil
 	}
