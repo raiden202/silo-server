@@ -36,10 +36,14 @@ func NewGroupRepository(pool *pgxpool.Pool) *GroupRepository {
 	return &GroupRepository{pool: pool}
 }
 
-const groupColumns = `id, slug, name, description, built_in, permissions,
-	library_ids, max_streams, max_transcodes, max_profiles,
-	max_playback_quality, download_allowed, download_transcode_allowed,
-	created_at, updated_at`
+// groupColumns is table-qualified so it stays unambiguous in queries that
+// join user_groups (which also has a created_at column). Qualified names are
+// valid in plain SELECTs and in INSERT/UPDATE ... RETURNING alike.
+const groupColumns = `groups.id, groups.slug, groups.name, groups.description,
+	groups.built_in, groups.permissions, groups.library_ids, groups.max_streams,
+	groups.max_transcodes, groups.max_profiles, groups.max_playback_quality,
+	groups.download_allowed, groups.download_transcode_allowed,
+	groups.created_at, groups.updated_at`
 
 func scanGroupFields(row pgx.Row, g *models.Group, extra ...any) error {
 	dest := []any{
