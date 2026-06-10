@@ -133,7 +133,7 @@ ON CONFLICT (key) DO NOTHING;
 -- +goose StatementBegin
 ALTER TABLE users
     ADD COLUMN role text,
-    ADD COLUMN permissions text[] NOT NULL DEFAULT '{}',
+    ADD COLUMN permissions text[] NOT NULL DEFAULT ARRAY['marker_edit']::text[],
     ADD COLUMN library_ids integer[],
     ADD COLUMN max_streams integer NOT NULL DEFAULT 6,
     ADD COLUMN max_transcodes integer NOT NULL DEFAULT 2,
@@ -182,7 +182,22 @@ UPDATE users u SET
     download_transcode_allowed = EXISTS (
         SELECT 1 FROM user_groups ug
         JOIN groups g ON g.id = ug.group_id
-        WHERE ug.user_id = u.id AND g.download_transcode_allowed);
+        WHERE ug.user_id = u.id AND g.download_transcode_allowed),
+    -- Flatten max_playback_quality: rank-order mirrors internal/access/quality.go
+    -- ('' = unrestricted is most permissive; most permissive group wins).
+    max_playback_quality = COALESCE((
+        SELECT CASE WHEN bool_or(g.max_playback_quality = '') THEN ''
+                    ELSE split_part(MAX(CASE g.max_playback_quality
+                             WHEN '4320p' THEN '5:4320p'
+                             WHEN '2160p' THEN '4:2160p'
+                             WHEN '1080p' THEN '3:1080p'
+                             WHEN '720p'  THEN '2:720p'
+                             WHEN '480p'  THEN '1:480p'
+                             ELSE '0:' END), ':', 2)
+               END
+        FROM user_groups ug
+        JOIN groups g ON g.id = ug.group_id
+        WHERE ug.user_id = u.id), '');
 
 DELETE FROM server_settings WHERE key = 'users.default_group_slugs';
 DROP TABLE user_groups;

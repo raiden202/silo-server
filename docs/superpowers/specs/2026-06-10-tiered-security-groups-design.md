@@ -84,7 +84,7 @@ Kept: `enabled` (account kill-switch stays user-level), `access_policy_revision`
 
 ### Default group setting
 
-A `server_settings` entry `default_group_slugs` (initially `["users"]`), consumed by all account-provisioning paths (signup, invite, OAuth) in `internal/auth/account_provisioner.go`. Invite codes may later override it; out of scope now.
+A `server_settings` entry `users.default_group_slugs` (initially `["users"]`), consumed by all account-provisioning paths (signup, invite, OAuth) in `internal/auth/account_provisioner.go`. Invite codes may later override it; out of scope now.
 
 ## Resolution semantics
 
