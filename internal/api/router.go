@@ -746,8 +746,12 @@ func NewRouter(deps Dependencies) chi.Router {
 
 	// Build admin handler if we have a user repo.
 	var adminHandler *handlers.AdminHandler
+	var adminGroupsHandler *handlers.AdminGroupsHandler
 	var catalogSeedHandler *handlers.CatalogSeedHandler
 	var adminJobsHandler *handlers.AdminJobsHandler
+	if deps.DB != nil {
+		adminGroupsHandler = handlers.NewAdminGroupsHandler(auth.NewGroupRepository(deps.DB))
+	}
 	if userRepo != nil {
 		adminHandler = handlers.NewAdminHandler(userRepo, deps.DB, deps.UserStoreProvider)
 		adminHandler.SessionsLoader = playbackSessionsLoader
@@ -2068,6 +2072,17 @@ func NewRouter(deps Dependencies) chi.Router {
 							r.Delete("/users/{id}/profiles/{profile_id}/devices/{device_id}/settings", adminHandler.HandleDeleteAllUserDeviceSettings)
 							r.Get("/devices", adminHandler.HandleListDevices)
 							r.Get("/devices/{user_id}/{device_id}", adminHandler.HandleGetDevice)
+
+							if adminGroupsHandler != nil {
+								r.Get("/groups", adminGroupsHandler.HandleList)
+								r.Post("/groups", adminGroupsHandler.HandleCreate)
+								r.Get("/groups/{id}", adminGroupsHandler.HandleGet)
+								r.Patch("/groups/{id}", adminGroupsHandler.HandleUpdate)
+								r.Delete("/groups/{id}", adminGroupsHandler.HandleDelete)
+								r.Get("/groups/{id}/members", adminGroupsHandler.HandleListMembers)
+								r.Put("/groups/{id}/members/{userID}", adminGroupsHandler.HandleAddMember)
+								r.Delete("/groups/{id}/members/{userID}", adminGroupsHandler.HandleRemoveMember)
+							}
 
 							r.Get("/sessions", adminHandler.HandleListSessions)
 							r.Get("/playback-history", adminHandler.HandleListPlaybackHistory)

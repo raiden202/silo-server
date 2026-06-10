@@ -387,6 +387,16 @@ func (r *GroupRepository) Delete(ctx context.Context, id int) error {
 	return tx.Commit(ctx)
 }
 
+// MemberCount returns the number of users in a group.
+func (r *GroupRepository) MemberCount(ctx context.Context, groupID int) (int, error) {
+	var count int
+	if err := r.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM user_groups WHERE group_id = $1`, groupID).Scan(&count); err != nil {
+		return 0, fmt.Errorf("counting group members: %w", err)
+	}
+	return count, nil
+}
+
 // GroupMember is one row of a paginated member listing.
 type GroupMember struct {
 	UserID   int
@@ -403,10 +413,9 @@ func (r *GroupRepository) ListMembers(ctx context.Context, groupID, offset, limi
 	if offset < 0 {
 		offset = 0
 	}
-	var total int
-	if err := r.pool.QueryRow(ctx,
-		`SELECT COUNT(*) FROM user_groups WHERE group_id = $1`, groupID).Scan(&total); err != nil {
-		return nil, 0, fmt.Errorf("counting members: %w", err)
+	total, err := r.MemberCount(ctx, groupID)
+	if err != nil {
+		return nil, 0, err
 	}
 	rows, err := r.pool.Query(ctx, `
 		SELECT u.id, u.username, u.email, u.enabled
