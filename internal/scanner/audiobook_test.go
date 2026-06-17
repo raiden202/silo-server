@@ -320,7 +320,7 @@ func TestScanAudiobookFolderReturnsErrorWhenEveryReconcileFails(t *testing.T) {
 	}
 
 	s := &Scanner{ffprobePath: "definitely-missing-ffprobe"}
-	err := s.ScanAudiobookFolder(context.Background(), &models.MediaFolder{ID: 42, Paths: []string{root}})
+	err := s.ScanAudiobookFolder(context.Background(), &models.MediaFolder{ID: 42, Paths: []string{root}}, true)
 	if err == nil {
 		t.Fatal("ScanAudiobookFolder returned nil, want aggregate failure")
 	}
@@ -335,9 +335,48 @@ func TestScanAudiobookFolderReturnsCanceledContext(t *testing.T) {
 	cancel()
 
 	s := &Scanner{}
-	err := s.ScanAudiobookFolder(ctx, &models.MediaFolder{ID: 42, Paths: []string{root}})
+	err := s.ScanAudiobookFolder(ctx, &models.MediaFolder{ID: 42, Paths: []string{root}}, true)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("ScanAudiobookFolder error = %v, want context.Canceled", err)
+	}
+}
+
+func TestSplitAudiobookReconcileRootsExcludesIncompleteWalks(t *testing.T) {
+	scans := []audiobookRootScan{
+		{
+			root: "/library/clean",
+			seenPaths: map[string]bool{
+				"/library/clean/book/track.mp3": true,
+			},
+		},
+		{
+			root: "/library/partial",
+			candidates: []string{
+				"/library/partial/found-book",
+			},
+			seenPaths: map[string]bool{
+				"/library/partial/found-book/track.mp3": true,
+			},
+			walkFailures: 1,
+		},
+		{
+			root:    "/library/missing",
+			rootErr: os.ErrNotExist,
+		},
+	}
+
+	roots, seen, sawFiles := splitAudiobookReconcileRoots(scans)
+	if !sawFiles {
+		t.Fatal("sawFiles = false, want true from clean root")
+	}
+	if len(roots) != 1 || roots[0] != "/library/clean" {
+		t.Fatalf("roots = %#v, want only clean root", roots)
+	}
+	if !seen["/library/clean/book/track.mp3"] {
+		t.Fatalf("seen missing clean-root track: %#v", seen)
+	}
+	if seen["/library/partial/found-book/track.mp3"] {
+		t.Fatalf("seen includes partial-walk root track: %#v", seen)
 	}
 }
 

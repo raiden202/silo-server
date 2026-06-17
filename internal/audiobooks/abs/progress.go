@@ -3,6 +3,7 @@ package abs
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -139,10 +140,20 @@ func (h *Handler) handleGetMyProgress(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "resolve access: "+err.Error(), http.StatusForbidden)
 		return
 	}
+	ids := make([]string, 0, len(rows))
+	for _, p := range rows {
+		ids = append(ids, p.ContentID)
+	}
+	// One batch fetch acts as the access/existence gate (the item itself isn't
+	// rendered here), instead of one query per progress row.
+	byID, err := h.deps.MediaStore.GetAudiobooksByIDs(r.Context(), ids, access)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	out := make([]map[string]any, 0, len(rows))
 	for _, p := range rows {
-		item, err := h.deps.MediaStore.GetAudiobookByID(r.Context(), p.ContentID, access)
-		if err != nil || item == nil {
+		if byID[p.ContentID] == nil {
 			continue
 		}
 		out = append(out, progressRowToABS(p))
@@ -358,9 +369,12 @@ func (h *Handler) handleSessionSync(w http.ResponseWriter, r *http.Request) {
 	// Update position in user_watch_progress. Must NOT be a full upsert —
 	// see comment in handleSetItemProgress re: not overwriting is_finished.
 	if h.deps.ProgressStore != nil {
-		_ = h.deps.ProgressStore.UpdateProgressPosition(
+		if err := h.deps.ProgressStore.UpdateProgressPosition(
 			r.Context(), a.UserID, a.ProfileID, sess.ContentID, p.CurrentTime,
-		)
+		); err != nil {
+			slog.Warn("abs session sync: update progress position failed",
+				"session_id", sid, "content_id", sess.ContentID, "error", err)
+		}
 	}
 
 	// Realtime push to other connected clients.
