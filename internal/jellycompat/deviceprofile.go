@@ -17,6 +17,7 @@ type DeviceProfile struct {
 	MaxStreamingBitrate int64                `json:"MaxStreamingBitrate,omitempty"`
 	DirectPlayProfiles  []DirectPlayProfile  `json:"DirectPlayProfiles,omitempty"`
 	TranscodingProfiles []TranscodingProfile `json:"TranscodingProfiles,omitempty"`
+	CodecProfiles       []CodecProfile       `json:"CodecProfiles,omitempty"`
 }
 
 type DirectPlayProfile struct {
@@ -33,6 +34,20 @@ type TranscodingProfile struct {
 	Context    string `json:"Context,omitempty"`
 	VideoCodec string `json:"VideoCodec,omitempty"`
 	AudioCodec string `json:"AudioCodec,omitempty"`
+}
+
+type CodecProfile struct {
+	Type            string             `json:"Type,omitempty"`
+	Codec           string             `json:"Codec,omitempty"`
+	Conditions      []ProfileCondition `json:"Conditions,omitempty"`
+	ApplyConditions []ProfileCondition `json:"ApplyConditions,omitempty"`
+}
+
+type ProfileCondition struct {
+	Condition  string `json:"Condition,omitempty"`
+	Property   string `json:"Property,omitempty"`
+	Value      string `json:"Value,omitempty"`
+	IsRequired bool   `json:"IsRequired,omitempty"`
 }
 
 // DeviceProfileStore keeps the last reported device profile per compat token.
@@ -104,22 +119,28 @@ func (p DeviceProfile) HasData() bool {
 	return strings.TrimSpace(p.Name) != "" ||
 		p.MaxStreamingBitrate > 0 ||
 		len(p.DirectPlayProfiles) > 0 ||
-		len(p.TranscodingProfiles) > 0
+		len(p.TranscodingProfiles) > 0 ||
+		len(p.CodecProfiles) > 0
 }
 
 // SupportsDirectPlay reports whether a version can be served as-is.
 func (p DeviceProfile) SupportsDirectPlay(version catalog.FileVersion) bool {
+	return p.SupportsDirectPlayForAudioStream(version, nil)
+}
+
+func (p DeviceProfile) SupportsDirectPlayForAudioStream(version catalog.FileVersion, audioStreamIndex *int) bool {
 	if len(p.DirectPlayProfiles) == 0 {
-		return true
+		return p.codecProfileCompatibility(version, audioStreamIndex).supportsDirectPlay()
 	}
+	audioCodec := compatAudioCodec(version, audioStreamIndex)
 	for _, profile := range p.DirectPlayProfiles {
 		if !matchesVideoType(profile.Type) {
 			continue
 		}
 		if matchesCSV(profile.Container, version.Container) &&
 			matchesCSV(profile.VideoCodec, version.CodecVideo) &&
-			matchesCSV(profile.AudioCodec, version.CodecAudio) {
-			return true
+			matchesCSV(profile.AudioCodec, audioCodec) {
+			return p.codecProfileCompatibility(version, audioStreamIndex).supportsDirectPlay()
 		}
 	}
 	return false
@@ -187,15 +208,19 @@ func DefaultDeviceProfile() DeviceProfile {
 // source video codec for a remux-style stream, regardless of whether the audio
 // codec must be transcoded separately.
 func (p DeviceProfile) SupportsVideoCodecForDirectStream(version catalog.FileVersion) bool {
+	return p.SupportsVideoCodecForDirectStreamForAudioStream(version, nil)
+}
+
+func (p DeviceProfile) SupportsVideoCodecForDirectStreamForAudioStream(version catalog.FileVersion, audioStreamIndex *int) bool {
 	if len(p.DirectPlayProfiles) == 0 {
-		return true
+		return p.codecProfileCompatibility(version, audioStreamIndex).VideoSupported
 	}
 	for _, profile := range p.DirectPlayProfiles {
 		if !matchesVideoType(profile.Type) {
 			continue
 		}
 		if matchesCSV(profile.VideoCodec, version.CodecVideo) {
-			return true
+			return p.codecProfileCompatibility(version, audioStreamIndex).VideoSupported
 		}
 	}
 	return false
@@ -204,15 +229,20 @@ func (p DeviceProfile) SupportsVideoCodecForDirectStream(version catalog.FileVer
 // SupportsAudioCodecForDirectStream reports whether the client can accept the
 // source audio codec in a remux-style stream, regardless of container.
 func (p DeviceProfile) SupportsAudioCodecForDirectStream(version catalog.FileVersion) bool {
+	return p.SupportsAudioCodecForDirectStreamForAudioStream(version, nil)
+}
+
+func (p DeviceProfile) SupportsAudioCodecForDirectStreamForAudioStream(version catalog.FileVersion, audioStreamIndex *int) bool {
 	if len(p.DirectPlayProfiles) == 0 {
-		return true
+		return p.codecProfileCompatibility(version, audioStreamIndex).AudioSupported
 	}
+	audioCodec := compatAudioCodec(version, audioStreamIndex)
 	for _, profile := range p.DirectPlayProfiles {
 		if !matchesVideoType(profile.Type) {
 			continue
 		}
-		if matchesCSV(profile.AudioCodec, version.CodecAudio) {
-			return true
+		if matchesCSV(profile.AudioCodec, audioCodec) {
+			return p.codecProfileCompatibility(version, audioStreamIndex).AudioSupported
 		}
 	}
 	return false
@@ -276,6 +306,8 @@ func normalizeCompatToken(raw string) string {
 		return "mpegts"
 	case "x-matroska":
 		return "mkv"
+	case "h265":
+		return "hevc"
 	default:
 		return token
 	}

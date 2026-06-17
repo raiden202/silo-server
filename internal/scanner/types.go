@@ -41,6 +41,10 @@ type VideoTrackInfo struct {
 	Title           string
 	Codec           string
 	DolbyVision     string
+	DVProfile       int
+	DVBLCompatID    int
+	DVELPresent     bool
+	HDR10Plus       bool
 	Profile         string
 	Level           int
 	Width           int
@@ -50,6 +54,7 @@ type VideoTrackInfo struct {
 	FrameRate       string
 	Bitrate         int
 	VideoRange      string
+	VideoRangeType  string
 	ColorPrimaries  string
 	ColorSpace      string
 	ColorTransfer   string

@@ -99,6 +99,7 @@ type ffprobeSideData struct {
 	DVProfile    int    `json:"dv_profile"`
 	DVBlPresent  int    `json:"dv_bl_present"`
 	DVElPresent  int    `json:"dv_el_present"`
+	DVBLCompatID int    `json:"dv_bl_signal_compatibility_id"`
 }
 
 // ffprobeDisp represents the disposition flags on a stream.
@@ -172,10 +173,15 @@ func convertProbeData(raw *ffprobeOutput) *ProbeData {
 	for _, s := range raw.Streams {
 		switch s.CodecType {
 		case "video":
+			dvProfile := dolbyVisionProfileNumber(s.SideDataList)
 			track := VideoTrackInfo{
 				Title:           firstNonEmpty(s.Tags["title"], s.CodecLongName, strings.ToUpper(s.CodecName)),
 				Codec:           s.CodecName,
 				DolbyVision:     dolbyVisionProfile(s.SideDataList),
+				DVProfile:       dvProfile,
+				DVBLCompatID:    dolbyVisionBLCompatID(s.SideDataList),
+				DVELPresent:     dolbyVisionELPresent(s.SideDataList),
+				HDR10Plus:       hasHDR10Plus(s.SideDataList),
 				Profile:         s.Profile,
 				Level:           s.Level,
 				Width:           s.Width,
@@ -185,6 +191,7 @@ func convertProbeData(raw *ffprobeOutput) *ProbeData {
 				FrameRate:       normalizeFrameRate(s.AvgFrameRate),
 				Bitrate:         parseNumeric(s.BitRate) / 1000,
 				VideoRange:      videoRangeLabel(s),
+				VideoRangeType:  videoRangeType(s),
 				ColorPrimaries:  s.ColorPrimaries,
 				ColorSpace:      s.ColorSpace,
 				ColorTransfer:   s.ColorTransfer,
@@ -196,7 +203,7 @@ func convertProbeData(raw *ffprobeOutput) *ProbeData {
 			if pd.CodecVideo == "" {
 				pd.CodecVideo = s.CodecName
 				pd.Resolution = mapResolution(s.Width, s.Height)
-				pd.HDR = isHDR(s.ColorTransfer)
+				pd.HDR = isHDR(s.ColorTransfer) || dvProfile > 0 || track.HDR10Plus
 			}
 		case "audio":
 			track := AudioTrackInfo{
@@ -393,12 +400,95 @@ func videoRangeLabel(s ffprobeStream) string {
 }
 
 func dolbyVisionProfile(sideData []ffprobeSideData) string {
-	for _, data := range sideData {
-		if strings.EqualFold(data.SideDataType, "DOVI configuration record") && data.DVProfile > 0 {
-			return fmt.Sprintf("Profile %d", data.DVProfile)
-		}
+	if profile := dolbyVisionProfileNumber(sideData); profile > 0 {
+		return fmt.Sprintf("Profile %d", profile)
 	}
 	return ""
+}
+
+func dolbyVisionProfileNumber(sideData []ffprobeSideData) int {
+	for _, data := range sideData {
+		if strings.EqualFold(data.SideDataType, "DOVI configuration record") && data.DVProfile > 0 {
+			return data.DVProfile
+		}
+	}
+	return 0
+}
+
+func dolbyVisionBLCompatID(sideData []ffprobeSideData) int {
+	for _, data := range sideData {
+		if strings.EqualFold(data.SideDataType, "DOVI configuration record") && data.DVBLCompatID > 0 {
+			return data.DVBLCompatID
+		}
+	}
+	return 0
+}
+
+func dolbyVisionELPresent(sideData []ffprobeSideData) bool {
+	for _, data := range sideData {
+		if strings.EqualFold(data.SideDataType, "DOVI configuration record") {
+			return data.DVElPresent > 0
+		}
+	}
+	return false
+}
+
+func hasHDR10Plus(sideData []ffprobeSideData) bool {
+	for _, data := range sideData {
+		typ := strings.ToLower(data.SideDataType)
+		if strings.Contains(typ, "hdr10+") || strings.Contains(typ, "smpte2094-40") {
+			return true
+		}
+	}
+	return false
+}
+
+func videoRangeType(s ffprobeStream) string {
+	profile := dolbyVisionProfileNumber(s.SideDataList)
+	hdr10Plus := hasHDR10Plus(s.SideDataList)
+	if profile > 0 {
+		switch profile {
+		case 5:
+			return "DOVI"
+		case 7:
+			if hdr10Plus {
+				return "DOVIWithELHDR10Plus"
+			}
+			return "DOVIWithEL"
+		case 8:
+			if hdr10Plus {
+				return "DOVIWithHDR10Plus"
+			}
+			switch dolbyVisionBLCompatID(s.SideDataList) {
+			case 1:
+				return "DOVIWithHDR10"
+			case 2:
+				return "DOVIWithSDR"
+			case 4:
+				return "DOVIWithHLG"
+			default:
+				if isHLG(s.ColorTransfer) {
+					return "DOVIWithHLG"
+				}
+				if isHDR(s.ColorTransfer) {
+					return "DOVIWithHDR10"
+				}
+				return "DOVIWithSDR"
+			}
+		default:
+			return "DOVI"
+		}
+	}
+	if hdr10Plus {
+		return "HDR10Plus"
+	}
+	if isHLG(s.ColorTransfer) {
+		return "HLG"
+	}
+	if isHDR(s.ColorTransfer) {
+		return "HDR10"
+	}
+	return "SDR"
 }
 
 func subtitleResolutionLabel(s ffprobeStream) string {
@@ -451,6 +541,10 @@ func mapResolution(width, height int) string {
 func isHDR(colorTransfer string) bool {
 	ct := strings.ToLower(colorTransfer)
 	return strings.Contains(ct, "smpte2084") || strings.Contains(ct, "arib-std-b67")
+}
+
+func isHLG(colorTransfer string) bool {
+	return strings.Contains(strings.ToLower(colorTransfer), "arib-std-b67")
 }
 
 // normalizeFormatTags lowercases tag keys so callers can look up
