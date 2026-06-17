@@ -523,9 +523,16 @@ func (h *PlaybackHandler) buildPlaybackSource(
 	allowVideoCopy := boolDefault(req.AllowVideoStreamCopy, true)
 	allowAudioCopy := boolDefault(req.AllowAudioStreamCopy, true)
 
-	supportsDirectPlay := enableDirectPlay && profile.SupportsDirectPlay(version)
-	audioSupported := profile.SupportsAudioCodecForDirectStream(version)
-	videoSupported := profile.SupportsVideoCodecForDirectStream(version)
+	audioIndex := defaultAudioStreamIndex(version)
+	subtitleIndex := defaultSubtitleStreamIndex(version)
+	selectedAudioIndex := audioIndex
+	if req.AudioStreamIndex != nil && isValidCompatAudioStreamIndex(version, int(*req.AudioStreamIndex)) {
+		selectedAudioIndex = intPtr(int(*req.AudioStreamIndex))
+	}
+
+	supportsDirectPlay := enableDirectPlay && profile.SupportsDirectPlayForAudioStream(version, selectedAudioIndex)
+	audioSupported := profile.SupportsAudioCodecForDirectStreamForAudioStream(version, selectedAudioIndex)
+	videoSupported := profile.SupportsVideoCodecForDirectStreamForAudioStream(version, selectedAudioIndex)
 	transcodeAudio := enableDirectStream && allowVideoCopy && videoSupported && !audioSupported
 	supportsDirectStream := !transcodeAudio &&
 		enableDirectStream &&
@@ -539,13 +546,6 @@ func (h *PlaybackHandler) buildPlaybackSource(
 	// stay available.
 	if supportsTranscoding && !transcodeAudio && !allow4KTranscode && is4KResolution(version.Resolution) {
 		supportsTranscoding = false
-	}
-
-	audioIndex := defaultAudioStreamIndex(version)
-	subtitleIndex := defaultSubtitleStreamIndex(version)
-	selectedAudioIndex := audioIndex
-	if req.AudioStreamIndex != nil && isValidCompatAudioStreamIndex(version, int(*req.AudioStreamIndex)) {
-		selectedAudioIndex = intPtr(int(*req.AudioStreamIndex))
 	}
 
 	return PlaybackMediaSource{
@@ -658,8 +658,8 @@ func buildMediaStreamsWithSelection(routeItemID, mediaSourceID string, version c
 			Profile:                track.Profile,
 			Level:                  track.Level,
 			AspectRatio:            track.AspectRatio,
-			VideoRange:             firstNonEmpty(track.VideoRange, "Unknown"),
-			VideoRangeType:         firstNonEmpty(track.VideoRange, "Unknown"),
+			VideoRange:             compatVideoRange(track, version.HDR),
+			VideoRangeType:         compatVideoRangeType(track, version.HDR),
 			ColorPrimaries:         track.ColorPrimaries,
 			ColorSpace:             track.ColorSpace,
 			ColorTransfer:          track.ColorTransfer,
