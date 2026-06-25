@@ -1719,6 +1719,9 @@ func main() {
 			taskMgr.Register(tasks.NewScanLibrariesTask(deps.FolderRepo, deps.LibraryScanQueue, deps.EventBus))
 		}
 		taskMgr.Register(tasks.NewCleanupOrphanedMediaItemsTask(catalog.NewOrphanedProvisionalCleaner(deps.DB)))
+		catalogSearchIndexer := catalog.NewCatalogSearchIndexer(deps.DB, settingsRepo)
+		taskMgr.Register(tasks.NewSyncCatalogSearchIndexTask(catalogSearchIndexer))
+		taskMgr.Register(tasks.NewRebuildCatalogSearchIndexTask(catalogSearchIndexer))
 		if deps.IntroAnalyzer != nil {
 			taskMgr.Register(tasks.NewDetectIntroMarkersTask(deps.IntroAnalyzer, settingsRepo))
 		}

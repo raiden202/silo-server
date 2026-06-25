@@ -116,6 +116,13 @@ func (h *ItemsHandler) SetMetadataRefreshRequester(requester MetadataRefreshRequ
 	h.metadataRefreshRequester = requester
 }
 
+func (h *ItemsHandler) SetCatalogSearchProvider(provider catalog.CatalogSearchProvider) {
+	if h == nil || h.catalogResolver == nil || provider == nil {
+		return
+	}
+	h.catalogResolver.WithSearchProvider(provider)
+}
+
 func (h *ItemsHandler) SetLocalWatchEventDispatcher(dispatcher LocalWatchEventDispatcher) {
 	h.localWatchDispatcher = dispatcher
 }

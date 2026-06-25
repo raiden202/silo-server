@@ -71,6 +71,14 @@ var restartRequiredKeys = map[string]bool{
 	// fixed-capacity channel sized at construction.
 	"ai.max_concurrent_jobs":          true,
 	"subtitle_ai.max_concurrent_jobs": true,
+
+	// Catalog search provider construction is intentionally startup-bound in v1.
+	"catalog.search.provider":                      true,
+	"catalog.search.meilisearch.url":               true,
+	"catalog.search.meilisearch.api_key":           true,
+	"catalog.search.meilisearch.index":             true,
+	"catalog.search.meilisearch.timeout_ms":        true,
+	"catalog.search.meilisearch.matching_strategy": true,
 }
 
 // restartRequiredPrefixes covers whole namespaces of infrastructure settings:

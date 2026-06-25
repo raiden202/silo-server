@@ -102,5 +102,8 @@ func (s *MetadataService) renameContentID(ctx context.Context, from, to string) 
 	if _, err := s.dbPool.Exec(ctx, `SELECT silo_rename_content_id($1, $2)`, from, to); err != nil {
 		return fmt.Errorf("rename content_id %s -> %s: %w", from, to, err)
 	}
+	if err := catalog.EnqueueSearchIndexRename(ctx, s.dbPool, from, to); err != nil {
+		return fmt.Errorf("enqueue catalog search rename %s -> %s: %w", from, to, err)
+	}
 	return nil
 }
