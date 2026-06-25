@@ -23,7 +23,8 @@ var (
 
 // ItemRepository provides CRUD operations for the media_items table.
 type ItemRepository struct {
-	pool *pgxpool.Pool
+	pool              *pgxpool.Pool
+	searchIndexEvents *SearchIndexEventRepository
 }
 
 type itemExecer interface {
@@ -32,7 +33,18 @@ type itemExecer interface {
 
 // NewItemRepository creates a new ItemRepository backed by the given pool.
 func NewItemRepository(pool *pgxpool.Pool) *ItemRepository {
-	return &ItemRepository{pool: pool}
+	return &ItemRepository{
+		pool:              pool,
+		searchIndexEvents: NewSearchIndexEventRepository(pool),
+	}
+}
+
+func (r *ItemRepository) WithSearchIndexEvents(events *SearchIndexEventRepository) *ItemRepository {
+	if r == nil {
+		return nil
+	}
+	r.searchIndexEvents = events
+	return r
 }
 
 // GetPoster returns the current poster path and thumbhash for a media item.
@@ -527,6 +539,10 @@ func (r *ItemRepository) upsert(ctx context.Context, execer itemExecer, item *mo
 		return fmt.Errorf("upserting media item: %w", err)
 	}
 
+	if err := r.searchIndexEvents.EnqueueUpsert(ctx, execer, item.ContentID); err != nil {
+		return fmt.Errorf("enqueueing catalog search upsert: %w", err)
+	}
+
 	return nil
 }
 
@@ -812,8 +828,14 @@ func (r *ItemRepository) GetByTitleYearType(ctx context.Context, title string, y
 // Delete removes a media item by its content ID and returns S3 image
 // directory paths that should be cleaned up by the caller.
 func (r *ItemRepository) Delete(ctx context.Context, contentID string) ([]string, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin delete tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
 	// Collect image paths before deletion.
-	imgRows, err := r.pool.Query(ctx, `
+	imgRows, err := tx.Query(ctx, `
 		SELECT poster_path, backdrop_path, logo_path FROM media_items WHERE content_id = $1
 		UNION ALL
 		SELECT poster_path, '', '' FROM seasons WHERE series_id = $1
@@ -840,13 +862,20 @@ func (r *ItemRepository) Delete(ctx context.Context, contentID string) ([]string
 	}
 	imgRows.Close()
 
-	tag, err := r.pool.Exec(ctx, "DELETE FROM media_items WHERE content_id = $1", contentID)
+	tag, err := tx.Exec(ctx, "DELETE FROM media_items WHERE content_id = $1", contentID)
 	if err != nil {
 		return nil, fmt.Errorf("deleting media item: %w", err)
 	}
 
 	if tag.RowsAffected() == 0 {
 		return nil, ErrItemNotFound
+	}
+
+	if err := r.searchIndexEvents.EnqueueDelete(ctx, tx, contentID); err != nil {
+		return nil, fmt.Errorf("enqueueing catalog search delete: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit delete tx: %w", err)
 	}
 
 	return imageDirs, nil
@@ -1294,6 +1323,9 @@ func (r *ItemRepository) ReplacePeople(ctx context.Context, contentID string, pe
 	}
 
 	if len(people) == 0 {
+		if err := r.searchIndexEvents.EnqueueUpsert(ctx, tx, contentID); err != nil {
+			return fmt.Errorf("enqueueing catalog search people update: %w", err)
+		}
 		return tx.Commit(ctx)
 	}
 
@@ -1336,6 +1368,10 @@ func (r *ItemRepository) ReplacePeople(ctx context.Context, contentID string, pe
 
 	if _, err := tx.Exec(ctx, sb.String(), args...); err != nil {
 		return fmt.Errorf("insert people: %w", err)
+	}
+
+	if err := r.searchIndexEvents.EnqueueUpsert(ctx, tx, contentID); err != nil {
+		return fmt.Errorf("enqueueing catalog search people update: %w", err)
 	}
 
 	return tx.Commit(ctx)
@@ -1468,12 +1504,24 @@ func (r *ItemRepository) UpdateMetadata(ctx context.Context, contentID string, u
 		strings.Join(setClauses, ", "), argIdx)
 	args = append(args, contentID)
 
-	tag, err := r.pool.Exec(ctx, query, args...)
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin metadata update tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	tag, err := tx.Exec(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("updating media item metadata: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrItemNotFound
+	}
+	if err := r.searchIndexEvents.EnqueueUpsert(ctx, tx, contentID); err != nil {
+		return fmt.Errorf("enqueueing catalog search metadata update: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit metadata update tx: %w", err)
 	}
 	return nil
 }

@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"slices"
 	"sort"
 	"strconv"
@@ -99,6 +100,7 @@ type AdminHandler struct {
 	OnUserSessionsRevoked        func(ctx context.Context, userID int)
 	OnServerSettingUpdated       func(ctx context.Context, key, value string)
 	RestartStatus                *ServerRestartStatusTracker
+	CatalogSearchStatus          catalog.CatalogSearchStatusProvider
 }
 
 // NewAdminHandler creates a new AdminHandler backed by the given
@@ -2136,6 +2138,45 @@ func (h *AdminHandler) HandleUpdateSetting(w http.ResponseWriter, r *http.Reques
 		if !subtitleai.ValidQuotaPeriod(req.Value) {
 			writeError(w, http.StatusBadRequest, "bad_request",
 				"subtitle_ai.transcribe_quota_period must be day, week, or month")
+			return
+		}
+	case catalog.SearchSettingProvider:
+		switch strings.TrimSpace(strings.ToLower(req.Value)) {
+		case catalog.SearchProviderPostgres, catalog.SearchProviderMeilisearch:
+			req.Value = strings.TrimSpace(strings.ToLower(req.Value))
+		default:
+			writeError(w, http.StatusBadRequest, "bad_request", "catalog.search.provider must be postgres or meilisearch")
+			return
+		}
+	case catalog.SearchSettingMeilisearchURL:
+		value := strings.TrimSpace(req.Value)
+		if value != "" {
+			parsed, err := url.Parse(value)
+			if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+				writeError(w, http.StatusBadRequest, "bad_request", "catalog.search.meilisearch.url must include scheme and host")
+				return
+			}
+		}
+		req.Value = value
+	case catalog.SearchSettingMeilisearchIndex:
+		req.Value = strings.TrimSpace(req.Value)
+		if req.Value == "" {
+			writeError(w, http.StatusBadRequest, "bad_request", "catalog.search.meilisearch.index is required")
+			return
+		}
+	case catalog.SearchSettingMeilisearchTimeoutMS:
+		n, err := strconv.Atoi(strings.TrimSpace(req.Value))
+		if err != nil || n <= 0 {
+			writeError(w, http.StatusBadRequest, "bad_request", "catalog.search.meilisearch.timeout_ms must be an integer greater than 0")
+			return
+		}
+		req.Value = strconv.Itoa(n)
+	case catalog.SearchSettingMeilisearchMatchingStrategy:
+		switch strings.TrimSpace(strings.ToLower(req.Value)) {
+		case "last", "all":
+			req.Value = strings.TrimSpace(strings.ToLower(req.Value))
+		default:
+			writeError(w, http.StatusBadRequest, "bad_request", "catalog.search.meilisearch.matching_strategy must be last or all")
 			return
 		}
 	}

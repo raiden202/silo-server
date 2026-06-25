@@ -1,0 +1,213 @@
+import { useMemo, useState } from "react";
+import { Link } from "react-router";
+import type { ConnectionCheckResponse } from "@/api/types";
+import { ConnectionCheckAction } from "@/components/admin/ConnectionCheckAction";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
+import {
+  useCatalogSearchStatus,
+  useCheckAdminSettingsConnection,
+} from "@/hooks/queries/admin/settings";
+import { useSettingsForm } from "@/hooks/useSettingsForm";
+import { FieldGroup } from "./FieldGroup";
+import { SaveBar } from "./SaveBar";
+import { SettingField } from "./SettingField";
+
+const MEILI_KEYS = [
+  "catalog.search.meilisearch.url",
+  "catalog.search.meilisearch.api_key",
+  "catalog.search.meilisearch.index",
+  "catalog.search.meilisearch.timeout_ms",
+  "catalog.search.meilisearch.matching_strategy",
+];
+
+const KEYS = ["catalog.search.provider", ...MEILI_KEYS];
+
+export default function SearchSettings() {
+  const form = useSettingsForm({ keys: useMemo(() => KEYS, []) });
+  const { data: status, isLoading: statusLoading } = useCatalogSearchStatus();
+  const checkConnection = useCheckAdminSettingsConnection();
+  const [connectionResult, setConnectionResult] = useState<ConnectionCheckResponse | null>(null);
+  const provider = form.getValue("catalog.search.provider") || "postgres";
+  const meiliEnabled = provider === "meilisearch";
+
+  async function handleCheckConnection() {
+    try {
+      setConnectionResult(
+        await checkConnection.mutateAsync({
+          kind: "meilisearch",
+          body: form.buildConnectionCheckRequest(MEILI_KEYS),
+        }),
+      );
+    } catch (error) {
+      setConnectionResult({
+        success: false,
+        message: error instanceof Error ? error.message : "Connection check failed.",
+      });
+    }
+  }
+
+  if (form.isLoading) {
+    return (
+      <div className="space-y-6" role="status" aria-label="Loading settings">
+        <Skeleton className="h-8 w-40" />
+        <Skeleton className="h-32 w-full" />
+        <Skeleton className="h-40 w-full" />
+        <span className="sr-only">Loading settings</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex h-full flex-col">
+      <div className="mb-6 space-y-2">
+        <h2 className="text-xl font-semibold tracking-tight">Search</h2>
+        <p className="text-muted-foreground text-sm leading-relaxed">
+          Configure catalog search provider selection, Meilisearch connectivity, and index status.
+        </p>
+      </div>
+
+      <div className="flex-1 space-y-6">
+        <FieldGroup label="Provider">
+          <SettingField
+            label="Preferred Provider"
+            type="select"
+            value={provider}
+            onChange={(value) => form.setValue("catalog.search.provider", value)}
+            options={[
+              { value: "postgres", label: "Postgres FTS" },
+              { value: "meilisearch", label: "Meilisearch" },
+            ]}
+          />
+        </FieldGroup>
+
+        <FieldGroup label="Meilisearch">
+          <SettingField
+            label="URL"
+            value={form.getValue("catalog.search.meilisearch.url")}
+            onChange={(value) => form.setValue("catalog.search.meilisearch.url", value)}
+            hint="http://localhost:7700"
+            disabled={!meiliEnabled}
+          />
+          <SettingField
+            label="API Key"
+            type="password"
+            value={form.getValue("catalog.search.meilisearch.api_key")}
+            onChange={(value) => form.setValue("catalog.search.meilisearch.api_key", value)}
+            sensitiveConfigured={form.sensitiveConfigured.includes(
+              "catalog.search.meilisearch.api_key",
+            )}
+            disabled={!meiliEnabled}
+          />
+          <SettingField
+            label="Index Prefix"
+            value={form.getValue("catalog.search.meilisearch.index") || "silo_media_items"}
+            onChange={(value) => form.setValue("catalog.search.meilisearch.index", value)}
+            disabled={!meiliEnabled}
+          />
+          <SettingField
+            label="Timeout (ms)"
+            type="number"
+            value={form.getValue("catalog.search.meilisearch.timeout_ms") || "800"}
+            onChange={(value) => form.setValue("catalog.search.meilisearch.timeout_ms", value)}
+            disabled={!meiliEnabled}
+          />
+          <SettingField
+            label="Matching Strategy"
+            type="select"
+            value={form.getValue("catalog.search.meilisearch.matching_strategy") || "last"}
+            onChange={(value) =>
+              form.setValue("catalog.search.meilisearch.matching_strategy", value)
+            }
+            options={[
+              { value: "last", label: "Last" },
+              { value: "all", label: "All" },
+            ]}
+            disabled={!meiliEnabled}
+          />
+          <div className="py-3">
+            <ConnectionCheckAction
+              onClick={handleCheckConnection}
+              result={connectionResult}
+              isPending={checkConnection.isPending}
+              disabled={!meiliEnabled}
+            />
+          </div>
+        </FieldGroup>
+
+        <FieldGroup label="Status">
+          {statusLoading || !status ? (
+            <div className="space-y-3 py-3">
+              <Skeleton className="h-5 w-56" />
+              <Skeleton className="h-5 w-72" />
+              <Skeleton className="h-5 w-48" />
+            </div>
+          ) : (
+            <div className="divide-border divide-y">
+              <StatusRow
+                label="Active Provider"
+                value={status.active_provider === "meilisearch" ? "Meilisearch" : "Postgres FTS"}
+                badge={status.configured_provider}
+              />
+              <StatusRow
+                label="Health"
+                value={status.meilisearch.healthy ? "Healthy" : status.meilisearch.circuit_state}
+                badge={status.meilisearch.configured ? "configured" : "not configured"}
+              />
+              <StatusRow
+                label="Active Index"
+                value={status.index.active_index_uid || "Not built"}
+                badge={`schema ${status.index.schema_version}/${status.index.expected_schema_version}`}
+              />
+              <StatusRow label="Documents" value={String(status.index.document_count)} />
+              <StatusRow label="Pending Events" value={String(status.index.pending_events)} />
+              <StatusRow
+                label="Last Sync"
+                value={formatStatusDate(status.index.last_sync_at) || "Never"}
+              />
+              {status.meilisearch.last_fallback && (
+                <StatusRow label="Last Fallback" value={status.meilisearch.last_fallback} />
+              )}
+              <div className="flex flex-wrap gap-2 py-3">
+                <Button asChild size="sm" variant="outline">
+                  <Link to="/admin/tasks/rebuild_catalog_search_index">Rebuild Index</Link>
+                </Button>
+                <Button asChild size="sm" variant="ghost">
+                  <Link to="/admin/tasks/sync_catalog_search_index">Sync History</Link>
+                </Button>
+              </div>
+            </div>
+          )}
+        </FieldGroup>
+      </div>
+
+      <SaveBar
+        dirtyCount={form.dirtyCount}
+        onSave={form.save}
+        onDiscard={form.discard}
+        isSaving={form.isSaving}
+        restartRequired={form.restartRequired}
+      />
+    </div>
+  );
+}
+
+function StatusRow({ label, value, badge }: { label: string; value: string; badge?: string }) {
+  return (
+    <div className="flex flex-col gap-2 py-3 sm:flex-row sm:items-center sm:justify-between">
+      <span className="text-sm font-medium">{label}</span>
+      <span className="text-muted-foreground flex min-w-0 flex-wrap items-center gap-2 text-sm">
+        <span className="max-w-full text-right break-words">{value}</span>
+        {badge ? <Badge variant="outline">{badge}</Badge> : null}
+      </span>
+    </div>
+  );
+}
+
+function formatStatusDate(value?: string) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleString();
+}

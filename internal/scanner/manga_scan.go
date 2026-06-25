@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/idgen"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/titleutil"
@@ -174,7 +175,7 @@ func (s *Scanner) deleteOrphanedMangaSeries(ctx context.Context, folderID int) e
 	if s == nil || s.fileRepo == nil {
 		return nil
 	}
-	tag, err := s.fileRepo.Pool().Exec(ctx, `
+	rows, err := s.fileRepo.Pool().Query(ctx, `
 		DELETE FROM media_items mi
 		WHERE mi.type = 'manga'
 		  AND EXISTS (
@@ -184,12 +185,30 @@ func (s *Scanner) deleteOrphanedMangaSeries(ctx context.Context, folderID int) e
 		  AND NOT EXISTS (
 			SELECT 1 FROM manga_chapters mc WHERE mc.series_content_id = mi.content_id
 		  )
+		RETURNING mi.content_id
 	`, folderID)
 	if err != nil {
 		return fmt.Errorf("deleting orphaned manga series for folder %d: %w", folderID, err)
 	}
-	if n := tag.RowsAffected(); n > 0 {
-		slog.Info("manga scan: removed orphaned series", "folder_id", folderID, "deleted", n)
+	defer rows.Close()
+	var deletedIDs []string
+	for rows.Next() {
+		var contentID string
+		if err := rows.Scan(&contentID); err != nil {
+			return fmt.Errorf("scanning deleted manga series id: %w", err)
+		}
+		deletedIDs = append(deletedIDs, contentID)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterating deleted manga series ids: %w", err)
+	}
+	for _, contentID := range deletedIDs {
+		if err := catalog.EnqueueSearchIndexDelete(ctx, s.fileRepo.Pool(), contentID); err != nil {
+			return fmt.Errorf("enqueueing catalog search manga series delete: %w", err)
+		}
+	}
+	if len(deletedIDs) > 0 {
+		slog.Info("manga scan: removed orphaned series", "folder_id", folderID, "deleted", len(deletedIDs))
 	}
 	return nil
 }
@@ -377,6 +396,8 @@ func (s *Scanner) findOrCreateMangaSeries(ctx context.Context, folderID int, ser
 					"content_id", id,
 					"error", delErr,
 				)
+			} else if eventErr := catalog.EnqueueSearchIndexDelete(ctx, s.fileRepo.Pool(), id); eventErr != nil {
+				return "", fmt.Errorf("enqueue catalog search duplicate manga series delete: %w", eventErr)
 			}
 			return winner, nil
 		}
