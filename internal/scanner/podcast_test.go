@@ -147,6 +147,30 @@ func TestResolvePodcastMediaItemCreatesNewWhenRootHasNoClaim(t *testing.T) {
 	}
 }
 
+func TestApplyPodcastShowMetadataUpdatesIndexedFields(t *testing.T) {
+	item := &models.MediaItem{
+		ContentID: "podcast-1",
+		Type:      "podcast",
+		Title:     "Old Title",
+		SortTitle: "Old Title",
+		Year:      2023,
+	}
+
+	changed := applyPodcastShowMetadata(item, &parsedPodcastShow{Title: "The New Show", Year: 2024})
+	if !changed {
+		t.Fatal("applyPodcastShowMetadata reported no change")
+	}
+	if item.Title != "The New Show" {
+		t.Fatalf("Title = %q, want The New Show", item.Title)
+	}
+	if item.SortTitle != "New Show, The" {
+		t.Fatalf("SortTitle = %q, want New Show, The", item.SortTitle)
+	}
+	if item.Year != 2024 {
+		t.Fatalf("Year = %d, want 2024", item.Year)
+	}
+}
+
 func TestResolvePodcastMediaItemPropagatesRootLookupError(t *testing.T) {
 	wantErr := errors.New("root lookup failed")
 	finder := &fakeRootContentFinder{err: wantErr}
