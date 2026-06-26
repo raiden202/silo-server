@@ -46,6 +46,25 @@ export interface CatalogSearchStatus {
     last_sync_at?: string;
     last_processed_event_id: number;
   };
+  semantic?: {
+    ready: boolean;
+    disabled_reason?: string;
+    vector_coverage_ratio: number;
+    coverage_updated_at?: string;
+    per_type?: Array<{
+      type: string;
+      eligible: number;
+      vectorized: number;
+      vector_coverage_ratio: number;
+      ready: boolean;
+    }>;
+    capability: {
+      ok: boolean;
+      reason?: string;
+      embedder?: string;
+      dimensions?: number;
+    };
+  };
   tasks: Array<{
     key: string;
     name: string;
