@@ -241,6 +241,53 @@ export default function SearchSettings() {
                 label="Vectorized Documents"
                 value={String(status.index.vector_document_count)}
               />
+              {status.semantic && (
+                <>
+                  <StatusRow
+                    label="Semantic Readiness"
+                    value={status.semantic.ready ? "Ready" : "Not ready"}
+                    badge={status.semantic.ready ? undefined : status.semantic.disabled_reason}
+                  />
+                  <StatusRow
+                    label="Vector Coverage"
+                    value={formatPercent(status.semantic.vector_coverage_ratio)}
+                  />
+                  <StatusRow
+                    label="Coverage Updated"
+                    value={formatStatusDate(status.semantic.coverage_updated_at) || "Never"}
+                  />
+                  <StatusRow
+                    label="Embedder Capability"
+                    value={
+                      status.semantic.capability.ok
+                        ? "OK"
+                        : (status.semantic.capability.reason ?? "Unavailable")
+                    }
+                    badge={status.semantic.capability.embedder}
+                  />
+                  {status.semantic.per_type && status.semantic.per_type.length > 0 && (
+                    <div className="flex flex-col gap-2 py-3">
+                      <span className="text-sm font-medium">Per-Type Coverage</span>
+                      <div className="divide-border/60 divide-y">
+                        {status.semantic.per_type.map((t) => (
+                          <div
+                            key={t.type}
+                            className="flex items-center justify-between gap-2 py-1.5"
+                          >
+                            <span className="text-muted-foreground min-w-0 truncate text-sm">
+                              {t.type}: {t.vectorized}/{t.eligible} (
+                              {formatPercent(t.vector_coverage_ratio)})
+                            </span>
+                            <Badge variant={t.ready ? "secondary" : "outline"}>
+                              {t.ready ? "Ready" : "Not ready"}
+                            </Badge>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
               <StatusRow label="Pending Events" value={String(status.index.pending_events)} />
               <StatusRow
                 label="Last Sync"
@@ -300,4 +347,9 @@ function formatIndexedTypes(value?: string[]) {
 function formatSemanticRatio(value?: number) {
   if (typeof value !== "number" || Number.isNaN(value)) return "0";
   return value.toFixed(2);
+}
+
+function formatPercent(value?: number) {
+  if (typeof value !== "number" || Number.isNaN(value)) return "0%";
+  return `${Math.round(value * 100)}%`;
 }
