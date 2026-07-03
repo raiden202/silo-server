@@ -43,8 +43,15 @@ type Config struct {
 	// (and all other OTEL_EXPORTER_OTLP_* knobs) directly from the environment,
 	// which remains the single source of truth for exporter wiring.
 	Endpoint string
-	// Protocol selects the OTLP wire protocol.
+	// Protocol is the generic OTLP wire protocol (OTEL_EXPORTER_OTLP_PROTOCOL).
+	// It is the fallback for any signal without a signal-specific override.
 	Protocol Protocol
+	// TracesProtocol selects the trace exporter's wire protocol, honoring
+	// OTEL_EXPORTER_OTLP_TRACES_PROTOCOL and falling back to Protocol.
+	TracesProtocol Protocol
+	// LogsProtocol selects the log exporter's wire protocol, honoring
+	// OTEL_EXPORTER_OTLP_LOGS_PROTOCOL and falling back to Protocol.
+	LogsProtocol Protocol
 
 	// ServiceName populates the service.name resource attribute.
 	ServiceName string
@@ -68,13 +75,12 @@ func LoadConfig(nodeID string) Config {
 		serviceName = defaultServiceName
 	}
 
-	protocol := ProtocolGRPC
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_PROTOCOL"))) {
-	case "http/protobuf", "http":
-		protocol = ProtocolHTTP
-	case "grpc", "":
-		protocol = ProtocolGRPC
-	}
+	// The generic protocol is the fallback; per-signal env vars override it for
+	// their own exporter so mixed collector setups (e.g. HTTP logs, gRPC traces)
+	// work as the OTLP spec prescribes.
+	protocol := parseProtocol(os.Getenv("OTEL_EXPORTER_OTLP_PROTOCOL"), ProtocolGRPC)
+	tracesProtocol := parseProtocol(os.Getenv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"), protocol)
+	logsProtocol := parseProtocol(os.Getenv("OTEL_EXPORTER_OTLP_LOGS_PROTOCOL"), protocol)
 
 	ratio := defaultSamplerRatio
 	if raw := strings.TrimSpace(os.Getenv("OTEL_TRACES_SAMPLER_ARG")); raw != "" {
@@ -90,10 +96,25 @@ func LoadConfig(nodeID string) Config {
 		Enabled:        enabled,
 		Endpoint:       endpoint,
 		Protocol:       protocol,
+		TracesProtocol: tracesProtocol,
+		LogsProtocol:   logsProtocol,
 		ServiceName:    serviceName,
 		ServiceVersion: strings.TrimSpace(os.Getenv("OTEL_SERVICE_VERSION")),
 		NodeID:         nodeID,
 		SamplerRatio:   ratio,
+	}
+}
+
+// parseProtocol maps an OTEL_EXPORTER_OTLP*_PROTOCOL value to a Protocol,
+// returning fallback when the value is empty or unrecognized.
+func parseProtocol(raw string, fallback Protocol) Protocol {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "http/protobuf", "http":
+		return ProtocolHTTP
+	case "grpc":
+		return ProtocolGRPC
+	default:
+		return fallback
 	}
 }
 

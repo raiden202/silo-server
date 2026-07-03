@@ -42,6 +42,12 @@ func SecretKey(key string) bool {
 // wraps by delegating Enabled/Handle to the inner handler.
 type Handler struct {
 	inner slog.Handler
+	// redactAll is set once the logger enters a group whose name is
+	// secret-bearing (e.g. WithGroup("authorization")). Inside such a subtree
+	// every leaf is masked regardless of its own key, matching how a
+	// slog.Group("authorization", ...) value is masked as a whole. It stays set
+	// for all descendant groups.
+	redactAll bool
 }
 
 // New returns a Handler wrapping inner.
@@ -58,12 +64,12 @@ func (h *Handler) Enabled(ctx context.Context, level slog.Level) bool {
 // When the record carries no secret-bearing keys, the original record is passed
 // through unchanged to avoid rebuilding it on the hot path.
 func (h *Handler) Handle(ctx context.Context, r slog.Record) error {
-	if !recordNeedsRedaction(r) {
+	if !h.redactAll && !recordNeedsRedaction(r) {
 		return h.inner.Handle(ctx, r)
 	}
 	nr := slog.NewRecord(r.Time, r.Level, r.Message, r.PC)
 	r.Attrs(func(a slog.Attr) bool {
-		nr.AddAttrs(redactAttr(a))
+		nr.AddAttrs(redactAttr(a, h.redactAll))
 		return true
 	})
 	return h.inner.Handle(ctx, nr)
@@ -74,15 +80,20 @@ func (h *Handler) Handle(ctx context.Context, r slog.Record) error {
 func (h *Handler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	redacted := make([]slog.Attr, len(attrs))
 	for i, a := range attrs {
-		redacted[i] = redactAttr(a)
+		redacted[i] = redactAttr(a, h.redactAll)
 	}
-	return &Handler{inner: h.inner.WithAttrs(redacted)}
+	return &Handler{inner: h.inner.WithAttrs(redacted), redactAll: h.redactAll}
 }
 
 // WithGroup delegates to the inner handler; grouped attributes are still
-// redacted by leaf key at Handle/WithAttrs time.
+// redacted by leaf key at Handle/WithAttrs time. A group whose name is itself
+// secret-bearing masks every leaf within the subtree, so nothing logged under
+// it (e.g. WithGroup("authorization").Info(..., "value", token)) leaks.
 func (h *Handler) WithGroup(name string) slog.Handler {
-	return &Handler{inner: h.inner.WithGroup(name)}
+	return &Handler{
+		inner:     h.inner.WithGroup(name),
+		redactAll: h.redactAll || SecretKey(name),
+	}
 }
 
 // recordNeedsRedaction reports whether any record-level attribute (or nested
@@ -118,20 +129,28 @@ func attrHasSecret(a slog.Attr) bool {
 	return false
 }
 
-func redactAttr(a slog.Attr) slog.Attr {
+// redactAttr masks a's value when its key is secret-bearing. When force is set
+// (the logger is inside a secret-named group), every leaf is masked regardless
+// of its own key, while group structure is preserved so the subtree stays
+// well-formed.
+func redactAttr(a slog.Attr, force bool) slog.Attr {
 	a.Value = a.Value.Resolve()
-	// Check the attr's own key first: a secret key masks the whole value,
-	// whether it's a leaf or an entire group subtree.
-	if SecretKey(a.Key) {
-		return slog.String(a.Key, Placeholder)
-	}
 	if a.Value.Kind() == slog.KindGroup {
+		// A group whose own key is secret collapses to a single placeholder,
+		// matching the leaf case; otherwise recurse, propagating force.
+		if SecretKey(a.Key) {
+			return slog.String(a.Key, Placeholder)
+		}
 		group := a.Value.Group()
 		out := make([]slog.Attr, len(group))
 		for i, ga := range group {
-			out[i] = redactAttr(ga)
+			out[i] = redactAttr(ga, force)
 		}
 		return slog.Attr{Key: a.Key, Value: slog.GroupValue(out...)}
+	}
+	// Leaf: mask when forced or when the key itself is secret-bearing.
+	if force || SecretKey(a.Key) {
+		return slog.String(a.Key, Placeholder)
 	}
 	return a
 }

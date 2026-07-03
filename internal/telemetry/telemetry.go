@@ -125,7 +125,7 @@ func buildResource(ctx context.Context, cfg Config) (*resource.Resource, error) 
 
 // newTraceExporter builds the OTLP trace exporter for the configured protocol.
 func newTraceExporter(ctx context.Context, cfg Config) (sdktrace.SpanExporter, error) {
-	if cfg.Protocol == ProtocolHTTP {
+	if cfg.TracesProtocol == ProtocolHTTP {
 		return otlptracehttp.New(ctx)
 	}
 	return otlptracegrpc.New(ctx)
@@ -133,7 +133,7 @@ func newTraceExporter(ctx context.Context, cfg Config) (sdktrace.SpanExporter, e
 
 // newLogExporter builds the OTLP log exporter for the configured protocol.
 func newLogExporter(ctx context.Context, cfg Config) (sdklog.Exporter, error) {
-	if cfg.Protocol == ProtocolHTTP {
+	if cfg.LogsProtocol == ProtocolHTTP {
 		return otlploghttp.New(ctx)
 	}
 	return otlplog.New(ctx)
