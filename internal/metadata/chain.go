@@ -311,7 +311,7 @@ func resolveEnabledProvidersByPriority(
 	for _, c := range caps {
 		metadataJSON := lookupCapabilityMetadata(ctx, pool, c.PluginInstallationID, c.CapabilityID)
 		if !providerSupportsLevel(metadataJSON, contentLevel) {
-			slog.Debug("skipping metadata provider: does not declare support for content level",
+			slog.DebugContext(ctx, "skipping metadata provider: does not declare support for content level", "component", "metadata",
 				"installation_id", c.PluginInstallationID,
 				"capability_id", c.CapabilityID,
 				"content_level", contentLevel)
@@ -482,14 +482,14 @@ func buildProviders(
 			c.PluginInstallationID,
 		).Scan(&enabled)
 		if err != nil || !enabled {
-			slog.Debug("skipping metadata provider: plugin installation disabled",
+			slog.DebugContext(ctx, "skipping metadata provider: plugin installation disabled", "component", "metadata",
 				"installation_id", c.PluginInstallationID, "capability_id", c.CapabilityID)
 			continue
 		}
 
 		provider, err := NewPluginProviderFromCapability(c.PluginInstallationID, c.CapabilityID, c.DisplayName, resolver)
 		if err != nil {
-			slog.Warn("skipping metadata provider during chain resolution",
+			slog.WarnContext(ctx, "skipping metadata provider during chain resolution", "component", "metadata",
 				"installation_id", c.PluginInstallationID,
 				"capability_id", c.CapabilityID,
 				"error", err,

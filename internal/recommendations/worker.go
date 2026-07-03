@@ -201,7 +201,7 @@ func (w *Worker) RequestProfileRefresh(ctx context.Context, userID int, profileI
 		w.clearProfileRefreshPending(key)
 	case <-time.After(10 * time.Millisecond):
 		w.clearProfileRefreshPending(key)
-		slog.Warn("profile refresh queue full; dropping request", "user_id", userID, "profile_id", profileID)
+		slog.WarnContext(ctx, "profile refresh queue full; dropping request", "component", "recommendations", "user_id", userID, "profile_id", profileID)
 	}
 }
 
@@ -380,21 +380,21 @@ func (w *Worker) cacheGlobalRows(ctx context.Context, repo *Repo, expires string
 	popular, _ := repo.GetPopularItems(ctx, 30, CacheCandidateLimit)
 	if len(popular) > 0 {
 		if err := repo.UpsertRecommendationCache(ctx, GlobalCacheUserID, GlobalCacheProfileID, RecTypePopular, "", popular, expires); err != nil {
-			slog.Warn("failed to cache recommendations", "error", err)
+			slog.WarnContext(ctx, "failed to cache recommendations", "component", "recommendations", "error", err)
 		}
 	}
 
 	recentlyAdded, _ := repo.GetRecentlyAddedItems(ctx, 14, CacheCandidateLimit)
 	if len(recentlyAdded) > 0 {
 		if err := repo.UpsertRecommendationCache(ctx, GlobalCacheUserID, GlobalCacheProfileID, RecTypeRecentlyAdded, "", recentlyAdded, expires); err != nil {
-			slog.Warn("failed to cache recommendations", "error", err)
+			slog.WarnContext(ctx, "failed to cache recommendations", "component", "recommendations", "error", err)
 		}
 	}
 
 	topRated, _ := repo.GetTopRatedItems(ctx, 5, CacheCandidateLimit)
 	if len(topRated) > 0 {
 		if err := repo.UpsertRecommendationCache(ctx, GlobalCacheUserID, GlobalCacheProfileID, RecTypeTopRated, "", topRated, expires); err != nil {
-			slog.Warn("failed to cache recommendations", "error", err)
+			slog.WarnContext(ctx, "failed to cache recommendations", "component", "recommendations", "error", err)
 		}
 	}
 
@@ -403,7 +403,7 @@ func (w *Worker) cacheGlobalRows(ctx context.Context, repo *Repo, expires string
 		items, _ := repo.GetGenreSamplerItems(ctx, genre, CacheCandidateLimit)
 		if len(items) > 0 {
 			if err := repo.UpsertRecommendationCache(ctx, GlobalCacheUserID, GlobalCacheProfileID, RecTypeGenreSamplerPrefix+genre, "", items, expires); err != nil {
-				slog.Warn("failed to cache recommendations", "error", err)
+				slog.WarnContext(ctx, "failed to cache recommendations", "component", "recommendations", "error", err)
 			}
 		}
 	}
@@ -414,7 +414,7 @@ func (w *Worker) cacheUserRows(ctx context.Context, repo *Repo, userID int, prof
 	var cached int
 	watchedSet, err := w.engine.watchedItemIDSet(ctx, userID, profileID)
 	if err != nil {
-		slog.Warn("failed to load watched items for recommendation cache", "user_id", userID, "profile_id", profileID, "error", err)
+		slog.WarnContext(ctx, "failed to load watched items for recommendation cache", "component", "recommendations", "user_id", userID, "profile_id", profileID, "error", err)
 		watchedSet = nil
 	}
 	watchedIDs := scoredItemIDsFromSet(watchedSet)
@@ -422,7 +422,7 @@ func (w *Worker) cacheUserRows(ctx context.Context, repo *Repo, userID int, prof
 
 	if aggregatedRow, err := w.engine.buildAggregatedRow(ctx, userID, profileID, CacheCandidateLimit, watchedIDs, accessFilter); err == nil && aggregatedRow != nil && len(aggregatedRow.Items) > 0 {
 		if err := repo.UpsertRecommendationCache(ctx, userID, profileID, RecTypeForYouMain, "", aggregatedRow.Items, expires); err != nil {
-			slog.Warn("failed to cache recommendations", "error", err)
+			slog.WarnContext(ctx, "failed to cache recommendations", "component", "recommendations", "error", err)
 		} else {
 			cached++
 		}
@@ -431,7 +431,7 @@ func (w *Worker) cacheUserRows(ctx context.Context, repo *Repo, userID int, prof
 	// Cache per-cluster ForYou rows.
 	clusterRows, err := w.engine.buildClusterRows(ctx, userID, profileID, CacheCandidateLimit, watchedIDs, accessFilter)
 	if err != nil {
-		slog.Warn("failed to build cluster recommendations for cache", "user_id", userID, "profile_id", profileID, "error", err)
+		slog.WarnContext(ctx, "failed to build cluster recommendations for cache", "component", "recommendations", "user_id", userID, "profile_id", profileID, "error", err)
 	}
 	for _, row := range clusterRows {
 		if len(row.Items) == 0 {
@@ -440,7 +440,7 @@ func (w *Worker) cacheUserRows(ctx context.Context, repo *Repo, userID int, prof
 
 		recType := fmt.Sprintf("%s%d", RecTypeForYouClusterPrefix, row.ClusterIndex)
 		if err := repo.UpsertRecommendationCache(ctx, userID, profileID, recType, "", row.Items, expires); err != nil {
-			slog.Warn("failed to cache recommendations", "error", err)
+			slog.WarnContext(ctx, "failed to cache recommendations", "component", "recommendations", "error", err)
 		}
 		cached++
 	}
@@ -449,7 +449,7 @@ func (w *Worker) cacheUserRows(ctx context.Context, repo *Repo, userID int, prof
 	items, err := w.engine.SimilarUsersLiked(ctx, userID, profileID, CacheCandidateLimit)
 	if err == nil && len(items) > 0 {
 		if err := repo.UpsertRecommendationCache(ctx, userID, profileID, RecTypeSimilarUsersLiked, "", items, expires); err != nil {
-			slog.Warn("failed to cache recommendations", "error", err)
+			slog.WarnContext(ctx, "failed to cache recommendations", "component", "recommendations", "error", err)
 		} else {
 			cached++
 		}
@@ -457,7 +457,7 @@ func (w *Worker) cacheUserRows(ctx context.Context, repo *Repo, userID int, prof
 
 	recentCompleted, err := w.engine.signalReader().RecentCompletedItemIDs(ctx, userID, profileID, 3)
 	if err != nil {
-		slog.Warn("failed to load recent completed items for recommendation cache", "user_id", userID, "profile_id", profileID, "error", err)
+		slog.WarnContext(ctx, "failed to load recent completed items for recommendation cache", "component", "recommendations", "user_id", userID, "profile_id", profileID, "error", err)
 		return cached
 	}
 	for _, sourceItemID := range recentCompleted {
@@ -466,7 +466,7 @@ func (w *Worker) cacheUserRows(ctx context.Context, repo *Repo, userID int, prof
 			continue
 		}
 		if err := repo.UpsertRecommendationCache(ctx, userID, profileID, RecTypeBecauseWatched, sourceItemID, items, expires); err != nil {
-			slog.Warn("failed to cache recommendations", "error", err, "rec_type", RecTypeBecauseWatched, "source_item_id", sourceItemID)
+			slog.WarnContext(ctx, "failed to cache recommendations", "component", "recommendations", "error", err, "rec_type", RecTypeBecauseWatched, "source_item_id", sourceItemID)
 			continue
 		}
 		cached++
@@ -495,14 +495,14 @@ func (w *Worker) refreshStaleProfiles(ctx context.Context) {
 	repo := NewRepo(w.engine.pool)
 	stale, err := repo.GetStaleProfiles(ctx, 50)
 	if err != nil {
-		slog.Error("staleness check failed", "error", err)
+		slog.ErrorContext(ctx, "staleness check failed", "component", "recommendations", "error", err)
 		return
 	}
 	if len(stale) == 0 {
 		return
 	}
 
-	slog.Info("refreshing stale taste profiles", "count", len(stale))
+	slog.InfoContext(ctx, "refreshing stale taste profiles", "component", "recommendations", "count", len(stale))
 	for _, p := range stale {
 		w.RequestProfileRefresh(ctx, p.UserID, p.ProfileID)
 	}
@@ -520,7 +520,7 @@ func (w *Worker) profileRefreshLoop(ctx context.Context) {
 			return
 		case req := <-w.profileRefreshCh:
 			if err := w.refreshProfile(ctx, req.userID, req.profileID); err != nil {
-				slog.Error("profile recommendation refresh failed", "user_id", req.userID, "profile_id", req.profileID, "error", err)
+				slog.ErrorContext(ctx, "profile recommendation refresh failed", "component", "recommendations", "user_id", req.userID, "profile_id", req.profileID, "error", err)
 			}
 			w.clearProfileRefreshPending(profileRefreshKey(req.userID, req.profileID))
 		}
@@ -539,7 +539,7 @@ func (w *Worker) refreshProfile(ctx context.Context, userID int, profileID strin
 	expires := time.Now().Add(24 * time.Hour).Format(time.RFC3339)
 	w.cacheUserRows(refreshCtx, repo, userID, profileID, expires)
 	if err := repo.ClearStaleAt(refreshCtx, userID, profileID); err != nil {
-		slog.Warn("failed to clear stale profile marker", "user_id", userID, "profile_id", profileID, "error", err)
+		slog.WarnContext(ctx, "failed to clear stale profile marker", "component", "recommendations", "user_id", userID, "profile_id", profileID, "error", err)
 	}
 	return nil
 }

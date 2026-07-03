@@ -20,7 +20,7 @@ func (h *Handler) handleListeningStats(w http.ResponseWriter, r *http.Request) {
 	}
 	stats, err := h.deps.PlaybackSessionStore.AggregateStats(r.Context(), a.UserID, a.ProfileID)
 	if err != nil {
-		slog.Error("abs listening stats failed", "err", err, "user", a.UserID)
+		slog.ErrorContext(r.Context(), "abs listening stats failed", "component", "audiobooks", "err", err, "user", a.UserID)
 		http.Error(w, "stats unavailable", http.StatusInternalServerError)
 		return
 	}
@@ -40,7 +40,7 @@ func (h *Handler) handleListeningSessions(w http.ResponseWriter, r *http.Request
 	limit, page := readPagedQuery(r, 30)
 	sessions, total, err := h.deps.PlaybackSessionStore.ListClosedSessions(r.Context(), a.UserID, a.ProfileID, limit, page*limit)
 	if err != nil {
-		slog.Error("abs listening sessions failed", "err", err, "user", a.UserID)
+		slog.ErrorContext(r.Context(), "abs listening sessions failed", "component", "audiobooks", "err", err, "user", a.UserID)
 		http.Error(w, "sessions unavailable", http.StatusInternalServerError)
 		return
 	}

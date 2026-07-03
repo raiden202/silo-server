@@ -208,7 +208,7 @@ func (h *MarkersHandler) authorizeFile(w http.ResponseWriter, r *http.Request, f
 			case errors.Is(err, catalog.ErrItemNotFound), errors.Is(err, catalog.ErrEpisodeNotFound):
 				writeError(w, http.StatusNotFound, "not_found", "Media file not found")
 			default:
-				h.logger.Error("markers: authorize failed", "file_id", fileID, "error", err)
+				h.logger.ErrorContext(r.Context(), "markers: authorize failed", "file_id", fileID, "error", err)
 				writeError(w, http.StatusInternalServerError, "internal_error", "Failed to authorize media file")
 			}
 			return nil, false
@@ -236,14 +236,14 @@ func (h *MarkersHandler) loadItemPrimaryFile(w http.ResponseWriter, r *http.Requ
 
 	files, err := h.Files.GetByEpisodeID(r.Context(), itemID)
 	if err != nil {
-		h.logger.Error("markers: episode file lookup failed", "item_id", itemID, "error", err)
+		h.logger.ErrorContext(r.Context(), "markers: episode file lookup failed", "item_id", itemID, "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load item files")
 		return nil, false
 	}
 	if len(files) == 0 {
 		files, err = h.Files.GetByContentID(r.Context(), itemID)
 		if err != nil {
-			h.logger.Error("markers: content file lookup failed", "item_id", itemID, "error", err)
+			h.logger.ErrorContext(r.Context(), "markers: content file lookup failed", "item_id", itemID, "error", err)
 			writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load item files")
 			return nil, false
 		}
@@ -266,7 +266,7 @@ func (h *MarkersHandler) loadItemPrimaryFile(w http.ResponseWriter, r *http.Requ
 			if errors.Is(err, catalog.ErrItemNotFound) || errors.Is(err, catalog.ErrEpisodeNotFound) {
 				continue
 			}
-			h.logger.Error("markers: authorize item file failed", "item_id", itemID, "file_id", file.ID, "error", err)
+			h.logger.ErrorContext(r.Context(), "markers: authorize item file failed", "item_id", itemID, "file_id", file.ID, "error", err)
 			writeError(w, http.StatusInternalServerError, "internal_error", "Failed to authorize media file")
 			return nil, false
 		}
@@ -410,14 +410,14 @@ func (h *MarkersHandler) setMarkersForFile(w http.ResponseWriter, r *http.Reques
 	}
 
 	if _, err := h.Writer.UpsertAndClearMarkers(h.auditContext(r), file.ID, update, clears); err != nil {
-		h.logger.Error("markers: save failed", "file_id", file.ID, "error", err)
+		h.logger.ErrorContext(r.Context(), "markers: save failed", "file_id", file.ID, "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to save markers")
 		return
 	}
 
 	refreshed, err := h.reloadAndNotify(r.Context(), file.ID)
 	if err != nil {
-		h.logger.Error("markers: reload after save failed", "file_id", file.ID, "error", err)
+		h.logger.ErrorContext(r.Context(), "markers: reload after save failed", "file_id", file.ID, "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "Markers saved but failed to reload")
 		return
 	}
@@ -444,13 +444,13 @@ func (h *MarkersHandler) HandleClearFileSegment(w http.ResponseWriter, r *http.R
 		return
 	}
 	if _, err := h.Writer.ClearMarkers(h.auditContext(r), file.ID, []string{segment}); err != nil {
-		h.logger.Error("markers: clear segment failed", "file_id", file.ID, "segment", segment, "error", err)
+		h.logger.ErrorContext(r.Context(), "markers: clear segment failed", "file_id", file.ID, "segment", segment, "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to clear marker")
 		return
 	}
 	refreshed, err := h.reloadAndNotify(r.Context(), file.ID)
 	if err != nil {
-		h.logger.Error("markers: reload after clear failed", "file_id", file.ID, "segment", segment, "error", err)
+		h.logger.ErrorContext(r.Context(), "markers: reload after clear failed", "file_id", file.ID, "segment", segment, "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "Marker cleared but failed to reload")
 		return
 	}
@@ -486,7 +486,7 @@ func (h *MarkersHandler) HandleContributeFile(w http.ResponseWriter, r *http.Req
 	}
 	outcomes, err := h.Contributor.ContributeFile(r.Context(), file, markers.ContributeOptions{Provider: body.Provider, Segments: kinds})
 	if err != nil {
-		h.logger.Error("markers: contribute failed", "file_id", file.ID, "error", err)
+		h.logger.ErrorContext(r.Context(), "markers: contribute failed", "file_id", file.ID, "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "Contribution failed")
 		return
 	}
@@ -505,7 +505,7 @@ func (h *MarkersHandler) HandleListFileContributions(w http.ResponseWriter, r *h
 	}
 	rows, err := h.Contributions.ListByFile(r.Context(), file.ID)
 	if err != nil {
-		h.logger.Error("markers: list contributions failed", "file_id", file.ID, "error", err)
+		h.logger.ErrorContext(r.Context(), "markers: list contributions failed", "file_id", file.ID, "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load contributions")
 		return
 	}
@@ -535,14 +535,14 @@ func (h *MarkersHandler) HandleListItemMarkerHistory(w http.ResponseWriter, r *h
 
 	files, err := h.Files.GetByEpisodeID(r.Context(), itemID)
 	if err != nil {
-		h.logger.Error("markers: episode history file lookup failed", "item_id", itemID, "error", err)
+		h.logger.ErrorContext(r.Context(), "markers: episode history file lookup failed", "item_id", itemID, "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load item files")
 		return
 	}
 	if len(files) == 0 {
 		files, err = h.Files.GetByContentID(r.Context(), itemID)
 		if err != nil {
-			h.logger.Error("markers: content history file lookup failed", "item_id", itemID, "error", err)
+			h.logger.ErrorContext(r.Context(), "markers: content history file lookup failed", "item_id", itemID, "error", err)
 			writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load item files")
 			return
 		}
@@ -573,7 +573,7 @@ func (h *MarkersHandler) HandleListMarkerHistory(w http.ResponseWriter, r *http.
 	}
 	rows, err := h.AuditHistory.ListAllMarkerEditAudit(r.Context(), limit)
 	if err != nil {
-		h.logger.Error("markers: list all history failed", "error", err)
+		h.logger.ErrorContext(r.Context(), "markers: list all history failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load marker history")
 		return
 	}
@@ -591,7 +591,7 @@ func (h *MarkersHandler) listMarkerHistory(w http.ResponseWriter, r *http.Reques
 	}
 	rows, err := h.AuditHistory.ListMarkerEditAudit(r.Context(), fileIDs, limit)
 	if err != nil {
-		h.logger.Error("markers: list history failed", "file_ids", fileIDs, "error", err)
+		h.logger.ErrorContext(r.Context(), "markers: list history failed", "file_ids", fileIDs, "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load marker history")
 		return
 	}

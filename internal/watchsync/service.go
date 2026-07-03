@@ -278,7 +278,7 @@ func (s *Service) RequestManualSync(ctx context.Context, userID int, profileID s
 		runCtx, cancel := context.WithTimeout(context.Background(), manualSyncTimeout)
 		defer cancel()
 		if _, err := s.syncConnectionWithRun(runCtx, conn, run); err != nil {
-			slog.Warn("manual watch provider sync failed", "provider", conn.Provider, "user_id", conn.UserID, "profile_id", conn.ProfileID, "error", err)
+			slog.WarnContext(ctx, "manual watch provider sync failed", "component", "watchsync", "provider", conn.Provider, "user_id", conn.UserID, "profile_id", conn.ProfileID, "error", err)
 		}
 	}()
 
@@ -322,7 +322,7 @@ func (s *Service) HandleLocalWatchEvent(ctx context.Context, event LocalWatchEve
 			ProfileID: event.ProfileID,
 			Plays:     plays,
 		}); err != nil {
-			slog.Warn("failed to dispatch local watch provider event", "kind", event.Kind, "user_id", event.UserID, "profile_id", event.ProfileID, "error", err)
+			slog.WarnContext(ctx, "failed to dispatch local watch provider event", "component", "watchsync", "kind", event.Kind, "user_id", event.UserID, "profile_id", event.ProfileID, "error", err)
 		}
 	}()
 	return nil
@@ -384,7 +384,7 @@ func (s *Service) recordLocalWatchEventError(ctx context.Context, conn Connectio
 	}
 	conn.LastError = err.Error()
 	if _, updateErr := s.repo.UpsertConnection(ctx, conn); updateErr != nil {
-		slog.Warn("failed to record local watch provider event error", "provider", conn.Provider, "connection_id", conn.ID, "error", updateErr)
+		slog.WarnContext(ctx, "failed to record local watch provider event error", "component", "watchsync", "provider", conn.Provider, "connection_id", conn.ID, "error", updateErr)
 	}
 }
 
@@ -572,7 +572,7 @@ func (s *Service) SyncDueConnections(ctx context.Context) error {
 	}
 	for _, conn := range conns {
 		if err := s.SyncConnection(ctx, conn, "scheduled"); err != nil {
-			slog.Warn("watch provider connection sync failed", "provider", conn.Provider, "user_id", conn.UserID, "profile_id", conn.ProfileID, "error", err)
+			slog.WarnContext(ctx, "watch provider connection sync failed", "component", "watchsync", "provider", conn.Provider, "user_id", conn.UserID, "profile_id", conn.ProfileID, "error", err)
 		}
 	}
 	return nil
