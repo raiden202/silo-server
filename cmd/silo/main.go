@@ -1004,6 +1004,12 @@ func main() {
 			installer,
 			pluginHost,
 			slog.Default(),
+			// Auto-updates rewrite installation rows (new version-specific
+			// InstallPath/Version) and delete the old install dir without going
+			// through pluginService. Wire OnLifecycleChange so the service's
+			// installation cache is invalidated and later plugin RPCs re-read
+			// the fresh row instead of a stale one.
+			pluginService.OnLifecycleChange,
 		)
 		go func() {
 			defer close(pluginAutoUpdateDone)
@@ -1117,12 +1123,32 @@ func main() {
 		rootClaimRepo = catalog.NewRootClaimRepository(deps.DB)
 		groupClaimRepo = catalog.NewGroupClaimRepository(deps.DB)
 		pluginResolver := metadata.NewPluginResolverAdapter(pluginService)
+		// Serve the metadata chain's plugin-installation enabled-check from the
+		// plugins service's in-memory installation cache. Declared as the
+		// interface type and only assigned when pluginService is non-nil so a
+		// nil *plugins.Service is passed as a genuine nil interface (not a
+		// typed-nil), letting buildProviders fall back to the pool query.
+		var installationEnabledChecker metadata.InstallationEnabledChecker
+		if pluginService != nil {
+			installationEnabledChecker = pluginService
+		}
 		metadataService = metadata.NewMetadataService(
-			chainRepo, pluginResolver,
+			chainRepo, pluginResolver, installationEnabledChecker,
 			itemRepo, providerIDRepo, episodeRepo, seasonRepo, libraryRepo, deps.FolderRepo,
 			personRepo,
 			deps.FileRepo, skippedRootRepo, staleIDRepo, rootClaimRepo,
 		)
+		// Drop the resolved-chain cache whenever a plugin is installed, enabled,
+		// disabled, updated, or uninstalled. The installation-enabled check is
+		// served from the plugins service's in-memory cache (invalidated on the
+		// same events), but resolveChainCached would otherwise keep serving a
+		// stale provider chain for up to chainCacheTTL after a provider's
+		// availability changes.
+		if pluginService != nil {
+			pluginService.AddLifecycleHook(func(context.Context) {
+				metadataService.InvalidateChainCache()
+			})
+		}
 		personRefreshService = metadata.NewPersonRefreshService(deps.DB, pluginResolver, personRepo)
 		personRefreshService.SetImageResolver(imageResolver)
 
