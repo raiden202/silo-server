@@ -849,7 +849,7 @@ func main() {
 		deps.FileRepo = fileRepo
 
 		ffprobePath := scanner.FFprobePathFromFFmpeg(cfg.Playback.FFmpegPath)
-		s := scanner.NewScanner(fileRepo, ffprobePath, deps.S3Public, cfg.Scanner.Workers, cfg.Scanner.EmptyTrashAfterScan)
+		s := scanner.NewScanner(fileRepo, ffprobePath, deps.S3Public, cfg.Scanner.Workers, cfg.Scanner.EmptyTrashAfterScan, cfg.Scanner.FileRemovalGrace)
 		s.SetSearchIndexProvider(activeCatalogSearchProvider)
 		configWatcher.OnChange(func(_, updated *config.Config) {
 			s.SetWorkers(updated.Scanner.Workers)
@@ -1543,10 +1543,12 @@ func main() {
 			}
 		})
 	}
-	// Auto-remove fully-watched items from the watchlist (standalone behavior,
+	// Auto-remove fully-watched movies from the watchlist (standalone behavior,
 	// default-on per profile), propagating removals to connected providers.
-	if itemRepo != nil && episodeRepo != nil && userStoreProvider != nil {
-		maintainer := watchlist.NewMaintainer(userStoreProvider, itemRepo, episodeRepo)
+	// Series are never removed; watchlist read paths hide fully-watched ones
+	// (catalog.WatchlistVisibility) so newly added episodes bring them back.
+	if itemRepo != nil && userStoreProvider != nil {
+		maintainer := watchlist.NewMaintainer(userStoreProvider, itemRepo)
 		if watchProviderService != nil {
 			maintainer.WithListEventDispatcher(watchProviderService)
 		}

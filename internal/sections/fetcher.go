@@ -78,6 +78,7 @@ type trendingSnapshotGetter interface {
 type Fetcher struct {
 	pool                 *pgxpool.Pool
 	progressFilter       *catalog.ContinueWatchingProgressFilter
+	watchlistVisibility  *catalog.WatchlistVisibility
 	StoreProvider        userstore.UserStoreProvider
 	CollectionRepo       *catalog.LibraryCollectionRepository
 	RecommendationRepo   *recommendations.Repo // retained for non-reader call sites
@@ -103,9 +104,10 @@ type Fetcher struct {
 // NewFetcher creates a new section Fetcher.
 func NewFetcher(pool *pgxpool.Pool) *Fetcher {
 	return &Fetcher{
-		pool:           pool,
-		progressFilter: catalog.NewContinueWatchingProgressFilter(pool),
-		Clock:          recipes.RealClock{},
+		pool:                pool,
+		progressFilter:      catalog.NewContinueWatchingProgressFilter(pool),
+		watchlistVisibility: catalog.NewWatchlistVisibilityFromRepos(catalog.NewItemRepository(pool), catalog.NewEpisodeRepository(pool)),
+		Clock:               recipes.RealClock{},
 	}
 }
 
@@ -1492,8 +1494,19 @@ func (f *Fetcher) fetchPersonalListSection(ctx context.Context, s ResolvedSectio
 		if err != nil {
 			return nil, 0, fmt.Errorf("listing watchlist: %w", err)
 		}
+		entryIDs := make([]string, 0, len(entries))
+		for _, entry := range entries {
+			entryIDs = append(entryIDs, entry.MediaItemID)
+		}
+		hidden, err := f.watchlistVisibility.HiddenSeriesIDs(ctx, store, profileID, entryIDs)
+		if err != nil {
+			return nil, 0, fmt.Errorf("filtering watched watchlist series: %w", err)
+		}
 		listed = make([]catalog.PersonalListEntry, 0, len(entries))
 		for _, entry := range entries {
+			if _, ok := hidden[entry.MediaItemID]; ok {
+				continue
+			}
 			listed = append(listed, catalog.PersonalListEntry{ID: entry.MediaItemID, AddedAt: entry.AddedAt})
 		}
 	case SectionFavorites:

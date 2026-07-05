@@ -72,8 +72,10 @@ type UserStore interface {
 	ListWatchlist(ctx context.Context, profileID string, limit, offset int) ([]WatchlistEntry, error)
 	ListWatchlistByMediaItems(ctx context.Context, profileID string, mediaItemIDs []string) (map[string]bool, error)
 	InWatchlist(ctx context.Context, profileID, mediaItemID string) (bool, error)
-	// RemoveWatchedFromWatchlist reports the profile's preference for auto-removing
-	// fully-watched items from the watchlist (defaults true).
+	// RemoveWatchedFromWatchlist reports the profile's preference for pruning
+	// fully-watched entries from the watchlist (defaults true): movies are
+	// removed outright on completion, while fully-watched series are only
+	// hidden from display so they reappear when new episodes are added.
 	RemoveWatchedFromWatchlist(ctx context.Context, profileID string) (bool, error)
 
 	// Collections
