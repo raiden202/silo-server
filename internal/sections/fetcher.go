@@ -1273,9 +1273,9 @@ func (f *Fetcher) fetchSection(ctx context.Context, s ResolvedSection, libraryID
 		return f.fetchEditorialSpotlight(ctx, s, libraryID, libraryIDs, filter)
 	case SectionProfileActivityFeed:
 		return f.fetchProfileActivityFeed(ctx, s, libraryID, libraryIDs, profileID, filter)
+	case SectionWatchlist, SectionFavorites:
+		return f.fetchPersonalListSection(ctx, s, libraryID, libraryIDs, userID, profileID, filter)
 	default:
-		// Profile-scoped types (continue_watching, watchlist, favorites)
-		// will be wired later when user store integration is added.
 		return nil, 0, fmt.Errorf("unsupported section type: %s", s.SectionType)
 	}
 }
@@ -1465,6 +1465,71 @@ func (f *Fetcher) fetchUserCollection(ctx context.Context, s ResolvedSection, li
 	orderedItems, total := limitUserCollectionSectionItems(orderedItems, s.ItemLimit)
 
 	return orderedItems, total, nil
+}
+
+// personalListFetchLimit bounds how many watchlist/favorites entries are
+// pulled from the user store when resolving a section; it mirrors the cap the
+// catalog resolver uses for personal sources.
+const personalListFetchLimit = 10000
+
+// fetchPersonalListSection resolves watchlist and favorites sections from the
+// profile's user store, preserving the stored list order and honoring the
+// section's optional filter_type / library filters.
+func (f *Fetcher) fetchPersonalListSection(ctx context.Context, s ResolvedSection, libraryID *int, libraryIDs []int, userID int, profileID string, filter catalog.AccessFilter) ([]*models.MediaItem, int, error) {
+	if f.StoreProvider == nil || userID <= 0 || profileID == "" {
+		return []*models.MediaItem{}, 0, nil
+	}
+
+	store, err := f.StoreProvider.ForUser(ctx, userID)
+	if err != nil {
+		return nil, 0, fmt.Errorf("getting user store for %s section: %w", s.SectionType, err)
+	}
+
+	var contentIDs []string
+	switch s.SectionType {
+	case SectionWatchlist:
+		entries, err := store.ListWatchlist(ctx, profileID, personalListFetchLimit, 0)
+		if err != nil {
+			return nil, 0, fmt.Errorf("listing watchlist: %w", err)
+		}
+		contentIDs = make([]string, 0, len(entries))
+		for _, entry := range entries {
+			contentIDs = append(contentIDs, entry.MediaItemID)
+		}
+	case SectionFavorites:
+		entries, err := store.ListFavorites(ctx, profileID, personalListFetchLimit, 0)
+		if err != nil {
+			return nil, 0, fmt.Errorf("listing favorites: %w", err)
+		}
+		contentIDs = make([]string, 0, len(entries))
+		for _, entry := range entries {
+			contentIDs = append(contentIDs, entry.MediaItemID)
+		}
+	default:
+		return nil, 0, fmt.Errorf("unsupported personal list section type: %s", s.SectionType)
+	}
+	if len(contentIDs) == 0 {
+		return []*models.MediaItem{}, 0, nil
+	}
+
+	items, err := f.fetchItemsByContentIDsFiltered(ctx, contentIDs, libraryID, libraryIDs, ParseConfigFilters(s.Config), filter)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	itemByID := make(map[string]*models.MediaItem, len(items))
+	for _, item := range items {
+		itemByID[item.ContentID] = item
+	}
+	ordered := make([]*models.MediaItem, 0, len(items))
+	for _, contentID := range contentIDs {
+		if item, ok := itemByID[contentID]; ok {
+			ordered = append(ordered, item)
+		}
+	}
+
+	ordered, total := limitUserCollectionSectionItems(ordered, s.ItemLimit)
+	return ordered, total, nil
 }
 
 func limitUserCollectionSectionItems(items []*models.MediaItem, limit int) ([]*models.MediaItem, int) {
@@ -2358,6 +2423,13 @@ func (f *Fetcher) fetchRandom(ctx context.Context, s ResolvedSection, libraryID 
 }
 
 func (f *Fetcher) fetchItemsByContentIDs(ctx context.Context, contentIDs []string, libraryID *int, libraryIDs []int, filter catalog.AccessFilter) ([]*models.MediaItem, error) {
+	return f.fetchItemsByContentIDsFiltered(ctx, contentIDs, libraryID, libraryIDs, SectionConfigFilters{}, filter)
+}
+
+// fetchItemsByContentIDsFiltered is fetchItemsByContentIDs with the section
+// config's optional type and library filters applied on top of the access
+// scope.
+func (f *Fetcher) fetchItemsByContentIDsFiltered(ctx context.Context, contentIDs []string, libraryID *int, libraryIDs []int, cfgFilters SectionConfigFilters, filter catalog.AccessFilter) ([]*models.MediaItem, error) {
 	if len(contentIDs) == 0 {
 		return []*models.MediaItem{}, nil
 	}
@@ -2374,8 +2446,10 @@ func (f *Fetcher) fetchItemsByContentIDs(ctx context.Context, contentIDs []strin
 	}
 	conditions = append(conditions, fmt.Sprintf("mi.content_id IN (%s)", strings.Join(placeholders, ", ")))
 
+	applyConfigTypeFilter("mi", cfgFilters.FilterType, &conditions, &args, &argIdx)
+
 	effectiveLibraryIDs := effectiveFetchLibraryIDs(libraryIDs, filter)
-	fromClause, libConditions, libArgs, newArgIdx := buildLibraryScope(libraryID, effectiveLibraryIDs, nil, filter.DisabledLibraryIDs, argIdx)
+	fromClause, libConditions, libArgs, newArgIdx := buildLibraryScope(libraryID, effectiveLibraryIDs, cfgFilters.LibraryIDs(), filter.DisabledLibraryIDs, argIdx)
 	conditions = append(conditions, libConditions...)
 	args = append(args, libArgs...)
 	argIdx = newArgIdx
