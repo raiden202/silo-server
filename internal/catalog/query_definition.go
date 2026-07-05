@@ -190,6 +190,26 @@ type QuerySort struct {
 	Order string `json:"order"`
 }
 
+// NormalizePersonalListSort validates the optional sort configured on a
+// watchlist/favorites section and applies the field's default order when none
+// is given. Returns false when the field is empty or unsupported, meaning the
+// list's stored order should be kept. "added_at" means the date the item was
+// added to the list (not to the library) and is resolved from the list
+// entries rather than the query executor.
+func NormalizePersonalListSort(field, order string) (QuerySort, bool) {
+	field = strings.ToLower(strings.TrimSpace(field))
+	switch field {
+	case "title", "release_date", "year", "rating_imdb", "added_at":
+	default:
+		return QuerySort{}, false
+	}
+	order = strings.ToLower(strings.TrimSpace(order))
+	if order != "asc" && order != "desc" {
+		order = querySortDefs[field].defaultOrder
+	}
+	return QuerySort{Field: field, Order: order}, true
+}
+
 func (q QueryDefinition) Normalize() QueryDefinition {
 	normalized := q
 	normalized.MediaScope = strings.ToLower(strings.TrimSpace(normalized.MediaScope))

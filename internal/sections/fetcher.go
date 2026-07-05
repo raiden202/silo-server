@@ -1485,32 +1485,37 @@ func (f *Fetcher) fetchPersonalListSection(ctx context.Context, s ResolvedSectio
 		return nil, 0, fmt.Errorf("getting user store for %s section: %w", s.SectionType, err)
 	}
 
-	var contentIDs []string
+	var listed []catalog.PersonalListEntry
 	switch s.SectionType {
 	case SectionWatchlist:
 		entries, err := store.ListWatchlist(ctx, profileID, personalListFetchLimit, 0)
 		if err != nil {
 			return nil, 0, fmt.Errorf("listing watchlist: %w", err)
 		}
-		contentIDs = make([]string, 0, len(entries))
+		listed = make([]catalog.PersonalListEntry, 0, len(entries))
 		for _, entry := range entries {
-			contentIDs = append(contentIDs, entry.MediaItemID)
+			listed = append(listed, catalog.PersonalListEntry{ID: entry.MediaItemID, AddedAt: entry.AddedAt})
 		}
 	case SectionFavorites:
 		entries, err := store.ListFavorites(ctx, profileID, personalListFetchLimit, 0)
 		if err != nil {
 			return nil, 0, fmt.Errorf("listing favorites: %w", err)
 		}
-		contentIDs = make([]string, 0, len(entries))
+		listed = make([]catalog.PersonalListEntry, 0, len(entries))
 		for _, entry := range entries {
-			contentIDs = append(contentIDs, entry.MediaItemID)
+			listed = append(listed, catalog.PersonalListEntry{ID: entry.MediaItemID, AddedAt: entry.AddedAt})
 		}
 	default:
 		return nil, 0, fmt.Errorf("unsupported personal list section type: %s", s.SectionType)
 	}
-	if len(contentIDs) == 0 {
+	if len(listed) == 0 {
 		return []*models.MediaItem{}, 0, nil
 	}
+
+	// added_at (date added to the list) reorders the entry IDs; the metadata
+	// sorts are applied to the resolved items further down.
+	qs, hasSort := catalog.NormalizePersonalListSort(parsePersonalListSort(s.Config))
+	contentIDs := catalog.OrderPersonalListIDs(listed, qs)
 
 	items, err := f.fetchItemsByContentIDsFiltered(ctx, contentIDs, libraryID, libraryIDs, ParseConfigFilters(s.Config), filter)
 	if err != nil {
@@ -1528,8 +1533,99 @@ func (f *Fetcher) fetchPersonalListSection(ctx context.Context, s ResolvedSectio
 		}
 	}
 
+	if hasSort && qs.Field != "added_at" {
+		sortPersonalListItems(ordered, qs)
+	}
+
 	ordered, total := limitUserCollectionSectionItems(ordered, s.ItemLimit)
 	return ordered, total, nil
+}
+
+// parsePersonalListSort extracts the optional flat sort/order keys from a
+// watchlist/favorites section config.
+func parsePersonalListSort(config json.RawMessage) (string, string) {
+	var cfg struct {
+		Sort  string `json:"sort"`
+		Order string `json:"order"`
+	}
+	if len(config) > 0 {
+		_ = json.Unmarshal(config, &cfg)
+	}
+	return cfg.Sort, cfg.Order
+}
+
+// sortPersonalListItems reorders a personal list rail by the configured sort.
+// Items missing the sort field's value go last regardless of direction.
+func sortPersonalListItems(items []*models.MediaItem, qs catalog.QuerySort) {
+	desc := qs.Order == "desc"
+	sort.SliceStable(items, func(i, j int) bool {
+		a, b := items[i], items[j]
+		switch qs.Field {
+		case "title":
+			at, bt := personalListTitleKey(a), personalListTitleKey(b)
+			if desc {
+				return at > bt
+			}
+			return at < bt
+		case "release_date":
+			return personalListLess(personalListReleaseKey(a), personalListReleaseKey(b), desc)
+		case "year":
+			return personalListLess(personalListYearKey(a), personalListYearKey(b), desc)
+		case "rating_imdb":
+			return personalListLess(personalListRatingKey(a), personalListRatingKey(b), desc)
+		default:
+			return false
+		}
+	})
+}
+
+func personalListTitleKey(item *models.MediaItem) string {
+	if title := strings.TrimSpace(item.SortTitle); title != "" {
+		return strings.ToLower(title)
+	}
+	return strings.ToLower(strings.TrimSpace(item.Title))
+}
+
+// personalListReleaseKey returns an ISO date string (lexicographically
+// ordered), preferring release_date and falling back to a series' first air
+// date. Empty means unknown.
+func personalListReleaseKey(item *models.MediaItem) string {
+	if item.ReleaseDate != nil && strings.TrimSpace(*item.ReleaseDate) != "" {
+		return strings.TrimSpace(*item.ReleaseDate)
+	}
+	if item.FirstAirDate != nil {
+		return strings.TrimSpace(*item.FirstAirDate)
+	}
+	return ""
+}
+
+func personalListYearKey(item *models.MediaItem) string {
+	if item.Year <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("%04d", item.Year)
+}
+
+func personalListRatingKey(item *models.MediaItem) string {
+	if item.RatingIMDB == nil {
+		return ""
+	}
+	return fmt.Sprintf("%08.3f", *item.RatingIMDB)
+}
+
+// personalListLess compares string sort keys where "" means the item has no
+// value for the field; missing values always sort last.
+func personalListLess(a, b string, desc bool) bool {
+	if (a == "") != (b == "") {
+		return a != ""
+	}
+	if a == b {
+		return false
+	}
+	if desc {
+		return a > b
+	}
+	return a < b
 }
 
 func limitUserCollectionSectionItems(items []*models.MediaItem, limit int) ([]*models.MediaItem, int) {

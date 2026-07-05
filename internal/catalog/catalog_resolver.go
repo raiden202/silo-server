@@ -377,8 +377,9 @@ func (r *CatalogResolver) resolveSectionSource(ctx context.Context, req CatalogR
 		if section.SectionType == "watchlist" {
 			source = CatalogSourceWatchlist
 		}
-		// Personal list sections may carry optional type/library filters;
-		// apply them as an overlay query so the "see all" page matches the rail.
+		// Personal list sections may carry optional type/library filters and a
+		// sort; apply them as an overlay query so the "see all" page matches
+		// the rail. Without a configured sort the stored list order is kept.
 		sectionFilters := parseCatalogSectionFilters(section.Config)
 		query := QueryDefinition{
 			MediaScope: sectionFilters.FilterType,
@@ -387,13 +388,21 @@ func (r *CatalogResolver) resolveSectionSource(ctx context.Context, req CatalogR
 		if section.Scope == "library" && section.LibraryID != nil {
 			query.LibraryIDs = []int{*section.LibraryID}
 		}
+		useSourceOrder := true
+		if qs, ok := NormalizePersonalListSort(parseCatalogSectionSort(section.Config)); ok {
+			query.Sort = qs
+			// added_at (date added to the list) is applied by
+			// loadPersonalSourceIDs, which keeps the source order path;
+			// metadata sorts go through the query executor instead.
+			useSourceOrder = qs.Field == "added_at"
+		}
 		return r.resolvePersonalSource(ctx, CatalogRequest{
 			Source:         source,
 			Query:          query,
 			Limit:          req.Limit,
 			Offset:         req.Offset,
 			SkipTotal:      req.SkipTotal,
-			UseSourceOrder: true,
+			UseSourceOrder: useSourceOrder,
 		}, access)
 	case "recently_added":
 		return r.resolveSectionBrowseSource(ctx, req, access, section, "added_at", "desc")
@@ -1570,6 +1579,19 @@ func parseCatalogSectionFilters(config json.RawMessage) catalogSectionFilters {
 	return filters
 }
 
+// parseCatalogSectionSort extracts the optional flat sort/order keys from a
+// watchlist/favorites section config.
+func parseCatalogSectionSort(config json.RawMessage) (string, string) {
+	var cfg struct {
+		Sort  string `json:"sort"`
+		Order string `json:"order"`
+	}
+	if len(config) > 0 {
+		_ = json.Unmarshal(config, &cfg)
+	}
+	return cfg.Sort, cfg.Order
+}
+
 func normalizeCatalogSectionLibraryIDs(single *int, multiple []int) []int {
 	seen := map[int]struct{}{}
 	result := make([]int, 0, len(multiple)+1)
@@ -1676,6 +1698,41 @@ func catalogProfileCanAccessCollection(collection *userstore.Collection, profile
 	return false
 }
 
+// PersonalListEntry pairs a list member with the timestamp it was added to
+// the list (watchlist/favorites), as stored by the user store.
+type PersonalListEntry struct {
+	ID      string
+	AddedAt string
+}
+
+// OrderPersonalListIDs returns the entry IDs, reordered by list added_at when
+// that sort is requested; any other (or no) sort keeps the stored list order.
+// AddedAt strings from one store share a format, so lexicographic comparison
+// preserves chronology; entries with no timestamp sort last.
+func OrderPersonalListIDs(entries []PersonalListEntry, qs QuerySort) []string {
+	if qs.Field == "added_at" {
+		asc := qs.Order == "asc"
+		slices.SortStableFunc(entries, func(a, b PersonalListEntry) int {
+			if (a.AddedAt == "") != (b.AddedAt == "") {
+				if a.AddedAt != "" {
+					return -1
+				}
+				return 1
+			}
+			cmp := strings.Compare(a.AddedAt, b.AddedAt)
+			if !asc {
+				cmp = -cmp
+			}
+			return cmp
+		})
+	}
+	ids := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		ids = append(ids, entry.ID)
+	}
+	return ids
+}
+
 func (r *CatalogResolver) loadPersonalSourceIDs(ctx context.Context, store userstore.UserStore, req CatalogRequest, profileID string) ([]string, error) {
 	switch req.Source {
 	case CatalogSourceFavorites:
@@ -1683,21 +1740,21 @@ func (r *CatalogResolver) loadPersonalSourceIDs(ctx context.Context, store users
 		if err != nil {
 			return nil, err
 		}
-		ids := make([]string, 0, len(entries))
+		listed := make([]PersonalListEntry, 0, len(entries))
 		for _, entry := range entries {
-			ids = append(ids, entry.MediaItemID)
+			listed = append(listed, PersonalListEntry{ID: entry.MediaItemID, AddedAt: entry.AddedAt})
 		}
-		return ids, nil
+		return OrderPersonalListIDs(listed, req.Query.Sort), nil
 	case CatalogSourceWatchlist:
 		entries, err := store.ListWatchlist(ctx, profileID, 10000, 0)
 		if err != nil {
 			return nil, err
 		}
-		ids := make([]string, 0, len(entries))
+		listed := make([]PersonalListEntry, 0, len(entries))
 		for _, entry := range entries {
-			ids = append(ids, entry.MediaItemID)
+			listed = append(listed, PersonalListEntry{ID: entry.MediaItemID, AddedAt: entry.AddedAt})
 		}
-		return ids, nil
+		return OrderPersonalListIDs(listed, req.Query.Sort), nil
 	case CatalogSourceHistory:
 		entries, err := store.ListHistory(ctx, profileID, 10000, 0)
 		if err != nil {
