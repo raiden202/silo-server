@@ -1733,6 +1733,17 @@ func OrderPersonalListIDs(entries []PersonalListEntry, qs QuerySort) []string {
 	return ids
 }
 
+// watchlistVisibility builds the fully-watched-series display filter, falling
+// back to a pool-backed episode repository when none was injected (mirroring
+// the history path below).
+func (r *CatalogResolver) watchlistVisibility() *WatchlistVisibility {
+	episodes := r.episodeRepo
+	if episodes == nil && r.itemRepo != nil {
+		episodes = NewEpisodeRepository(r.itemRepo.pool)
+	}
+	return NewWatchlistVisibilityFromRepos(r.itemRepo, episodes)
+}
+
 func (r *CatalogResolver) loadPersonalSourceIDs(ctx context.Context, store userstore.UserStore, req CatalogRequest, profileID string) ([]string, error) {
 	switch req.Source {
 	case CatalogSourceFavorites:
@@ -1750,8 +1761,19 @@ func (r *CatalogResolver) loadPersonalSourceIDs(ctx context.Context, store users
 		if err != nil {
 			return nil, err
 		}
+		entryIDs := make([]string, 0, len(entries))
+		for _, entry := range entries {
+			entryIDs = append(entryIDs, entry.MediaItemID)
+		}
+		hidden, err := r.watchlistVisibility().HiddenSeriesIDs(ctx, store, profileID, entryIDs)
+		if err != nil {
+			return nil, fmt.Errorf("filtering watched watchlist series: %w", err)
+		}
 		listed := make([]PersonalListEntry, 0, len(entries))
 		for _, entry := range entries {
+			if _, ok := hidden[entry.MediaItemID]; ok {
+				continue
+			}
 			listed = append(listed, PersonalListEntry{ID: entry.MediaItemID, AddedAt: entry.AddedAt})
 		}
 		return OrderPersonalListIDs(listed, req.Query.Sort), nil
