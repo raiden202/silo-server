@@ -372,17 +372,24 @@ func (r *CatalogResolver) resolveSectionSource(ctx context.Context, req CatalogR
 			SkipTotal:      req.SkipTotal,
 			UseSourceOrder: true,
 		}, access)
-	case "favorites":
+	case "favorites", "watchlist":
+		source := CatalogSourceFavorites
+		if section.SectionType == "watchlist" {
+			source = CatalogSourceWatchlist
+		}
+		// Personal list sections may carry optional type/library filters;
+		// apply them as an overlay query so the "see all" page matches the rail.
+		sectionFilters := parseCatalogSectionFilters(section.Config)
+		query := QueryDefinition{
+			MediaScope: sectionFilters.FilterType,
+			LibraryIDs: append([]int(nil), sectionFilters.LibraryIDs...),
+		}.Normalize()
+		if section.Scope == "library" && section.LibraryID != nil {
+			query.LibraryIDs = []int{*section.LibraryID}
+		}
 		return r.resolvePersonalSource(ctx, CatalogRequest{
-			Source:         CatalogSourceFavorites,
-			Limit:          req.Limit,
-			Offset:         req.Offset,
-			SkipTotal:      req.SkipTotal,
-			UseSourceOrder: true,
-		}, access)
-	case "watchlist":
-		return r.resolvePersonalSource(ctx, CatalogRequest{
-			Source:         CatalogSourceWatchlist,
+			Source:         source,
+			Query:          query,
 			Limit:          req.Limit,
 			Offset:         req.Offset,
 			SkipTotal:      req.SkipTotal,
