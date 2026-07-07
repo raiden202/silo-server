@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useNavigate } from "react-router";
 import type { FileVersion, ItemDetail } from "@/api/types";
 import type { PlayerSubtitleTrackSignature, PrePlaySubtitleSelection } from "@/player/types";
@@ -29,6 +29,7 @@ import QualityBadges from "./components/QualityBadges";
 import ScoreRow from "./components/ScoreRow";
 import HeroCrewLine from "./components/HeroCrewLine";
 import ActionBar from "./components/ActionBar";
+import MediaInfoDialog from "./components/MediaInfoDialog";
 import SubtitleSearchDialog from "./components/SubtitleSearchDialog";
 import { sortByResolution } from "./components/VersionFlyout";
 import { selectDefaultPlaybackVariantVersion } from "./components/versionRankingUtils";
@@ -71,6 +72,8 @@ export default function MovieContent({ item }: { item: ItemDetail & { type: "mov
   const [splitOpen, setSplitOpen] = useState(false);
   const [downloadOpen, setDownloadOpen] = useState(false);
   const [subtitleSearchOpen, setSubtitleSearchOpen] = useState(false);
+  const [mediaInfoOpen, setMediaInfoOpen] = useState(false);
+  const [mediaInfoFileId, setMediaInfoFileId] = useState<number | null>(null);
 
   // Version selection state — drives the Play button and inline stream popovers.
   const sortedVersions = useMemo(() => sortByResolution(item.versions), [item.versions]);
@@ -100,6 +103,13 @@ export default function MovieContent({ item }: { item: ItemDetail & { type: "mov
         ? (sortedVersions.find((version) => version.file_id === manualSelectedFileId) ?? null)
         : null) ?? defaultSelectedVersion,
     [defaultSelectedVersion, manualSelectedFileId, sortedVersions],
+  );
+  const openMediaInfo = useCallback(
+    (fileId?: number) => {
+      setMediaInfoFileId(fileId ?? selectedVersion?.file_id ?? null);
+      setMediaInfoOpen(true);
+    },
+    [selectedVersion?.file_id],
   );
   const [audioSelectionMode, setAudioSelectionMode] = useState<"auto" | "explicit">("auto");
   const [explicitAudioTrackIndex, setExplicitAudioTrackIndex] = useState<number | null>(null);
@@ -275,6 +285,9 @@ export default function MovieContent({ item }: { item: ItemDetail & { type: "mov
             onSplitItem={
               canCurateMetadata && item.versions.length > 1 ? () => setSplitOpen(true) : undefined
             }
+            onShowMediaInfo={
+              canCurateMetadata && item.versions.length > 0 ? () => openMediaInfo() : undefined
+            }
             versions={item.versions}
             playbackVariants={item.playback_variants}
             selectedVersion={selectedVersion}
@@ -309,7 +322,13 @@ export default function MovieContent({ item }: { item: ItemDetail & { type: "mov
       />
 
       <div className="page-shell space-y-12 py-10 sm:space-y-14">
-        {canCurateMetadata && <MediaLocations title="Media locations" versions={item.versions} />}
+        {canCurateMetadata && (
+          <MediaLocations
+            title="Media locations"
+            versions={item.versions}
+            onShowMediaInfo={openMediaInfo}
+          />
+        )}
 
         {item.videos && item.videos.length > 0 && <TrailersSection videos={item.videos} />}
 
@@ -368,6 +387,15 @@ export default function MovieContent({ item }: { item: ItemDetail & { type: "mov
         version={selectedVersion}
         title={title}
       />
+      {canCurateMetadata && (
+        <MediaInfoDialog
+          open={mediaInfoOpen}
+          onOpenChange={setMediaInfoOpen}
+          versions={item.versions}
+          title={title}
+          initialFileId={mediaInfoFileId}
+        />
+      )}
     </div>
   );
 }
