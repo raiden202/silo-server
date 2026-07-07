@@ -14,15 +14,32 @@ import {
   upcomingBadgeLabel,
 } from "@/lib/upcomingEventPresentation";
 import type { SectionItem } from "@/api/types";
+import type { SectionCardImageStyle } from "@/api/types";
 
 interface SectionItemCardProps {
   item: SectionItem;
   libraryId?: number;
+  imageStyle?: SectionCardImageStyle;
 }
 
-export default function SectionItemCard({ item, libraryId }: SectionItemCardProps) {
-  const { loaded, onLoad } = useImageLoaded(item.poster_url);
-  const thumbhashUrl = item.poster_thumbhash ? decodeThumbhash(item.poster_thumbhash) : "";
+export default function SectionItemCard({
+  item,
+  libraryId,
+  imageStyle = "portrait",
+}: SectionItemCardProps) {
+  const isLandscape = imageStyle === "landscape";
+  const thumbhash =
+    (isLandscape ? item.backdrop_thumbhash || item.poster_thumbhash : item.poster_thumbhash) || "";
+  const thumbhashUrl = thumbhash ? decodeThumbhash(thumbhash) : "";
+  const imageUrl = isLandscape
+    ? item.backdrop_url || item.poster_url
+    : item.poster_url || item.backdrop_url;
+  const { loaded, onLoad } = useImageLoaded(imageUrl);
+  const imageAspect = isLandscape
+    ? "aspect-video"
+    : item.type === "audiobook"
+      ? "aspect-square"
+      : "aspect-[2/3]";
   const itemHref = `/item/${encodeURIComponent(item.content_id)}${
     libraryId ? `?libraryId=${libraryId}` : ""
   }`;
@@ -38,9 +55,7 @@ export default function SectionItemCard({ item, libraryId }: SectionItemCardProp
       <div className="relative">
         <ViewTransitionLink to={itemHref} className="block overflow-hidden rounded-xl">
           <div
-            className={`media-card-image relative ${
-              item.type === "audiobook" ? "aspect-square" : "aspect-[2/3]"
-            }`}
+            className={`media-card-image relative ${imageAspect}`}
             style={
               thumbhashUrl
                 ? {
@@ -51,9 +66,9 @@ export default function SectionItemCard({ item, libraryId }: SectionItemCardProp
                 : undefined
             }
           >
-            {item.poster_url ? (
+            {imageUrl ? (
               <img
-                src={item.poster_url}
+                src={imageUrl}
                 alt={item.title}
                 className={`h-full w-full object-cover transition-opacity duration-300 ${loaded ? "opacity-100" : "opacity-0"}`}
                 loading="lazy"
@@ -71,7 +86,11 @@ export default function SectionItemCard({ item, libraryId }: SectionItemCardProp
               </span>
             )}
             {item.status === "matched" && overlayPrefs && (
-              <CardOverlays data={overlayDataFromSectionItem(item)} prefs={overlayPrefs} />
+              <CardOverlays
+                data={overlayDataFromSectionItem(item)}
+                prefs={overlayPrefs}
+                variant={isLandscape ? "wide" : "poster"}
+              />
             )}
             {upcomingEvent && upcomingEvent.badges.length > 0 && (
               <div className="absolute top-2.5 left-2.5 flex max-w-[calc(100%-2.5rem)] flex-wrap gap-1">
@@ -94,7 +113,7 @@ export default function SectionItemCard({ item, libraryId }: SectionItemCardProp
           mediaType={item.type}
           libraryId={libraryId}
           userState={item.user_state}
-          variant="poster"
+          variant={isLandscape ? "wide" : "poster"}
         />
       </div>
       <ViewTransitionLink to={itemHref} className="block px-1 pt-3">

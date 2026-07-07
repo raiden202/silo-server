@@ -50,7 +50,7 @@ export default function LibraryRecommended({
   const layoutResetKey = layout
     .map(
       (section) =>
-        `${section.id}:${section.section_type}:${section.title}:${section.featured ? "featured" : "row"}:${section.item_limit}:${section.is_custom ? "custom" : "default"}:${section.customized ? "customized" : "clean"}`,
+        `${section.id}:${section.section_type}:${section.title}:${section.featured ? "featured" : "row"}:${section.item_limit}:${section.card_image_style ?? "auto"}:${section.is_custom ? "custom" : "default"}:${section.customized ? "customized" : "clean"}`,
     )
     .join("|");
 
@@ -194,7 +194,14 @@ export default function LibraryRecommended({
           return null;
         }
         if (slot.state === "ready" && slot.section) {
-          return <SectionRow key={slot.layout.id} section={slot.section} libraryId={libraryId} />;
+          return (
+            <SectionRow
+              key={slot.layout.id}
+              section={slot.section}
+              libraryId={libraryId}
+              cardImageStyle={slot.layout.card_image_style}
+            />
+          );
         }
         if (slot.state === "error") {
           return (

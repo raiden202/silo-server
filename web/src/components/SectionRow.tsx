@@ -6,12 +6,14 @@ import { useToggleSidebarPin } from "@/hooks/queries/sidebarPins";
 import { useOverlayPrefs } from "@/hooks/useOverlayPrefs";
 import { buildSectionCatalogHref, isSectionBrowseSupported } from "@/pages/catalogSearchParams";
 import type { ResolvedSection } from "@/api/types";
+import type { SectionCardImageStyle } from "@/api/types";
 import { Pin, PinOff } from "lucide-react";
 
 interface SectionRowProps {
   section: ResolvedSection;
   /** Library ID this section belongs to (enables pin-to-sidebar) */
   libraryId?: number;
+  cardImageStyle?: SectionCardImageStyle;
 }
 
 function SectionPinButton({
@@ -41,10 +43,11 @@ function SectionPinButton({
   );
 }
 
-export default function SectionRow({ section, libraryId }: SectionRowProps) {
+export default function SectionRow({ section, libraryId, cardImageStyle }: SectionRowProps) {
   const navigate = useViewTransitionNavigate();
   const browseSupported = isSectionBrowseSupported(section.section_type);
   const { prefs: overlayPrefs } = useOverlayPrefs();
+  const configuredImageStyle = cardImageStyle ?? section.card_image_style;
 
   const handleViewAll = () => {
     if (!browseSupported) {
@@ -84,19 +87,26 @@ export default function SectionRow({ section, libraryId }: SectionRowProps) {
     >
       {section.section_type === "continue_watching" || section.section_type === "next_up"
         ? (() => {
+            const configuredVariant =
+              configuredImageStyle === "portrait"
+                ? "poster"
+                : configuredImageStyle === "landscape"
+                  ? "wide"
+                  : undefined;
             // Continue Watching with only movies, audiobooks, and/or ebooks
             // looks better as upright covers (audiobook covers render square
             // within the poster variant; ebook covers are naturally 2:3).
             // Episodes (incl. Next Up) keep the wide variant so stills are
             // shown with their natural 16:9 framing.
             const cardVariant: "wide" | "poster" =
-              section.section_type === "continue_watching" &&
+              configuredVariant ??
+              (section.section_type === "continue_watching" &&
               section.items.length > 0 &&
               section.items.every(
                 (it) => it.type === "movie" || it.type === "audiobook" || it.type === "ebook",
               )
                 ? "poster"
-                : "wide";
+                : "wide");
             return section.items.map((item) => (
               <ContinueWatchingCard
                 key={item.content_id}
@@ -107,15 +117,18 @@ export default function SectionRow({ section, libraryId }: SectionRowProps) {
               />
             ));
           })()
-        : section.items.map((item) => (
-            <div
-              key={item.content_id}
-              className="w-[140px] shrink-0 sm:w-[160px] lg:w-[185px]"
-              role="listitem"
-            >
-              <SectionItemCard item={item} libraryId={libraryId} />
-            </div>
-          ))}
+        : (() => {
+            const imageStyle = configuredImageStyle ?? "portrait";
+            const cardWidth =
+              imageStyle === "landscape"
+                ? "w-[260px] shrink-0 sm:w-[315px]"
+                : "w-[140px] shrink-0 sm:w-[160px] lg:w-[185px]";
+            return section.items.map((item) => (
+              <div key={item.content_id} className={cardWidth} role="listitem">
+                <SectionItemCard item={item} libraryId={libraryId} imageStyle={imageStyle} />
+              </div>
+            ));
+          })()}
     </MediaCarousel>
   );
 }

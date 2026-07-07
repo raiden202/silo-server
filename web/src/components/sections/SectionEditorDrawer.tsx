@@ -28,6 +28,11 @@ import RecipeParamFields from "@/components/RecipeGallery/RecipeParamFields";
 import { SECTION_TYPES, FILTER_SECTION_TYPES, sectionTypeLabel } from "@/lib/sectionTypes";
 import type { Category, RecipeCatalogResponse, RecipeDefinition } from "@/lib/recipes";
 import {
+  applySectionCardImageStyle,
+  getSectionCardImageStyleSetting,
+  type SectionCardImageStyleSetting,
+} from "@/lib/sectionCardImageStyle";
+import {
   queryDefinitionFromSectionConfig,
   queryDefinitionToSectionConfig,
   type PageSectionConfig,
@@ -109,6 +114,7 @@ interface BuildProfileSectionSaveEntryInput {
   title: string;
   itemLimit: number;
   featured: boolean;
+  cardImageStyle?: SectionCardImageStyleSetting;
   queryDefinition: QueryDefinition;
   selectedCollectionId: string;
   recipeParams?: Record<string, unknown>;
@@ -121,6 +127,7 @@ export function buildProfileSectionSaveEntry({
   title,
   itemLimit,
   featured,
+  cardImageStyle,
   queryDefinition,
   selectedCollectionId,
   recipeParams,
@@ -152,7 +159,7 @@ export function buildProfileSectionSaveEntry({
     is_custom: section?.is_custom ?? true,
     customized: section?.customized ?? false,
     position: section?.position ?? 0,
-    config,
+    config: applySectionCardImageStyle(config, cardImageStyle),
   };
 }
 
@@ -164,6 +171,7 @@ interface BuildAdminSectionPayloadInput {
   title: string;
   itemLimit: number;
   featured: boolean;
+  cardImageStyle?: SectionCardImageStyleSetting;
   enabled: boolean;
   queryDefinition: QueryDefinition;
   selectedCollectionId: string;
@@ -179,6 +187,7 @@ export function buildAdminSectionPayload({
   title,
   itemLimit,
   featured,
+  cardImageStyle,
   enabled,
   queryDefinition,
   selectedCollectionId,
@@ -209,7 +218,7 @@ export function buildAdminSectionPayload({
     item_limit: itemLimit,
     featured,
     enabled,
-    config,
+    config: applySectionCardImageStyle(config, cardImageStyle),
   };
 }
 
@@ -247,6 +256,7 @@ export default function SectionEditorDrawer(props: SectionEditorDrawerProps) {
   const [title, setTitle] = useState("");
   const [itemLimit, setItemLimit] = useState(20);
   const [featured, setFeatured] = useState(false);
+  const [cardImageStyle, setCardImageStyle] = useState<SectionCardImageStyleSetting>("auto");
   const [enabled, setEnabled] = useState(true);
   const [queryDefinition, setQueryDefinition] = useState<QueryDefinition>(
     queryDefinitionFromSectionConfig(),
@@ -280,6 +290,7 @@ export default function SectionEditorDrawer(props: SectionEditorDrawerProps) {
       setTitle(props.section.title);
       setItemLimit(props.section.item_limit);
       setFeatured(props.section.featured);
+      setCardImageStyle(getSectionCardImageStyleSetting(props.section.config));
       setEnabled("enabled" in props.section ? Boolean(props.section.enabled) : true);
       setQueryDefinition(queryDefinitionFromSectionConfig(props.section.config));
       setSelectedCollectionId(getCollectionId(props.section.config));
@@ -289,6 +300,7 @@ export default function SectionEditorDrawer(props: SectionEditorDrawerProps) {
       setTitle("");
       setItemLimit(20);
       setFeatured(false);
+      setCardImageStyle("auto");
       setEnabled(true);
       setQueryDefinition(queryDefinitionFromSectionConfig());
       setSelectedCollectionId("");
@@ -324,6 +336,7 @@ export default function SectionEditorDrawer(props: SectionEditorDrawerProps) {
           title,
           itemLimit,
           featured,
+          cardImageStyle,
           queryDefinition,
           selectedCollectionId,
           recipeParams,
@@ -341,6 +354,7 @@ export default function SectionEditorDrawer(props: SectionEditorDrawerProps) {
           title,
           itemLimit,
           featured,
+          cardImageStyle,
           enabled,
           queryDefinition,
           selectedCollectionId,
@@ -433,6 +447,23 @@ export default function SectionEditorDrawer(props: SectionEditorDrawerProps) {
               min={1}
               max={100}
             />
+          </div>
+
+          <div className="space-y-2">
+            <Label>Row Images</Label>
+            <Select
+              value={cardImageStyle}
+              onValueChange={(value) => setCardImageStyle(value as SectionCardImageStyleSetting)}
+            >
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="auto">Automatic</SelectItem>
+                <SelectItem value="portrait">Portrait</SelectItem>
+                <SelectItem value="landscape">Landscape</SelectItem>
+              </SelectContent>
+            </Select>
           </div>
 
           <div className="flex items-center justify-between gap-4 rounded-md border px-3 py-3">

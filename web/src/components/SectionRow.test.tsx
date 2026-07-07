@@ -209,6 +209,94 @@ describe("SectionRow", () => {
     expect(markup).not.toContain("aspect-video");
   });
 
+  it("renders regular rows with landscape cards when configured", () => {
+    const queryClient = new QueryClient();
+    const section: ResolvedSection = {
+      id: "wide-recents",
+      section_type: "recently_added",
+      title: "Wide Recents",
+      featured: false,
+      item_limit: 10,
+      card_image_style: "landscape",
+      total_count: 1,
+      is_custom: false,
+      customized: false,
+      items: [
+        {
+          content_id: "movie-001",
+          type: "movie",
+          title: "Heat",
+          year: 1995,
+          genres: [],
+          status: "matched",
+          rating_imdb: null,
+          overview: "",
+          poster_url: "/movie-poster.jpg",
+          poster_thumbhash: "",
+          backdrop_url: "/movie-backdrop.jpg",
+          backdrop_thumbhash: "",
+          logo_url: "",
+        },
+      ],
+    };
+
+    const markup = renderToStaticMarkup(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter>
+          <SectionRow section={section} />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    expect(markup).toContain("aspect-video");
+    expect(markup).toContain('src="/movie-backdrop.jpg"');
+    expect(markup).toContain("w-[260px]");
+  });
+
+  it("lets layout card image style override cached section payload style", () => {
+    const queryClient = new QueryClient();
+    const section: ResolvedSection = {
+      id: "cached-recents",
+      section_type: "recently_added",
+      title: "Cached Recents",
+      featured: false,
+      item_limit: 10,
+      card_image_style: "landscape",
+      total_count: 1,
+      is_custom: false,
+      customized: false,
+      items: [
+        {
+          content_id: "movie-002",
+          type: "movie",
+          title: "Alien",
+          year: 1979,
+          genres: [],
+          status: "matched",
+          rating_imdb: null,
+          overview: "",
+          poster_url: "/alien-poster.jpg",
+          poster_thumbhash: "",
+          backdrop_url: "/alien-backdrop.jpg",
+          backdrop_thumbhash: "",
+          logo_url: "",
+        },
+      ],
+    };
+
+    const markup = renderToStaticMarkup(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter>
+          <SectionRow section={section} cardImageStyle="portrait" />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    expect(markup).toContain("aspect-[2/3]");
+    expect(markup).toContain('src="/alien-poster.jpg"');
+    expect(markup).not.toContain("aspect-video");
+  });
+
   it("routes supported section view-all actions to browse destinations", () => {
     const queryClient = new QueryClient();
     const section: ResolvedSection = {

@@ -3735,6 +3735,7 @@ export interface ResolvedSection {
   title: string;
   featured: boolean;
   item_limit: number;
+  card_image_style?: SectionCardImageStyle;
   total_count: number;
   is_custom: boolean;
   customized: boolean;
@@ -3773,9 +3774,12 @@ export interface ResolvedSectionLayout {
   title: string;
   featured: boolean;
   item_limit: number;
+  card_image_style?: SectionCardImageStyle;
   is_custom: boolean;
   customized: boolean;
 }
+
+export type SectionCardImageStyle = "portrait" | "landscape";
 
 export interface HomeLayoutResponse {
   sections: ResolvedSectionLayout[];

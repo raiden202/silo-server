@@ -46,7 +46,7 @@ export default function Home() {
   const layoutResetKey = layout
     .map(
       (section) =>
-        `${section.id}:${section.section_type}:${section.title}:${section.featured ? "featured" : "row"}:${section.item_limit}:${section.is_custom ? "custom" : "default"}:${section.customized ? "customized" : "clean"}`,
+        `${section.id}:${section.section_type}:${section.title}:${section.featured ? "featured" : "row"}:${section.item_limit}:${section.card_image_style ?? "auto"}:${section.is_custom ? "custom" : "default"}:${section.customized ? "customized" : "clean"}`,
     )
     .join("|");
 
@@ -202,7 +202,13 @@ export default function Home() {
             return null;
           }
           if (slot.state === "ready" && slot.section) {
-            return <SectionRow key={slot.layout.id} section={slot.section} />;
+            return (
+              <SectionRow
+                key={slot.layout.id}
+                section={slot.section}
+                cardImageStyle={slot.layout.card_image_style}
+              />
+            );
           }
           if (slot.state === "error") {
             return (

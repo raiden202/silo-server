@@ -164,6 +164,9 @@ func validateSectionConfig(sectionType sections.SectionType, config json.RawMess
 	if _, err := sections.ParseContinueType(config); err != nil {
 		return err.Error(), false
 	}
+	if _, err := sections.ParseCardImageStyle(config); err != nil {
+		return err.Error(), false
+	}
 
 	var rawLibraryConfig struct {
 		FilterLibraryID  *int  `json:"filter_library_id"`
@@ -474,15 +477,16 @@ type sectionItemResponse struct {
 }
 
 type resolvedSectionResponse struct {
-	ID          string                `json:"id"`
-	SectionType string                `json:"section_type"`
-	Title       string                `json:"title"`
-	Featured    bool                  `json:"featured"`
-	ItemLimit   int                   `json:"item_limit"`
-	TotalCount  int                   `json:"total_count"`
-	IsCustom    bool                  `json:"is_custom"`
-	Customized  bool                  `json:"customized"`
-	Items       []sectionItemResponse `json:"items"`
+	ID             string                  `json:"id"`
+	SectionType    string                  `json:"section_type"`
+	Title          string                  `json:"title"`
+	Featured       bool                    `json:"featured"`
+	ItemLimit      int                     `json:"item_limit"`
+	CardImageStyle sections.CardImageStyle `json:"card_image_style,omitempty"`
+	TotalCount     int                     `json:"total_count"`
+	IsCustom       bool                    `json:"is_custom"`
+	Customized     bool                    `json:"customized"`
+	Items          []sectionItemResponse   `json:"items"`
 }
 
 type homeSectionsResponse struct {
@@ -490,13 +494,14 @@ type homeSectionsResponse struct {
 }
 
 type resolvedSectionLayoutResponse struct {
-	ID          string `json:"id"`
-	SectionType string `json:"section_type"`
-	Title       string `json:"title"`
-	Featured    bool   `json:"featured"`
-	ItemLimit   int    `json:"item_limit"`
-	IsCustom    bool   `json:"is_custom"`
-	Customized  bool   `json:"customized"`
+	ID             string                  `json:"id"`
+	SectionType    string                  `json:"section_type"`
+	Title          string                  `json:"title"`
+	Featured       bool                    `json:"featured"`
+	ItemLimit      int                     `json:"item_limit"`
+	CardImageStyle sections.CardImageStyle `json:"card_image_style,omitempty"`
+	IsCustom       bool                    `json:"is_custom"`
+	Customized     bool                    `json:"customized"`
 }
 
 type homeLayoutResponse struct {
@@ -523,13 +528,14 @@ func (h *SectionHandler) HandleHomeLayout(w http.ResponseWriter, r *http.Request
 	}
 	for _, s := range resolved {
 		resp.Sections = append(resp.Sections, resolvedSectionLayoutResponse{
-			ID:          s.ID,
-			SectionType: string(s.SectionType),
-			Title:       s.Title,
-			Featured:    s.Featured,
-			ItemLimit:   s.ItemLimit,
-			IsCustom:    s.IsCustom,
-			Customized:  s.Customized,
+			ID:             s.ID,
+			SectionType:    string(s.SectionType),
+			Title:          s.Title,
+			Featured:       s.Featured,
+			ItemLimit:      s.ItemLimit,
+			CardImageStyle: sections.CardImageStyleFromConfig(s.Config),
+			IsCustom:       s.IsCustom,
+			Customized:     s.Customized,
 		})
 	}
 
@@ -556,13 +562,14 @@ func (h *SectionHandler) HandleLibraryLayout(w http.ResponseWriter, r *http.Requ
 	}
 	for _, s := range resolved {
 		resp.Sections = append(resp.Sections, resolvedSectionLayoutResponse{
-			ID:          s.ID,
-			SectionType: string(s.SectionType),
-			Title:       s.Title,
-			Featured:    s.Featured,
-			ItemLimit:   s.ItemLimit,
-			IsCustom:    s.IsCustom,
-			Customized:  s.Customized,
+			ID:             s.ID,
+			SectionType:    string(s.SectionType),
+			Title:          s.Title,
+			Featured:       s.Featured,
+			ItemLimit:      s.ItemLimit,
+			CardImageStyle: sections.CardImageStyleFromConfig(s.Config),
+			IsCustom:       s.IsCustom,
+			Customized:     s.Customized,
 		})
 	}
 
@@ -1270,15 +1277,16 @@ func (h *SectionHandler) buildSectionsResponse(r *http.Request, withItems []sect
 			items = append(items, h.toSectionItemResponse(s.SectionType, item, meta, overlaySummaries[item.ContentID], userStates[item.ContentID], imageURLs[imageKey]))
 		}
 		resp.Sections = append(resp.Sections, resolvedSectionResponse{
-			ID:          s.ID,
-			SectionType: string(s.SectionType),
-			Title:       s.Title,
-			Featured:    s.Featured,
-			ItemLimit:   s.ItemLimit,
-			TotalCount:  s.TotalCount,
-			IsCustom:    s.IsCustom,
-			Customized:  s.Customized,
-			Items:       items,
+			ID:             s.ID,
+			SectionType:    string(s.SectionType),
+			Title:          s.Title,
+			Featured:       s.Featured,
+			ItemLimit:      s.ItemLimit,
+			CardImageStyle: sections.CardImageStyleFromConfig(s.Config),
+			TotalCount:     s.TotalCount,
+			IsCustom:       s.IsCustom,
+			Customized:     s.Customized,
+			Items:          items,
 		})
 	}
 	return resp

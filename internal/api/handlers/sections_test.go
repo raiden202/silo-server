@@ -3,6 +3,7 @@ package handlers
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -182,6 +183,28 @@ func TestBuildSectionsResponseKeepsExistingEpisodeMeta(t *testing.T) {
 	}
 }
 
+func TestBuildSectionsResponseIncludesCardImageStyle(t *testing.T) {
+	h := &SectionHandler{}
+	withItems := []sections.SectionWithItems{
+		{
+			ResolvedSection: sections.ResolvedSection{
+				ID:          "wide-recents",
+				SectionType: sections.SectionRecentlyAdded,
+				Title:       "Wide Recents",
+				ItemLimit:   20,
+				Config:      json.RawMessage(`{"card_image_style":"landscape"}`),
+			},
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/sections", nil)
+	resp := h.buildSectionsResponse(req, withItems)
+
+	if got := resp.Sections[0].CardImageStyle; got != sections.CardImageStyleLandscape {
+		t.Fatalf("card image style = %q, want %q", got, sections.CardImageStyleLandscape)
+	}
+}
+
 type countingSectionImageResolver struct {
 	batchCalls  int
 	singleCalls int
@@ -296,6 +319,25 @@ func TestValidateSectionConfigAcceptsContinueTypes(t *testing.T) {
 				t.Fatalf("validateSectionConfig(%s) rejected config: %s", config, msg)
 			}
 		})
+	}
+}
+
+func TestValidateSectionConfigAcceptsCardImageStyles(t *testing.T) {
+	for _, style := range []string{"portrait", "landscape"} {
+		config := []byte(fmt.Sprintf(`{"card_image_style":%q}`, style))
+		if msg, ok := validateSectionConfig(sections.SectionRecentlyAdded, config); !ok {
+			t.Fatalf("validateSectionConfig(%s) rejected config: %s", style, msg)
+		}
+	}
+}
+
+func TestValidateSectionConfigRejectsUnknownCardImageStyle(t *testing.T) {
+	msg, ok := validateSectionConfig(sections.SectionRecentlyAdded, []byte(`{"card_image_style":"square"}`))
+	if ok {
+		t.Fatal("validateSectionConfig accepted unknown card_image_style")
+	}
+	if msg != "card_image_style must be 'portrait' or 'landscape'" {
+		t.Fatalf("message = %q", msg)
 	}
 }
 

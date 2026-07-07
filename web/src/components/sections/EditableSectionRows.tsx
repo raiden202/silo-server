@@ -2,6 +2,10 @@ import type { ReactNode } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { sectionTypeLabel } from "@/lib/sectionTypes";
+import {
+  getSectionCardImageStyleSetting,
+  sectionCardImageStyleLabel,
+} from "@/lib/sectionCardImageStyle";
 import { queryDefinitionFromSectionConfig } from "@/api/types";
 import type { Library } from "@/api/types";
 import type { RecipeCatalogResponse } from "@/lib/recipes";
@@ -68,11 +72,15 @@ export function SectionSummaryBadges({
   const collectionLabel = collectionId ? collectionLabels?.get(collectionId) : undefined;
   const resumeLabel =
     section.sectionType === "continue_watching" ? continueTypeLabel(section.config) : null;
+  const imageStyleLabel = sectionCardImageStyleLabel(
+    getSectionCardImageStyleSetting(section.config),
+  );
 
   return (
     <div className="flex flex-wrap gap-1">
       <Badge variant="secondary">{recipeLabel(catalog, section.sectionType)}</Badge>
       {resumeLabel ? <Badge variant="outline">{resumeLabel}</Badge> : null}
+      {imageStyleLabel ? <Badge variant="outline">{imageStyleLabel}</Badge> : null}
       {queryDefinition.media_scope === "movie" ? <Badge variant="outline">Movies</Badge> : null}
       {queryDefinition.media_scope === "series" ? <Badge variant="outline">Series</Badge> : null}
       {queryDefinition.media_scope === "episode" ? <Badge variant="outline">Episodes</Badge> : null}
