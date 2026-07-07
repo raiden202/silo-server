@@ -33,6 +33,13 @@ type Providers struct {
 // noopShutdown is an inert shutdown used when telemetry is disabled.
 func noopShutdown(context.Context) error { return nil }
 
+// noopProviders returns Providers backed by no-op implementations, used both
+// when telemetry is disabled and on setup failure so callers always get a
+// usable value.
+func noopProviders() *Providers {
+	return &Providers{LoggerProvider: lognoop.NewLoggerProvider()}
+}
+
 // Setup initializes the OpenTelemetry SDK from cfg. When cfg.Enabled is false it
 // installs nothing (leaving all otel globals as their built-in no-ops) and
 // returns a Providers holding no-op providers plus a no-op shutdown.
@@ -45,9 +52,13 @@ func noopShutdown(context.Context) error { return nil }
 //
 // The returned shutdown flushes and closes all providers; it is idempotent and
 // joins any errors from the underlying shutdown funcs.
+//
+// On failure Setup installs no globals and still returns usable no-op providers
+// and a no-op shutdown alongside the error, so callers can log the error and
+// keep running with telemetry disabled rather than treating it as fatal.
 func Setup(ctx context.Context, cfg Config) (*Providers, func(context.Context) error, error) {
 	if !cfg.Enabled {
-		return &Providers{LoggerProvider: lognoop.NewLoggerProvider()}, noopShutdown, nil
+		return noopProviders(), noopShutdown, nil
 	}
 
 	// resource.New can return a usable, fully-merged resource together with a
@@ -58,7 +69,7 @@ func Setup(ctx context.Context, cfg Config) (*Providers, func(context.Context) e
 	res, err := buildResource(ctx, cfg)
 	if err != nil {
 		if res == nil {
-			return nil, noopShutdown, err
+			return noopProviders(), noopShutdown, err
 		}
 		slog.WarnContext(ctx, "telemetry: resource built with warnings", "component", "telemetry", "error", err)
 	}
@@ -69,12 +80,12 @@ func Setup(ctx context.Context, cfg Config) (*Providers, func(context.Context) e
 	// globals so a failure leaves nothing installed.
 	traceExp, err := newTraceExporter(ctx, cfg)
 	if err != nil {
-		return nil, noopShutdown, err
+		return noopProviders(), noopShutdown, err
 	}
 	tp := sdktrace.NewTracerProvider(
 		sdktrace.WithResource(res),
 		sdktrace.WithBatcher(traceExp),
-		sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(cfg.SamplerRatio))),
+		sdktrace.WithSampler(newSampler(cfg)),
 	)
 	shutdownFuncs = append(shutdownFuncs, tp.Shutdown)
 
@@ -84,7 +95,7 @@ func Setup(ctx context.Context, cfg Config) (*Providers, func(context.Context) e
 		// Best-effort cleanup of what we already built before failing. Nothing
 		// is installed as a global yet, so this only drains the trace batcher.
 		_ = tp.Shutdown(ctx)
-		return nil, noopShutdown, err
+		return noopProviders(), noopShutdown, err
 	}
 	lp := sdklog.NewLoggerProvider(
 		sdklog.WithResource(res),
@@ -113,7 +124,9 @@ func buildResource(ctx context.Context, cfg Config) (*resource.Resource, error) 
 		attrs = append(attrs, semconv.ServiceVersion(cfg.ServiceVersion))
 	}
 	if cfg.NodeID != "" {
-		attrs = append(attrs, attribute.String("node.name", cfg.NodeID))
+		// service.instance.id is the semconv slot for per-instance identity;
+		// backends key on it to distinguish nodes sharing one service.name.
+		attrs = append(attrs, semconv.ServiceInstanceID(cfg.NodeID))
 	}
 	return resource.New(ctx,
 		resource.WithFromEnv(),
@@ -121,6 +134,26 @@ func buildResource(ctx context.Context, cfg Config) (*resource.Resource, error) 
 		resource.WithHost(),
 		resource.WithAttributes(attrs...),
 	)
+}
+
+// newSampler maps the configured OTEL_TRACES_SAMPLER strategy to an SDK
+// sampler. Unrecognized values were already normalized to the parent-based
+// trace-id-ratio default by parseSampler.
+func newSampler(cfg Config) sdktrace.Sampler {
+	switch cfg.Sampler {
+	case SamplerAlwaysOn:
+		return sdktrace.AlwaysSample()
+	case SamplerAlwaysOff:
+		return sdktrace.NeverSample()
+	case SamplerTraceIDRatio:
+		return sdktrace.TraceIDRatioBased(cfg.SamplerRatio)
+	case SamplerParentBasedAlwaysOn:
+		return sdktrace.ParentBased(sdktrace.AlwaysSample())
+	case SamplerParentBasedAlwaysOff:
+		return sdktrace.ParentBased(sdktrace.NeverSample())
+	default:
+		return sdktrace.ParentBased(sdktrace.TraceIDRatioBased(cfg.SamplerRatio))
+	}
 }
 
 // newTraceExporter builds the OTLP trace exporter for the configured protocol.

@@ -23,6 +23,25 @@ const (
 	ProtocolHTTP Protocol = "http/protobuf"
 )
 
+// Sampler identifies the head-sampling strategy (OTEL_TRACES_SAMPLER).
+type Sampler string
+
+const (
+	// SamplerAlwaysOn samples every trace.
+	SamplerAlwaysOn Sampler = "always_on"
+	// SamplerAlwaysOff samples nothing.
+	SamplerAlwaysOff Sampler = "always_off"
+	// SamplerTraceIDRatio samples by trace-id ratio regardless of the parent.
+	SamplerTraceIDRatio Sampler = "traceidratio"
+	// SamplerParentBasedAlwaysOn honors the parent decision, sampling roots.
+	SamplerParentBasedAlwaysOn Sampler = "parentbased_always_on"
+	// SamplerParentBasedAlwaysOff honors the parent decision, dropping roots.
+	SamplerParentBasedAlwaysOff Sampler = "parentbased_always_off"
+	// SamplerParentBasedTraceIDRatio honors the parent decision, sampling roots
+	// by trace-id ratio. This is the default.
+	SamplerParentBasedTraceIDRatio Sampler = "parentbased_traceidratio"
+)
+
 // defaultServiceName is used when OTEL_SERVICE_NAME is unset.
 const defaultServiceName = "silo-server"
 
@@ -57,15 +76,21 @@ type Config struct {
 	ServiceName string
 	// ServiceVersion populates the service.version resource attribute.
 	ServiceVersion string
-	// NodeID populates the node.name resource attribute.
+	// NodeID populates the service.instance.id resource attribute.
 	NodeID string
 
-	// SamplerRatio is the parent-based trace-id-ratio sampling probability.
+	// Sampler is the head-sampling strategy (OTEL_TRACES_SAMPLER). Unrecognized
+	// or unsupported values (e.g. jaeger_remote) fall back to
+	// parentbased_traceidratio.
+	Sampler Sampler
+	// SamplerRatio is the trace-id-ratio sampling probability used by the
+	// ratio-based samplers (OTEL_TRACES_SAMPLER_ARG).
 	SamplerRatio float64
 }
 
 // LoadConfig parses the telemetry configuration from the environment. nodeID is
-// the resolved node identity used for the node.name resource attribute.
+// the resolved node identity used for the service.instance.id resource
+// attribute.
 func LoadConfig(nodeID string) Config {
 	endpoint := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
 	enabled := truthy(os.Getenv("SILO_OTEL_ENABLED")) || endpoint != ""
@@ -101,7 +126,21 @@ func LoadConfig(nodeID string) Config {
 		ServiceName:    serviceName,
 		ServiceVersion: strings.TrimSpace(os.Getenv("OTEL_SERVICE_VERSION")),
 		NodeID:         nodeID,
+		Sampler:        parseSampler(os.Getenv("OTEL_TRACES_SAMPLER")),
 		SamplerRatio:   ratio,
+	}
+}
+
+// parseSampler maps an OTEL_TRACES_SAMPLER value to a Sampler, falling back to
+// parentbased_traceidratio when the value is empty, unrecognized, or names a
+// sampler this bootstrap does not support (e.g. jaeger_remote).
+func parseSampler(raw string) Sampler {
+	switch s := Sampler(strings.ToLower(strings.TrimSpace(raw))); s {
+	case SamplerAlwaysOn, SamplerAlwaysOff, SamplerTraceIDRatio,
+		SamplerParentBasedAlwaysOn, SamplerParentBasedAlwaysOff:
+		return s
+	default:
+		return SamplerParentBasedTraceIDRatio
 	}
 }
 

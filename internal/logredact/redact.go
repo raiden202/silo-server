@@ -134,6 +134,10 @@ func attrHasSecret(a slog.Attr) bool {
 // of its own key, while group structure is preserved so the subtree stays
 // well-formed.
 func redactAttr(a slog.Attr, force bool) slog.Attr {
+	// On the Handle slow path this re-invokes any LogValuer that attrHasSecret
+	// already resolved (on its own copy). slog requires LogValue to be cheap and
+	// side-effect free, so the double call is acceptable and is what keeps the
+	// no-secrets fast path allocation-free.
 	a.Value = a.Value.Resolve()
 	if a.Value.Kind() == slog.KindGroup {
 		// A group whose own key is secret collapses to a single placeholder,

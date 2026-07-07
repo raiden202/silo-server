@@ -21,20 +21,26 @@ Telemetry turns on when **either** `SILO_OTEL_ENABLED` is truthy **or**
 | `OTEL_EXPORTER_OTLP_PROTOCOL` | `grpc` (default) or `http/protobuf`. | `grpc` |
 | `OTEL_SERVICE_NAME` | `service.name` resource attribute. | `silo-server` |
 | `OTEL_SERVICE_VERSION` | `service.version` resource attribute. | unset |
-| `OTEL_TRACES_SAMPLER_ARG` | Parent-based trace-id ratio (0–1; clamps >1 to 1). | `1.0` |
+| `OTEL_TRACES_SAMPLER` | `always_on`, `always_off`, `traceidratio`, `parentbased_always_on`, `parentbased_always_off`, or `parentbased_traceidratio`. Unsupported values (e.g. `jaeger_remote`) fall back to the default. | `parentbased_traceidratio` |
+| `OTEL_TRACES_SAMPLER_ARG` | Trace-id ratio for the ratio-based samplers (0–1; clamps >1 to 1). | `1.0` |
+
+The node identity is attached as the `service.instance.id` resource attribute, so
+multiple Silo nodes sharing one `service.name` stay distinguishable in the backend.
 
 All other `OTEL_EXPORTER_OTLP_*` knobs (headers, TLS, per-signal endpoints) are read
 directly from the environment by the OTLP exporters — the environment is the single
 source of truth for exporter wiring.
 
 The endpoint/exporter connection is lazy and non-blocking: an unreachable collector
-does **not** delay or crash startup.
+does **not** delay or crash startup. Setup failure is also non-fatal: if the `OTEL_*`
+environment is malformed (e.g. an unparseable endpoint URL), the server logs an error
+and keeps running with telemetry disabled rather than crash-looping.
 
 ## Architecture
 
 The bootstrap lives in `internal/telemetry` (`Setup` in `telemetry.go`). When enabled
-it builds one shared `resource.Resource`, a `TracerProvider` (parent-based trace-id-ratio
-sampler, batched OTLP exporter), a `LoggerProvider` (batched OTLP exporter), and the W3C
+it builds one shared `resource.Resource`, a `TracerProvider` (sampler per
+`OTEL_TRACES_SAMPLER`, batched OTLP exporter), a `LoggerProvider` (batched OTLP exporter), and the W3C
 `TraceContext + Baggage` propagator. Shutdown is deferred in `cmd/silo/main.go` with a
 flush timeout so buffered spans/logs drain on exit.
 

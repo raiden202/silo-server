@@ -267,7 +267,10 @@ func pruneByAgeBefore(ctx context.Context, pool *pgxpool.Pool, cutoff time.Time,
 
 		result, err := pool.Exec(ctx, query, args...)
 		if err != nil {
-			slog.WarnContext(ctx, "opslog age cleanup error", "error", err, "component", component, "level", level)
+			// target_component/target_level describe the retention-policy scope
+			// being pruned; the plain "component" key is reserved for routing
+			// the log line itself (see Handler.Handle).
+			slog.WarnContext(ctx, "opslog age cleanup error", "component", "opslog", "error", err, "target_component", component, "target_level", level)
 			return totalDeleted
 		}
 		deleted := result.RowsAffected()
@@ -315,7 +318,7 @@ func pruneByRowCap(ctx context.Context, pool *pgxpool.Pool, maxRows int64, compo
 				LIMIT $%d
 			)`, nextArg2, filters2, nextArg2+1), args2...)
 		if err != nil {
-			slog.WarnContext(ctx, "opslog row-cap cleanup error", "error", err, "component", component, "level", level)
+			slog.WarnContext(ctx, "opslog row-cap cleanup error", "component", "opslog", "error", err, "target_component", component, "target_level", level)
 			return totalDeleted
 		}
 		deleted := result.RowsAffected()
@@ -403,7 +406,7 @@ func pruneBySizeCap(ctx context.Context, pool *pgxpool.Pool, maxSizeMB int64, co
 				LIMIT $%d
 			)`, nextArg4, filters4, nextArg4+1), args4...)
 		if err != nil {
-			slog.WarnContext(ctx, "opslog size-cap cleanup error", "error", err, "component", component, "level", level)
+			slog.WarnContext(ctx, "opslog size-cap cleanup error", "component", "opslog", "error", err, "target_component", component, "target_level", level)
 			return totalDeleted
 		}
 		deleted := result.RowsAffected()

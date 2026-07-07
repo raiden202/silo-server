@@ -146,7 +146,7 @@ func buildBaseHandler(format string, level slog.Leveler, otelHandler slog.Handle
 	}
 	// Fan out to the console and the OTel bridge. The OTel branch is level-gated
 	// by the shared level var so console and OTLP share one verbosity knob (see
-	// telemetry.levelGated) — otherwise slog.MultiHandler.Enabled would OR the
+	// telemetry.LevelGated) — otherwise slog.MultiHandler.Enabled would OR the
 	// branches and export Debug records while stderr stays silent. The whole
 	// fan-out is wrapped in secret redaction so console and OTLP both emit
 	// masked output (the opslog DB path redacts separately).
@@ -564,13 +564,17 @@ func main() {
 	telemetryCfg := telemetry.LoadConfig(nodeID)
 	telemetryProviders, telemetryShutdown, err := telemetry.Setup(ctx, telemetryCfg)
 	if err != nil {
-		log.Fatalf("telemetry setup: %v", err)
+		// Telemetry is best-effort: a malformed OTEL_* environment must not
+		// crash-loop the server. Setup installed no globals and returned no-op
+		// providers, so continue with telemetry disabled.
+		slog.ErrorContext(ctx, "telemetry setup failed; continuing with telemetry disabled", "component", "app", "error", err)
+		telemetryCfg.Enabled = false
 	}
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := telemetryShutdown(shutdownCtx); err != nil {
-			slog.Warn("telemetry shutdown error", "error", err)
+			slog.WarnContext(shutdownCtx, "telemetry shutdown error", "component", "app", "error", err)
 		}
 	}()
 

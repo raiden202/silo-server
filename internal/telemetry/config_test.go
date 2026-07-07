@@ -99,7 +99,8 @@ func TestLoadConfig(t *testing.T) {
 			for _, k := range []string{
 				"SILO_OTEL_ENABLED", "OTEL_EXPORTER_OTLP_ENDPOINT",
 				"OTEL_EXPORTER_OTLP_PROTOCOL", "OTEL_SERVICE_NAME",
-				"OTEL_SERVICE_VERSION", "OTEL_TRACES_SAMPLER_ARG",
+				"OTEL_SERVICE_VERSION", "OTEL_TRACES_SAMPLER",
+				"OTEL_TRACES_SAMPLER_ARG",
 			} {
 				t.Setenv(k, "")
 			}
@@ -123,6 +124,32 @@ func TestLoadConfig(t *testing.T) {
 			if cfg.NodeID != "node-1" {
 				t.Errorf("NodeID = %q, want %q", cfg.NodeID, "node-1")
 			}
+			if cfg.Sampler != SamplerParentBasedTraceIDRatio {
+				t.Errorf("Sampler = %q, want default %q", cfg.Sampler, SamplerParentBasedTraceIDRatio)
+			}
 		})
+	}
+}
+
+func TestParseSampler(t *testing.T) {
+	tests := []struct {
+		raw  string
+		want Sampler
+	}{
+		{"", SamplerParentBasedTraceIDRatio},
+		{"always_on", SamplerAlwaysOn},
+		{"ALWAYS_OFF", SamplerAlwaysOff},
+		{" traceidratio ", SamplerTraceIDRatio},
+		{"parentbased_always_on", SamplerParentBasedAlwaysOn},
+		{"parentbased_always_off", SamplerParentBasedAlwaysOff},
+		{"parentbased_traceidratio", SamplerParentBasedTraceIDRatio},
+		// Unsupported spec value and garbage both fall back to the default.
+		{"jaeger_remote", SamplerParentBasedTraceIDRatio},
+		{"bogus", SamplerParentBasedTraceIDRatio},
+	}
+	for _, tt := range tests {
+		if got := parseSampler(tt.raw); got != tt.want {
+			t.Errorf("parseSampler(%q) = %q, want %q", tt.raw, got, tt.want)
+		}
 	}
 }
