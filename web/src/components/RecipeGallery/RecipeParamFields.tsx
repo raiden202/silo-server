@@ -1,5 +1,7 @@
 import { CollectionSearchableSelect } from "@/components/CollectionSearchableSelect";
+import LibraryMultiSelect from "@/components/LibraryMultiSelect";
 import { useAllUserCollections } from "@/hooks/queries/useAllUserCollections";
+import { useAvailableUserLibraries } from "@/hooks/queries/libraries";
 import type { RecipeDefinition } from "@/lib/recipes";
 
 export interface RecipeParamFieldsProps {
@@ -14,6 +16,9 @@ export default function RecipeParamFields({ def, params, onChange }: RecipeParam
   }
   if (def.type === "continue_watching") {
     return <ContinueTypeParamField params={params} onChange={onChange} />;
+  }
+  if (def.type === "watchlist" || def.type === "favorites") {
+    return <PersonalListFilterFields params={params} onChange={onChange} />;
   }
   if (def.type === "seasonal_themed") {
     return <SeasonalParamField params={params} onChange={onChange} />;
@@ -110,6 +115,88 @@ export default function RecipeParamFields({ def, params, onChange }: RecipeParam
 interface ParamFieldProps {
   params: Record<string, unknown>;
   onChange: (next: Record<string, unknown>) => void;
+}
+
+// Sort choices for watchlist/favorites sections. The empty value keeps the
+// list's stored order (provider sync order, then newest-added first).
+const PERSONAL_LIST_SORT_OPTIONS = [
+  { value: "", label: "List order (default)" },
+  { value: "added_at:desc", label: "Date added (newest first)" },
+  { value: "added_at:asc", label: "Date added (oldest first)" },
+  { value: "title:asc", label: "Title (A–Z)" },
+  { value: "title:desc", label: "Title (Z–A)" },
+  { value: "release_date:desc", label: "Release date (newest first)" },
+  { value: "release_date:asc", label: "Release date (oldest first)" },
+  { value: "rating_imdb:desc", label: "IMDb rating (highest first)" },
+];
+
+// PersonalListFilterFields edits the optional filter_type / filter_library_ids
+// filters and sort for watchlist and favorites sections, e.g. a "Movies
+// watchlist" rail sorted by release date.
+function PersonalListFilterFields({ params, onChange }: ParamFieldProps) {
+  const { data: libraries } = useAvailableUserLibraries();
+  const filterType = typeof params.filter_type === "string" ? params.filter_type : "";
+  const libraryIds = Array.isArray(params.filter_library_ids)
+    ? params.filter_library_ids.filter((id): id is number => typeof id === "number")
+    : [];
+  const sortField = typeof params.sort === "string" ? params.sort : "";
+  const sortOrder =
+    typeof params.order === "string" && params.order
+      ? params.order
+      : sortField === "title"
+        ? "asc" // mirror the backend's per-field default order
+        : "desc";
+  const sortValue = sortField ? `${sortField}:${sortOrder}` : "";
+
+  return (
+    <div className="grid gap-4 md:grid-cols-2">
+      <label className="block">
+        <span className="mb-1 block text-xs text-white/70">Media type</span>
+        <select
+          value={filterType || "all"}
+          onChange={(e) =>
+            onChange({
+              ...params,
+              filter_type: e.target.value === "all" ? undefined : e.target.value,
+            })
+          }
+          className="w-full rounded border border-white/15 bg-white/5 px-3 py-2 text-sm"
+        >
+          <option value="all">All Media</option>
+          <option value="movie">Movies</option>
+          <option value="series">TV Shows</option>
+          <option value="audiobook">Audiobooks</option>
+        </select>
+      </label>
+      <label className="block">
+        <span className="mb-1 block text-xs text-white/70">Libraries</span>
+        <LibraryMultiSelect
+          libraries={libraries ?? []}
+          value={libraryIds}
+          onChange={(next) =>
+            onChange({ ...params, filter_library_ids: next.length > 0 ? next : undefined })
+          }
+        />
+      </label>
+      <label className="block md:col-span-2">
+        <span className="mb-1 block text-xs text-white/70">Sort</span>
+        <select
+          value={PERSONAL_LIST_SORT_OPTIONS.some((o) => o.value === sortValue) ? sortValue : ""}
+          onChange={(e) => {
+            const [sort, order] = e.target.value.split(":");
+            onChange({ ...params, sort: sort || undefined, order: order || undefined });
+          }}
+          className="w-full rounded border border-white/15 bg-white/5 px-3 py-2 text-sm"
+        >
+          {PERSONAL_LIST_SORT_OPTIONS.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+      </label>
+    </div>
+  );
 }
 
 function ContinueTypeParamField({ params, onChange }: ParamFieldProps) {

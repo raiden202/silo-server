@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/catalog"
+	"github.com/Silo-Server/silo-server/internal/catalog/reattribute"
 	"github.com/Silo-Server/silo-server/internal/contentid"
 	"github.com/Silo-Server/silo-server/internal/idgen"
 	"github.com/Silo-Server/silo-server/internal/lang"
@@ -176,6 +177,12 @@ type metadataFolderRepo interface {
 	GetByID(ctx context.Context, id int) (*models.MediaFolder, error)
 }
 
+// metadataVideoRepo persists remote provider videos. The concrete
+// *catalog.VideoRepository satisfies this.
+type metadataVideoRepo interface {
+	ReplaceByContentID(ctx context.Context, contentID string, videos []models.ItemVideo) error
+}
+
 // AutoTranslator is the seam to the metadata AI translation service: after a
 // refresh, libraries that opted in get missing localizations filled by AI.
 // Implemented by *translation.Service; AutoEnqueue must be cheap and must
@@ -281,6 +288,7 @@ func handleChildProvider404(
 type MetadataService struct {
 	chainRepo               *ChainRepository
 	pluginResolver          pluginMetadataResolver
+	enabledChecker          InstallationEnabledChecker
 	itemRepo                metadataItemRepo
 	providerIDRepo          metadataProviderIDRepo
 	episodeRepo             metadataEpisodeRepo
@@ -292,6 +300,7 @@ type MetadataService struct {
 	episodeLocalizationRepo *catalog.EpisodeLocalizationRepository
 	autoTranslator          AutoTranslator // optional; set via SetAutoTranslator
 	personRepo              *catalog.PersonRepository
+	videoRepo               metadataVideoRepo
 	fileRepo                FileContentUpdater
 	skippedRootRepo         metadataSkippedRootRepo
 	staleIDRepo             metadataStaleIDRepo
@@ -363,6 +372,7 @@ type chainResolver func(contentLevel string) ([]Provider, error)
 func NewMetadataService(
 	chainRepo *ChainRepository,
 	pluginResolver pluginMetadataResolver,
+	enabledChecker InstallationEnabledChecker,
 	itemRepo *catalog.ItemRepository,
 	providerIDRepo *catalog.ProviderIDRepository,
 	episodeRepo *catalog.EpisodeRepository,
@@ -383,10 +393,12 @@ func NewMetadataService(
 	var groupClaimRepo metadataGroupClaimRepo
 	var groupOverrideRepo metadataGroupOverrideRepo
 	var observedLocationRepo metadataObservedLocationRepo
+	var videoRepo metadataVideoRepo
 	var dbPool *pgxpool.Pool
 	if folderRepo != nil {
 		pool := folderRepo.Pool()
 		dbPool = pool
+		videoRepo = catalog.NewVideoRepository(pool)
 		itemLocalizationRepo = catalog.NewMediaItemLocalizationRepository(pool)
 		seasonLocalizationRepo = catalog.NewSeasonLocalizationRepository(pool)
 		episodeLocalizationRepo = catalog.NewEpisodeLocalizationRepository(pool)
@@ -399,6 +411,7 @@ func NewMetadataService(
 	return &MetadataService{
 		chainRepo:               chainRepo,
 		pluginResolver:          pluginResolver,
+		enabledChecker:          enabledChecker,
 		itemRepo:                itemRepo,
 		providerIDRepo:          providerIDRepo,
 		episodeRepo:             episodeRepo,
@@ -409,6 +422,7 @@ func NewMetadataService(
 		seasonLocalizationRepo:  seasonLocalizationRepo,
 		episodeLocalizationRepo: episodeLocalizationRepo,
 		personRepo:              personRepo,
+		videoRepo:               videoRepo,
 		fileRepo:                fileRepo,
 		skippedRootRepo:         skippedRootRepo,
 		staleIDRepo:             staleIDRepo,
@@ -468,7 +482,7 @@ func (s *MetadataService) resolveChainCached(ctx context.Context, folderID int, 
 	}
 	s.chainCacheMu.RUnlock()
 
-	providers, err := ResolveChain(ctx, folderID, contentLevel, s.chainRepo, s.pluginResolver)
+	providers, err := ResolveChainWithChecker(ctx, folderID, contentLevel, s.chainRepo, s.pluginResolver, s.enabledChecker)
 	if err != nil {
 		return nil, err
 	}
@@ -685,6 +699,105 @@ func (s *MetadataService) resolveFolderLanguage(ctx context.Context, folderID in
 		return "en"
 	}
 	return strings.TrimSpace(folder.MetadataLanguage)
+}
+
+// resolveAllowedVideoKinds returns the union of trailer_kinds across the
+// libraries containing the item, or just the scoped folder's when a folder id
+// is provided. The union (most-permissive) mirrors the multi-library language
+// posture. A nil return means "allow all": unknown scope or a transient
+// lookup failure must never wipe stored trailers.
+func (s *MetadataService) resolveAllowedVideoKinds(ctx context.Context, contentID string, folderID int) map[models.ExtraKind]bool {
+	if s.folderRepo == nil {
+		return nil
+	}
+	var folderIDs []int
+	if folderID > 0 {
+		folderIDs = []int{folderID}
+	} else if s.libraryRepo != nil {
+		ids, err := s.libraryRepo.GetFolderIDsForItem(ctx, contentID)
+		if err != nil {
+			slog.WarnContext(ctx, "metadata: resolving item libraries for video kinds failed", "component", "metadata",
+				"content_id", contentID, "error", err)
+			return nil
+		}
+		folderIDs = ids
+	}
+	if len(folderIDs) == 0 {
+		return nil
+	}
+	allowed := make(map[models.ExtraKind]bool)
+	resolvedAny := false
+	for _, id := range folderIDs {
+		folder, err := s.folderRepo.GetByID(ctx, id)
+		if err != nil || folder == nil {
+			continue
+		}
+		resolvedAny = true
+		for _, kind := range folder.TrailerKinds {
+			allowed[models.ExtraKind(kind)] = true
+		}
+	}
+	if !resolvedAny {
+		return nil
+	}
+	return allowed
+}
+
+// filterVideosByKinds applies the per-library allow-list; a nil map allows
+// everything, an empty map filters everything (remote videos disabled).
+func filterVideosByKinds(videos []RemoteVideo, allowed map[models.ExtraKind]bool) []RemoteVideo {
+	if allowed == nil || len(videos) == 0 {
+		return videos
+	}
+	filtered := make([]RemoteVideo, 0, len(videos))
+	for _, v := range videos {
+		if allowed[v.Kind] {
+			filtered = append(filtered, v)
+		}
+	}
+	return filtered
+}
+
+// itemVideosFromRemote converts pipeline videos into item_videos rows with a
+// stable display order: kinds in vocabulary order (trailers first), official
+// before unofficial, provider order otherwise preserved.
+func itemVideosFromRemote(contentID string, videos []RemoteVideo) []models.ItemVideo {
+	rank := make(map[models.ExtraKind]int, len(models.AllExtraKinds))
+	for i, k := range models.AllExtraKinds {
+		rank[k] = i
+	}
+	ordered := append([]RemoteVideo(nil), videos...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		if ri, rj := rank[ordered[i].Kind], rank[ordered[j].Kind]; ri != rj {
+			return ri < rj
+		}
+		return ordered[i].IsOfficial && !ordered[j].IsOfficial
+	})
+
+	rows := make([]models.ItemVideo, 0, len(ordered))
+	for i, v := range ordered {
+		var publishedAt *time.Time
+		if v.PublishedAt != "" {
+			if t, err := time.Parse(time.RFC3339, v.PublishedAt); err == nil {
+				publishedAt = &t
+			}
+		}
+		rows = append(rows, models.ItemVideo{
+			ContentID:   contentID,
+			Provider:    v.Provider,
+			ProviderKey: v.ProviderKey,
+			Kind:        v.Kind,
+			Site:        v.Site,
+			SiteKey:     v.SiteKey,
+			Name:        v.Name,
+			Language:    v.Language,
+			IsOfficial:  v.IsOfficial,
+			SizeHint:    v.SizeHint,
+			PublishedAt: publishedAt,
+			SortOrder:   i,
+		})
+	}
+	return rows
 }
 
 func prependUniqueString(values []string, value string) []string {
@@ -1685,6 +1798,21 @@ func (s *MetadataService) mergeAndPersist(
 		}
 		if err := s.itemRepo.ReplacePeople(ctx, contentID, valid); err != nil {
 			slog.WarnContext(ctx, "metadata: failed to replace people", "component", "metadata", "content_id", contentID, "error", err)
+		}
+	}
+
+	// Persist remote videos (trailers etc.), filtered by the library's
+	// trailer_kinds allow-list. Replace-unlocked refreshes replace the whole
+	// set — including clearing it — so narrowing the allow-list converges on
+	// the next refresh; fill-empty refreshes only write when providers
+	// returned something, so a transient provider failure cannot wipe data.
+	if isCanonicalWrite && s.videoRepo != nil && !isFieldLocked(locked, FieldVideos) {
+		allowed := s.resolveAllowedVideoKinds(ctx, contentID, parseProcessFolderID(req.FolderID))
+		filtered := filterVideosByKinds(accumulator.Videos, allowed)
+		if len(filtered) > 0 || mergeMode == MergeReplaceUnlocked {
+			if err := s.videoRepo.ReplaceByContentID(ctx, contentID, itemVideosFromRemote(contentID, filtered)); err != nil {
+				slog.WarnContext(ctx, "metadata: failed to replace item videos", "component", "metadata", "content_id", contentID, "error", err)
+			}
 		}
 	}
 
@@ -4897,10 +5025,31 @@ func (s *MetadataService) rebindItemToExistingItem(ctx context.Context, fromCont
 		},
 	}
 
+	// Move user state (progress, history, favorites, ...) onto the surviving
+	// item before the source rows are touched: the source media_items row is
+	// deleted below, which would strand the soft-referenced watch state and
+	// cascade-delete FK children like collection memberships. Runs first so
+	// the episode S/E mapping still sees the source series' episode rows.
+	episodePairs, err := mergeEpisodeIDPairs(ctx, tx, fromContentID, toContentID)
+	if err != nil {
+		return err
+	}
+	if _, err := reattribute.Run(ctx, tx, reattribute.Options{
+		FromContentID: fromContentID,
+		ToContentID:   toContentID,
+		WholeItem:     true,
+		EpisodePairs:  episodePairs,
+	}); err != nil {
+		return fmt.Errorf("reattributing user state %s -> %s: %w", fromContentID, toContentID, err)
+	}
+
 	for _, step := range steps {
 		if _, err := tx.Exec(ctx, step.sql, step.args...); err != nil {
 			return fmt.Errorf("%s: %w", step.name, err)
 		}
+	}
+	if err := catalog.RecomputeSeriesLatestEpisodeAdded(ctx, tx, []string{fromContentID}); err != nil {
+		return err
 	}
 
 	if err := catalog.EnqueueSearchIndexRename(ctx, tx, fromContentID, toContentID); err != nil {
@@ -4911,6 +5060,38 @@ func (s *MetadataService) rebindItemToExistingItem(ctx context.Context, fromCont
 		return fmt.Errorf("commit skeleton rebind transaction: %w", err)
 	}
 	return nil
+}
+
+// mergeEpisodeIDPairs maps the source series' episode content ids onto the
+// target series' episodes by (season, episode) number, so episode-level user
+// state survives a series merge. Episodes with no counterpart on the target
+// are skipped: their state stays on ids that die with the source series, which
+// is today's behavior, and the next scan recreates the episodes on the target.
+func mergeEpisodeIDPairs(ctx context.Context, tx pgx.Tx, fromContentID, toContentID string) ([]reattribute.IDPair, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT src.content_id, dest.content_id
+		FROM episodes src
+		JOIN episodes dest
+		  ON dest.series_id = $2
+		 AND dest.season_number = src.season_number
+		 AND dest.episode_number = src.episode_number
+		WHERE src.series_id = $1
+		  AND src.content_id <> dest.content_id
+	`, fromContentID, toContentID)
+	if err != nil {
+		return nil, fmt.Errorf("mapping episode ids for merge %s -> %s: %w", fromContentID, toContentID, err)
+	}
+	defer rows.Close()
+
+	var pairs []reattribute.IDPair
+	for rows.Next() {
+		var pair reattribute.IDPair
+		if err := rows.Scan(&pair.From, &pair.To); err != nil {
+			return nil, fmt.Errorf("scanning episode id pair: %w", err)
+		}
+		pairs = append(pairs, pair)
+	}
+	return pairs, rows.Err()
 }
 
 func rebindDeletableStatuses(allowMatchedSource bool) []string {

@@ -127,15 +127,16 @@ type userDBConfigRaw struct {
 
 // ScannerConfig holds media scanner settings.
 type ScannerConfig struct {
-	Workers                int  `yaml:"workers"`
-	MaxConcurrentLibraries int  `yaml:"max_concurrent_libraries"`
-	MaxConcurrentScoped    int  `yaml:"max_concurrent_scoped"`
-	EmptyTrashAfterScan    bool `yaml:"-"`
+	Workers                int           `yaml:"workers"`
+	MaxConcurrentLibraries int           `yaml:"max_concurrent_libraries"`
+	MaxConcurrentScoped    int           `yaml:"max_concurrent_scoped"`
+	EmptyTrashAfterScan    bool          `yaml:"-"`
+	FileRemovalGrace       time.Duration `yaml:"-"`
 }
 
 // scannerConfigRaw is the raw YAML representation with duration strings.
 type scannerConfigRaw struct {
-	FileRemovalGrace       string `yaml:"file_removal_grace"` // legacy; preserved on YAML import only
+	FileRemovalGrace       string `yaml:"file_removal_grace"`
 	Workers                int    `yaml:"workers"`
 	MaxConcurrentLibraries int    `yaml:"max_concurrent_libraries"`
 	MaxConcurrentScoped    int    `yaml:"max_concurrent_scoped"`
@@ -246,6 +247,10 @@ type RecommendationsConfig struct {
 	TasteDecayHalfLifeDays float64 `yaml:"-"`
 	DiversityLambda        float64 `yaml:"-"`
 	CowatchCron            string  `yaml:"-"`
+	// EmbeddingsJobTimeout bounds a single embedding backfill run. A local
+	// CPU embedder over a large catalog needs hours, so this defaults to 24h
+	// (replacing a hardcoded 30m that truncated large first-run backfills).
+	EmbeddingsJobTimeout time.Duration `yaml:"-"`
 }
 
 // AIConfig holds the shared connection settings for Silo's AI features
@@ -312,9 +317,25 @@ type DownloadConfig struct {
 	ArtifactMaxBytes      int64  `yaml:"-"` // LRU eviction budget for prepared artifacts (0 = unlimited)
 }
 
+// PolicyConfig holds embedded policy engine settings.
+type PolicyConfig struct {
+	EvalTimeoutMS              int    `yaml:"-"` // per-decision evaluation timeout in milliseconds
+	EditorEnabled              bool   `yaml:"-"` // advanced policy editor/API surface
+	DecisionLogVerbosity       string `yaml:"-"` // digest or verbose
+	DecisionLogScopeSampleRate int    `yaml:"-"` // log one successful scope decision in N
+	DecisionLogRetentionDays   int    `yaml:"-"` // policy decision log retention window
+}
+
 // MetadataConfig holds metadata pipeline settings.
 type MetadataConfig struct {
 	CacheImages bool `yaml:"-"`
+}
+
+// ClientIPConfig holds client IP resolution settings.
+type ClientIPConfig struct {
+	// TrustedProxies is the comma-separated CIDR list of reverse proxies
+	// whose X-Forwarded-For headers are trusted ("" = built-in defaults).
+	TrustedProxies string `yaml:"-"`
 }
 
 // Config is the top-level configuration for Silo.
@@ -337,6 +358,8 @@ type Config struct {
 	SubtitleAI           SubtitleAIConfig           `yaml:"-"`
 	MetadataAI           MetadataAIConfig           `yaml:"-"`
 	Download             DownloadConfig             `yaml:"-"`
+	Policy               PolicyConfig               `yaml:"-"`
+	ClientIP             ClientIPConfig             `yaml:"-"`
 	TMDBAPIKey           string                     `yaml:"-"`
 	MDBListAPIKey        string                     `yaml:"-"`
 }

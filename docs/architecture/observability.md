@@ -108,7 +108,7 @@ Canonical component values (first path segment under `internal/`; `app` for `cmd
 `activitylog`, `adminjob`, `ai`, `api`, `app`, `audiobooks`, `auth`, `autoscan`,
 `catalog`, `chapterthumbs`, `downloads`, `ebooks`, `historyimport`, `jellycompat`,
 `libraryingest`, `manga`, `metadata`, `nodeconfig`, `nodepool`, `noderecipe`,
-`nodesessions`, `notifications`, `opslog`, `playback`, `plugins`, `proxy`, `ratelimit`,
+`nodesessions`, `notifications`, `opslog`, `playback`, `plugins`, `policy`, `proxy`, `ratelimit`,
 `recommendations`, `requests`, `scanner`, `scanqueue`, `sections`, `taskmanager`,
 `telemetry`, `transcodenode`, `watchlist`, `watchsync`, `webhooksync`, `worker`.
 

@@ -8,6 +8,7 @@ import {
   useUpdateLibrary,
 } from "@/hooks/queries/admin/libraries";
 import { useAdminPlugins } from "@/hooks/queries/admin/plugins";
+import { PROVIDER_TRAILER_KINDS } from "@/lib/extraKinds";
 
 export type LevelChainItem = {
   plugin_installation_id: number;
@@ -158,6 +159,9 @@ export function useLibraryForm({
   const [introDetectionEnabled, setIntroDetectionEnabled] = useState(
     library?.intro_detection_enabled ?? false,
   );
+  const [trailerKinds, setTrailerKinds] = useState<string[]>(
+    library?.trailer_kinds ?? [...PROVIDER_TRAILER_KINDS],
+  );
   const [levelChains, setLevelChains] = useState<Record<string, LevelChainItem[]>>({});
   const [chainDirty, setChainDirty] = useState(false);
   const [submitAttempted, setSubmitAttempted] = useState(false);
@@ -251,6 +255,12 @@ export function useLibraryForm({
     }
   }
 
+  function toggleTrailerKind(kind: string) {
+    setTrailerKinds((current) =>
+      current.includes(kind) ? current.filter((k) => k !== kind) : [...current, kind],
+    );
+  }
+
   function reorderLevel(level: string, items: LevelChainItem[]) {
     setLevelChains({ ...activeLevelChains, [level]: items });
     setChainDirty(true);
@@ -290,6 +300,7 @@ export function useLibraryForm({
       auto_translate_metadata: autoTranslateMetadata,
       chapter_thumbnails_enabled: chapterThumbnailsEnabled,
       intro_detection_enabled: introDetectionEnabled,
+      trailer_kinds: trailerKinds,
     };
 
     if (library) {
@@ -353,6 +364,8 @@ export function useLibraryForm({
     setChapterThumbnailsEnabled,
     introDetectionEnabled,
     setIntroDetectionEnabled,
+    trailerKinds,
+    toggleTrailerKind,
     contentLevels: contentLevelsForType(type),
     activeLevelChains,
     reorderLevel,
