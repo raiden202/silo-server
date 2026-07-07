@@ -80,6 +80,23 @@ export default function SectionItemCard({
               </div>
             )}
             <div className="pointer-events-none absolute inset-x-0 bottom-0 h-24 bg-gradient-to-t from-black/55 to-transparent opacity-90" />
+            {isLandscape && imageUrl && (
+              <div className="pointer-events-none absolute inset-x-8 bottom-3 z-[9] flex justify-center">
+                {item.logo_url ? (
+                  <img
+                    src={item.logo_url}
+                    alt=""
+                    aria-hidden="true"
+                    className="max-h-12 max-w-full object-contain drop-shadow-[0_2px_8px_rgba(0,0,0,0.75)]"
+                    loading="lazy"
+                  />
+                ) : (
+                  <span className="max-w-full rounded-md bg-black/55 px-3 py-1.5 text-center text-sm leading-tight font-semibold text-white shadow-lg backdrop-blur-sm">
+                    {item.title}
+                  </span>
+                )}
+              </div>
+            )}
             {item.status === "ambiguous" && (
               <span className="absolute top-2.5 left-2.5 rounded-full border border-amber-500/25 bg-black/40 px-2 py-0.5 text-[10px] leading-none font-semibold tracking-wide text-amber-200 uppercase backdrop-blur-sm">
                 Ambiguous

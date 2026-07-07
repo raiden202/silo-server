@@ -110,4 +110,57 @@ describe("SectionItemCard", () => {
     expect(markup).toContain("Wed, Apr 8");
     expect(markup).toContain("8:00 PM");
   });
+
+  it("renders title treatment over landscape artwork when a logo is available", () => {
+    const markup = renderToStaticMarkup(
+      <SectionItemCard
+        imageStyle="landscape"
+        item={{
+          content_id: "movie-1",
+          type: "movie",
+          title: "Movie One",
+          year: 2026,
+          genres: ["Drama"],
+          status: "matched",
+          rating_imdb: 7.4,
+          overview: "Overview",
+          poster_url: "/movie-poster.jpg",
+          poster_thumbhash: "",
+          backdrop_url: "/movie-backdrop.jpg",
+          backdrop_thumbhash: "",
+          logo_url: "/movie-logo.png",
+        }}
+      />,
+    );
+
+    expect(markup).toContain('src="/movie-backdrop.jpg"');
+    expect(markup).toContain('src="/movie-logo.png"');
+    expect(markup).toContain('aria-hidden="true"');
+  });
+
+  it("renders a readable title over landscape artwork when no logo is available", () => {
+    const markup = renderToStaticMarkup(
+      <SectionItemCard
+        imageStyle="landscape"
+        item={{
+          content_id: "movie-2",
+          type: "movie",
+          title: "No Logo Title",
+          year: 2026,
+          genres: ["Drama"],
+          status: "matched",
+          rating_imdb: 7.4,
+          overview: "Overview",
+          poster_url: "/movie-poster.jpg",
+          poster_thumbhash: "",
+          backdrop_url: "/movie-backdrop.jpg",
+          backdrop_thumbhash: "",
+          logo_url: "",
+        }}
+      />,
+    );
+
+    expect(markup).toContain('src="/movie-backdrop.jpg"');
+    expect(markup).toContain(">No Logo Title</span>");
+  });
 });
