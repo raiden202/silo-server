@@ -81,7 +81,10 @@ export default function SectionItemCard({
             )}
             <div className="pointer-events-none absolute inset-x-0 bottom-0 h-24 bg-gradient-to-t from-black/55 to-transparent opacity-90" />
             {isLandscape && imageUrl && (
-              <div className="pointer-events-none absolute inset-x-8 bottom-3 z-[9] flex justify-center">
+              <div
+                className="pointer-events-none absolute inset-x-8 bottom-3 z-[9] flex justify-center"
+                aria-hidden="true"
+              >
                 {item.logo_url ? (
                   <img
                     src={item.logo_url}

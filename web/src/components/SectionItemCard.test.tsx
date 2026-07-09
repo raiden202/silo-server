@@ -161,6 +161,7 @@ describe("SectionItemCard", () => {
     );
 
     expect(markup).toContain('src="/movie-backdrop.jpg"');
+    expect(markup).toMatch(/<div[^>]*aria-hidden="true"[^>]*><span[^>]*>No Logo Title<\/span>/);
     expect(markup).toContain(">No Logo Title</span>");
   });
 });
