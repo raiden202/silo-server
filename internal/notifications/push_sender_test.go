@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 type mapSettingStore map[string]string
@@ -152,6 +153,65 @@ func TestPushSenderSendMapsRelayTerminalAPNsRejection(t *testing.T) {
 	}
 }
 
+func TestTerminalAPNsDeviceRejectionReasons(t *testing.T) {
+	for _, reason := range []string{
+		"BadDeviceToken",
+		"InvalidToken",
+		"DeviceTokenNotForTopic",
+		"Unregistered",
+	} {
+		t.Run(reason, func(t *testing.T) {
+			message := "APNs rejected the notification: " + reason
+			if !terminalAPNsDeviceRejection(http.StatusUnprocessableEntity, "apns_rejected", message) {
+				t.Fatalf("reason %q was not terminal for the device", reason)
+			}
+		})
+	}
+
+	if terminalAPNsDeviceRejection(
+		http.StatusUnprocessableEntity,
+		"apns_rejected",
+		"APNs rejected the notification: PayloadTooLarge",
+	) {
+		t.Fatal("request-level APNs rejection was terminal for the device")
+	}
+}
+
+func TestPushSenderDoesNotDisableDeviceForRequestLevelAPNsRejection(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_ = json.NewEncoder(w).Encode(pushRelayErrorResponse{
+			Error: struct {
+				Code      string `json:"code"`
+				Message   string `json:"message"`
+				RequestID string `json:"request_id"`
+			}{
+				Code:      "apns_rejected",
+				Message:   "APNs rejected the notification: PayloadTooLarge",
+				RequestID: "relay-request-request-rejection",
+			},
+		})
+	}))
+	defer server.Close()
+
+	sender := newPushSender(nil, nil, nil, NewSettings(mapSettingReader{
+		SettingPushRelayURL:    server.URL,
+		SettingPushRelayAPIKey: "relay-key",
+	}))
+	sender.client = server.Client()
+	sender.developmentRelayURL = server.URL
+
+	result := sender.send(context.Background(), PushDeliveryAttempt{ID: "attempt-1"}, &PushDevice{
+		APNsEnvironment: APNsEnvironmentSandbox,
+		APNsTopic:       ApplePushTopicSilo,
+		ServerDeviceID:  "server-device-1",
+	}, strings.Repeat("a", 64))
+
+	if result.OK || result.TerminalDevice || result.HTTPStatus != http.StatusUnprocessableEntity {
+		t.Fatalf("request-level rejection result = %+v", result)
+	}
+}
+
 func TestPushSenderSendMapsRelayRetryAfter(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Retry-After", "30")
@@ -186,6 +246,20 @@ func TestPushSenderSendMapsRelayRetryAfter(t *testing.T) {
 
 	if result.OK || result.TerminalDevice || result.RetryAfter == 0 {
 		t.Fatalf("retryable result = %+v", result)
+	}
+}
+
+func TestPushSenderUsesRelayAwareTimeoutAndRetryHorizon(t *testing.T) {
+	sender := newPushSender(nil, nil, nil, NewSettings(mapSettingStore{}))
+	if sender.client.Timeout != pushRelayRequestTimeout {
+		t.Fatalf("relay client timeout = %s, want %s", sender.client.Timeout, pushRelayRequestTimeout)
+	}
+
+	if delay, more := pushRetryDelayWithHint(1, 10*time.Second); !more || delay != 10*time.Second {
+		t.Fatalf("short Retry-After delay = %s, more = %v", delay, more)
+	}
+	if delay, more := pushRetryDelayWithHint(1, 24*time.Hour); !more || delay != pushRelayMaxRetryAfter {
+		t.Fatalf("capped Retry-After delay = %s, more = %v", delay, more)
 	}
 }
 
