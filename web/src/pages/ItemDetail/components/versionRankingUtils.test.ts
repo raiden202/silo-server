@@ -192,4 +192,13 @@ describe("pickBestAttributes", () => {
     expect(result?.audioLabel).toBe("EAC3");
     expect(result?.audioDisplayLabel).toBe("DD+ Atmos");
   });
+
+  it("uses a carrier-specific label for file-level Atmos metadata", () => {
+    const result = pickBestAttributes([
+      makeVersion({ codec_audio: "eac3 atmos", audio_tracks: undefined }),
+    ]);
+
+    expect(result?.audioLabel).toBe("Atmos");
+    expect(result?.audioDisplayLabel).toBe("DD+ Atmos");
+  });
 });

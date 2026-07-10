@@ -118,7 +118,7 @@ export function pickBestAttributes(
     if (as_ > bestAudioScore) {
       bestAudioScore = as_;
       bestAudioCodec = v.codec_audio;
-      bestAudioDisplayLabel = mapAudioLabel(v.codec_audio);
+      bestAudioDisplayLabel = formatAudioTrackLabel({ codec: v.codec_audio });
     }
 
     // Also check individual audio tracks for higher-quality codecs
