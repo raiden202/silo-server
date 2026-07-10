@@ -1,4 +1,5 @@
 import type { FileVersion, PlaybackVariant } from "@/api/types";
+import { prettyResolution } from "@/lib/mediaFormat";
 import { videoRangeLabel } from "@/lib/videoRange";
 import { pickBestAttributes } from "./versionRankingUtils";
 
@@ -31,8 +32,8 @@ export function resolveSelectedMediaSummary(
   return {
     durationMinutes:
       durationSeconds > 0 ? Math.round(durationSeconds / 60) : fallbackRuntimeMinutes,
-    resolution: quality?.resolution ?? "",
+    resolution: prettyResolution(quality?.resolution) ?? "",
     videoRangeLabel: selectedVersion ? videoRangeLabel(selectedVersion) : "",
-    audioLabel: quality?.audioLabel ?? "",
+    audioLabel: quality?.audioDisplayLabel ?? quality?.audioLabel ?? "",
   };
 }

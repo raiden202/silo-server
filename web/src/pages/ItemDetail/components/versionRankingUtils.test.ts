@@ -171,6 +171,25 @@ describe("pickBestAttributes", () => {
   it("works with a single version", () => {
     const versions = [makeVersion({ resolution: "1080p", codec_audio: "dts", hdr: true })];
     const result = pickBestAttributes(versions);
-    expect(result).toEqual({ resolution: "1080p", hdr: true, audioLabel: "DTS" });
+    expect(result).toEqual({
+      resolution: "1080p",
+      hdr: true,
+      audioLabel: "DTS",
+      audioDisplayLabel: "DTS",
+    });
+  });
+
+  it("preserves the Atmos carrier in the display label", () => {
+    const result = pickBestAttributes([
+      makeVersion({
+        codec_audio: "eac3",
+        audio_tracks: [
+          { codec: "eac3", profile: "Dolby Digital Plus + Dolby Atmos", default: true },
+        ],
+      }),
+    ]);
+
+    expect(result?.audioLabel).toBe("EAC3");
+    expect(result?.audioDisplayLabel).toBe("DD+ Atmos");
   });
 });

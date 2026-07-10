@@ -62,6 +62,19 @@ describe("resolveSelectedMediaSummary", () => {
     ).toBe("HDR");
   });
 
+  it("normalizes 2160p and preserves the Atmos carrier", () => {
+    const version = makeVersion({
+      resolution: "2160p",
+      codec_audio: "eac3",
+      audio_tracks: [{ codec: "eac3", profile: "Dolby Digital Plus + Dolby Atmos", default: true }],
+    });
+
+    expect(resolveSelectedMediaSummary(version, undefined, 0)).toMatchObject({
+      resolution: "4K",
+      audioLabel: "DD+ Atmos",
+    });
+  });
+
   it("only considers audio tracks from the selected file", () => {
     const version = makeVersion({
       codec_audio: "aac",

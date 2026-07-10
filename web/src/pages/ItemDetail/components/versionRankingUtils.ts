@@ -1,5 +1,5 @@
 import type { FileVersion, LeafItemUserData, PlaybackVariant } from "@/api/types";
-import { mapAudioLabel } from "@/lib/mediaFormat";
+import { formatAudioTrackLabel, mapAudioLabel } from "@/lib/mediaFormat";
 
 export const RESOLUTION_RANK: Record<string, number> = {
   "4k": 4,
@@ -85,6 +85,7 @@ export function pickBestAttributes(
   resolution: string;
   hdr: boolean;
   audioLabel: string;
+  audioDisplayLabel: string;
 } | null {
   if (versions.length === 0) return null;
 
@@ -102,6 +103,7 @@ export function pickBestAttributes(
   let bestResScore = -1;
   let hdr = false;
   let bestAudioCodec = "";
+  let bestAudioDisplayLabel = "";
   let bestAudioScore = -1;
 
   for (const v of candidates) {
@@ -116,6 +118,7 @@ export function pickBestAttributes(
     if (as_ > bestAudioScore) {
       bestAudioScore = as_;
       bestAudioCodec = v.codec_audio;
+      bestAudioDisplayLabel = mapAudioLabel(v.codec_audio);
     }
 
     // Also check individual audio tracks for higher-quality codecs
@@ -126,6 +129,12 @@ export function pickBestAttributes(
           if (ts > bestAudioScore) {
             bestAudioScore = ts;
             bestAudioCodec = t.codec;
+            bestAudioDisplayLabel = formatAudioTrackLabel(t);
+          } else if (ts === bestAudioScore) {
+            const displayLabel = formatAudioTrackLabel(t);
+            if (displayLabel.includes("Atmos") && !bestAudioDisplayLabel.includes("Atmos")) {
+              bestAudioDisplayLabel = displayLabel;
+            }
           }
         }
       }
@@ -136,6 +145,7 @@ export function pickBestAttributes(
     resolution: bestRes,
     hdr,
     audioLabel: bestAudioCodec ? mapAudioLabel(bestAudioCodec) : "",
+    audioDisplayLabel: bestAudioDisplayLabel,
   };
 }
 

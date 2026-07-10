@@ -20,7 +20,7 @@ export interface VideoRangeSource {
   video_tracks?: VideoRangeTrack[];
 }
 
-function trackHasDolbyVision(track: VideoRangeTrack): boolean {
+export function videoTrackHasDolbyVision(track: VideoRangeTrack): boolean {
   if (track.dolby_vision?.trim()) return true;
   if ((track.dv_profile ?? 0) > 0) return true;
   return (track.video_range_type?.trim() ?? "").startsWith("DOVI");
@@ -50,7 +50,7 @@ export function videoRangeLabel(source: VideoRangeSource): string {
   let hasDV = false;
   let hdrType = "";
   for (const track of source.video_tracks ?? []) {
-    if (trackHasDolbyVision(track)) hasDV = true;
+    if (videoTrackHasDolbyVision(track)) hasDV = true;
     if (!hdrType) hdrType = trackHdrType(track);
   }
 

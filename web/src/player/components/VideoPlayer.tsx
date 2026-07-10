@@ -62,6 +62,7 @@ import {
   endWatchTogetherRoom,
   setWatchTogetherGuestControl,
 } from "@/lib/watchTogetherActions";
+import { formatVideoQualitySummary } from "@/lib/mediaFormat";
 import { toast } from "sonner";
 
 // Reserved index for the in-progress live AI translation track. Sits well above
@@ -2539,7 +2540,7 @@ export function VideoPlayer({
             versions.length > 1
               ? versions.map((v) => ({
                   fileId: v.file_id,
-                  label: `${v.resolution} ${v.codec_video.toUpperCase()}${v.hdr ? " HDR" : ""}`,
+                  label: formatVideoQualitySummary(v, " "),
                   isCurrentSource: v.file_id === transcodeQuality.effectiveVersion?.file_id,
                   isRequestedSource: v.file_id === selectedVersion?.file_id,
                 }))
