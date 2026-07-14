@@ -496,19 +496,29 @@ func TestItemRepo_Search_ScoredCTEExposesItemColumnNames(t *testing.T) {
 // from sorting metadata arrays and image fields for every candidate.
 func TestItemRepo_Search_ScoredCTEIsLean(t *testing.T) {
 	repo := &ItemRepository{}
-	dataSQL, countSQL, _ := repo.buildSearchSQL("avatar", []string{"movie"}, 20, 0, AccessFilter{})
-
-	for _, sql := range []string{dataSQL, countSQL} {
-		end := strings.Index(sql, "), stats AS")
-		if end < 0 {
-			t.Fatalf("expected scored CTE boundary; got:\n%s", sql)
-		}
-		scored := sql[:end]
-		for _, wideColumn := range []string{"poster_path", "backdrop_path", "metadata_s3_path", "genres"} {
-			if strings.Contains(scored, wideColumn) {
-				t.Fatalf("scored CTE must not carry %s; got:\n%s", wideColumn, scored)
+	for _, test := range []struct {
+		name      string
+		itemTypes []string
+	}{
+		{name: "movie", itemTypes: []string{"movie"}},
+		{name: "episode", itemTypes: []string{"episode"}},
+		{name: "mixed", itemTypes: nil},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dataSQL, countSQL, _ := repo.buildSearchSQL("avatar", test.itemTypes, 20, 0, AccessFilter{})
+			for _, sql := range []string{dataSQL, countSQL} {
+				end := strings.Index(sql, "), stats AS")
+				if end < 0 {
+					t.Fatalf("expected scored CTE boundary; got:\n%s", sql)
+				}
+				scored := sql[:end]
+				for _, wideColumn := range []string{"poster_path", "backdrop_path", "metadata_s3_path", "genres"} {
+					if strings.Contains(scored, wideColumn) {
+						t.Fatalf("scored CTE must not carry %s; got:\n%s", wideColumn, scored)
+					}
+				}
 			}
-		}
+		})
 	}
 }
 

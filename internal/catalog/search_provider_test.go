@@ -414,6 +414,26 @@ func TestMeilisearchFederationUnsupportedClassification(t *testing.T) {
 	}
 }
 
+func TestMeilisearchFederationUnsupportedCacheExpiresAndRecovers(t *testing.T) {
+	provider := &MeilisearchSearchProvider{}
+	provider.markFederationUnsupported()
+	if !provider.isFederationUnsupported() {
+		t.Fatal("fresh unsupported result should be cached")
+	}
+
+	provider.federationMu.Lock()
+	provider.federationUnsupportedAt = time.Now().Add(-meilisearchFederationCapabilityCacheTTL)
+	provider.federationMu.Unlock()
+	if provider.isFederationUnsupported() {
+		t.Fatal("expired unsupported result should permit a federation re-probe")
+	}
+
+	provider.markFederationSupported()
+	if provider.isFederationUnsupported() {
+		t.Fatal("successful federation probe should clear the unsupported result")
+	}
+}
+
 func TestCatalogSearchEpisodeDocumentsNeverCarryVectors(t *testing.T) {
 	docs := []catalogSearchDocument{
 		{ContentID: "movie-1", Type: "movie"},

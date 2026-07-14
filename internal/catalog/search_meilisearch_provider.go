@@ -36,7 +36,8 @@ const (
 	// semanticCapabilityProbeTTL rate-limits the embedder capability check
 	// (settings fetch + hybrid probe) so a healthy index is validated at most
 	// once per window. The probe is advisory only and never trips the circuit.
-	semanticCapabilityProbeTTL = 5 * time.Minute
+	semanticCapabilityProbeTTL              = 5 * time.Minute
+	meilisearchFederationCapabilityCacheTTL = 5 * time.Minute
 )
 
 var meilisearchTitleSearchAttributes = []string{
@@ -100,8 +101,9 @@ type MeilisearchSearchProvider struct {
 	capCache    CatalogSearchSemanticCapability
 	capCachedAt time.Time
 
-	federationMu          sync.Mutex
-	federationUnsupported bool
+	federationMu            sync.Mutex
+	federationUnsupported   bool
+	federationUnsupportedAt time.Time
 }
 
 type cachedCatalogSearchQueryVector struct {
@@ -306,7 +308,9 @@ func (p *MeilisearchSearchProvider) searchMeilisearch(ctx context.Context, req C
 		var err error
 		if useFederation {
 			resp, err = p.client.FederatedSearch(ctx, p.buildFederatedSearchRequest(indexUID, req, baseSearchReq, meiliOffset, nextLimit))
-			if err != nil && isMeilisearchFederationUnsupported(err) {
+			if err == nil {
+				p.markFederationSupported()
+			} else if isMeilisearchFederationUnsupported(err) {
 				p.markFederationUnsupported()
 				semanticFallback = "meilisearch federation unsupported; using keyword search"
 				baseSearchReq.Vector = nil
@@ -514,12 +518,24 @@ func joinMeilisearchFilters(parts ...string) string {
 func (p *MeilisearchSearchProvider) isFederationUnsupported() bool {
 	p.federationMu.Lock()
 	defer p.federationMu.Unlock()
-	return p.federationUnsupported
+	if !p.federationUnsupported {
+		return false
+	}
+	return p.federationUnsupportedAt.IsZero() ||
+		time.Since(p.federationUnsupportedAt) < meilisearchFederationCapabilityCacheTTL
 }
 
 func (p *MeilisearchSearchProvider) markFederationUnsupported() {
 	p.federationMu.Lock()
 	p.federationUnsupported = true
+	p.federationUnsupportedAt = time.Now()
+	p.federationMu.Unlock()
+}
+
+func (p *MeilisearchSearchProvider) markFederationSupported() {
+	p.federationMu.Lock()
+	p.federationUnsupported = false
+	p.federationUnsupportedAt = time.Time{}
 	p.federationMu.Unlock()
 }
 
