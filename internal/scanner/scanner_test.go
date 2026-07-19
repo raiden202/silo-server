@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -263,5 +264,23 @@ func TestScanSubtreeEbookLibraryRoutesToEbookScanner(t *testing.T) {
 	}
 	if result == nil {
 		t.Fatal("ScanSubtree ebook result = nil, want empty result")
+	}
+}
+
+func TestScanFileEbookLibraryUsesEbookPipeline(t *testing.T) {
+	filePath := filepath.Join(t.TempDir(), "book.epub")
+	if err := os.WriteFile(filePath, []byte("not a real epub"), 0o644); err != nil {
+		t.Fatalf("write fake ebook: %v", err)
+	}
+
+	err := (&Scanner{}).ScanFile(context.Background(), filePath, &models.MediaFolder{ID: 44, Type: "ebooks"})
+	if err == nil {
+		t.Fatal("ScanFile returned nil, want ebook parse failure")
+	}
+	if strings.Contains(err.Error(), "unrecognized video extension") {
+		t.Fatalf("ScanFile used video extension gate: %v", err)
+	}
+	if !strings.Contains(err.Error(), "folder_id=44") {
+		t.Fatalf("error = %q, want ebook scanner aggregate failure", err)
 	}
 }

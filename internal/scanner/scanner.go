@@ -1981,6 +1981,12 @@ func (s *Scanner) ScanFile(ctx context.Context, filePath string, folder *models.
 		}
 		return s.syncFolderScopedAudioLibraryState(ctx, folder.ID)
 	}
+	if librarykind.IsEbook(folder.Type) {
+		if !SupportsEbookFile(cleanFile) {
+			return fmt.Errorf("unrecognized ebook extension: %s", strings.ToLower(filepath.Ext(cleanFile)))
+		}
+		return s.scanEbookPaths(ctx, folder, []string{cleanFile}, false)
+	}
 
 	// Verify the file extension is recognized.
 	ext := strings.ToLower(filepath.Ext(cleanFile))
