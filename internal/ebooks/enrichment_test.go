@@ -168,23 +168,153 @@ func TestRunBatchSkipsFailureRecordingOnCancellation(t *testing.T) {
 	}
 }
 
-func TestClaimBatchQueryAppliesFailureBackoffAndCap(t *testing.T) {
-	// Pin the starvation guard: failing items are deprioritized, not retried
-	// at the head of every sweep, and capped items are never re-claimed.
-	if !strings.Contains(claimBatchQuery, "LEFT JOIN ebook_enrichment_state ees ON ees.content_id = mi.content_id") {
-		t.Fatalf("claimBatchQuery must read dedicated ebook enrichment failure state:\n%s", claimBatchQuery)
+func TestEnrichmentQueriesKeepEbookAndAudiobookMetadataSeparate(t *testing.T) {
+	if !strings.Contains(materializeEnrichmentJobsQuery, "mi.type = 'ebook'") {
+		t.Fatalf("materialization query must target ebooks:\n%s", materializeEnrichmentJobsQuery)
 	}
-	if !strings.Contains(claimBatchQuery, "COALESCE(ees.failures, 0) < $2") {
-		t.Fatalf("claimBatchQuery must exclude items at the failure cap:\n%s", claimBatchQuery)
+	if !strings.Contains(materializeEnrichmentJobsQuery, "NOT EXISTS") ||
+		!strings.Contains(materializeEnrichmentJobsQuery, "manga_chapters") ||
+		!strings.Contains(materializeEnrichmentJobsQuery, "chapter_content_id") {
+		t.Fatalf("materialization query must exclude manga chapters:\n%s", materializeEnrichmentJobsQuery)
 	}
-	if !strings.Contains(claimBatchQuery, "ORDER BY COALESCE(ees.failures, 0) ASC, mi.created_at ASC") {
-		t.Fatalf("claimBatchQuery must claim least-failed items first:\n%s", claimBatchQuery)
+	if strings.Contains(loadEnrichmentItemsQuery, "narrator") ||
+		strings.Contains(loadEnrichmentItemsQuery, "asin") {
+		t.Fatalf("ebook load query must not introduce audiobook-only fields:\n%s", loadEnrichmentItemsQuery)
 	}
-	if strings.Contains(claimBatchQuery, "refresh_failures") {
-		t.Fatalf("claimBatchQuery must not read media_items.refresh_failures (owned by the metadata refresh-debt system):\n%s", claimBatchQuery)
+	if !strings.Contains(loadEnrichmentItemsQuery, "ip.kind = 7") {
+		t.Fatalf("ebook load query must load author credits only:\n%s", loadEnrichmentItemsQuery)
 	}
-	if enrichFailureCap < 1 {
-		t.Fatalf("enrichFailureCap = %d, want >= 1", enrichFailureCap)
+}
+
+func TestEnricherRunTransitionsClaimedJobsByOutcome(t *testing.T) {
+	queue := &fakeEnrichmentQueue{
+		jobs: []EnrichmentJob{
+			{ContentID: "success", Attempts: 1},
+			{ContentID: "no-match", Attempts: 1},
+			{ContentID: "skipped", Attempts: 1},
+			{ContentID: "failed", Attempts: 3},
+		},
+	}
+	items := []enrichmentItemRow{
+		{ContentID: "success"},
+		{ContentID: "no-match"},
+		{ContentID: "skipped"},
+		{ContentID: "failed"},
+	}
+	e := &Enricher{
+		queue:     queue,
+		batchSize: len(items),
+		workers:   2,
+		loadClaimedItemsFn: func(context.Context, []EnrichmentJob) ([]enrichmentItemRow, error) {
+			return items, nil
+		},
+		enrichClaimedItemFn: func(_ context.Context, item enrichmentItemRow) (EnrichmentOutcome, error) {
+			switch item.ContentID {
+			case "success":
+				return EnrichmentOutcomeSuccess, nil
+			case "no-match":
+				return EnrichmentOutcomeNoMatch, nil
+			case "skipped":
+				return EnrichmentOutcomeSkipped, nil
+			default:
+				return "", errors.New("provider unavailable")
+			}
+		},
+	}
+
+	enriched, err := e.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if enriched != 1 {
+		t.Fatalf("Run() enriched = %d, want 1", enriched)
+	}
+	if queue.materializeCalls != 1 || queue.claimCalls != 1 {
+		t.Fatalf("queue calls: materialize=%d claim=%d, want 1 each", queue.materializeCalls, queue.claimCalls)
+	}
+	if queue.claimLimit != len(items) || queue.leaseDuration <= 0 {
+		t.Fatalf("claim args: limit=%d lease=%s", queue.claimLimit, queue.leaseDuration)
+	}
+	for contentID, want := range map[string]EnrichmentOutcome{
+		"success":  EnrichmentOutcomeSuccess,
+		"no-match": EnrichmentOutcomeNoMatch,
+		"skipped":  EnrichmentOutcomeSkipped,
+	} {
+		if got := queue.completed[contentID]; got != want {
+			t.Fatalf("completed[%q] = %q, want %q", contentID, got, want)
+		}
+	}
+	if got := queue.failed["failed"]; got != EnrichmentErrorTransient {
+		t.Fatalf("failed class = %q, want transient", got)
+	}
+}
+
+func TestEnricherRunReleasesEveryLeaseOnCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	queue := &fakeEnrichmentQueue{
+		jobs: []EnrichmentJob{
+			{ContentID: "first", Attempts: 1},
+			{ContentID: "second", Attempts: 1},
+		},
+	}
+	items := []enrichmentItemRow{{ContentID: "first"}, {ContentID: "second"}}
+	e := &Enricher{
+		queue:     queue,
+		batchSize: len(items),
+		workers:   1,
+		loadClaimedItemsFn: func(context.Context, []EnrichmentJob) ([]enrichmentItemRow, error) {
+			return items, nil
+		},
+		enrichClaimedItemFn: func(context.Context, enrichmentItemRow) (EnrichmentOutcome, error) {
+			cancel()
+			return "", context.Canceled
+		},
+	}
+
+	_, err := e.Run(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context.Canceled", err)
+	}
+	sort.Strings(queue.released)
+	if got := strings.Join(queue.released, ","); got != "first,second" {
+		t.Fatalf("released leases = %q, want first,second", got)
+	}
+	if queue.releaseSawCanceledContext {
+		t.Fatal("lease release used the canceled run context")
+	}
+	if len(queue.failed) != 0 {
+		t.Fatalf("cancellation recorded item failures: %v", queue.failed)
+	}
+}
+
+func TestEnricherRunReleasesLeaseWhenCompletionLosesContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	queue := &fakeEnrichmentQueue{
+		jobs:           []EnrichmentJob{{ContentID: "success", Attempts: 1}},
+		completeCancel: cancel,
+		completeErr:    context.Canceled,
+	}
+	e := &Enricher{
+		queue:     queue,
+		batchSize: 1,
+		workers:   1,
+		loadClaimedItemsFn: func(context.Context, []EnrichmentJob) ([]enrichmentItemRow, error) {
+			return []enrichmentItemRow{{ContentID: "success"}}, nil
+		},
+		enrichClaimedItemFn: func(context.Context, enrichmentItemRow) (EnrichmentOutcome, error) {
+			return EnrichmentOutcomeSuccess, nil
+		},
+	}
+
+	_, err := e.Run(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context.Canceled", err)
+	}
+	if got := strings.Join(queue.released, ","); got != "success" {
+		t.Fatalf("released leases = %q, want success", got)
+	}
+	if queue.releaseSawCanceledContext {
+		t.Fatal("lease release used the canceled transition context")
 	}
 }
 
@@ -588,6 +718,109 @@ func TestBuildEbookMetadataRequestCarriesAccumulatedISBN(t *testing.T) {
 	}
 }
 
+func TestPreservePendingEbookLocalMetadata(t *testing.T) {
+	item := enrichmentItemRow{
+		Status:      "pending",
+		Year:        2021,
+		Overview:    "Embedded description",
+		ReleaseDate: "2021-03-04",
+		Genres:      []string{"Local genre"},
+		Studios:     []string{"Local publisher"},
+		PosterPath:  "local/ebooks/book/poster/original.webp",
+		Author:      "Embedded Author",
+	}
+	result := &metadata.MetadataResult{
+		HasMetadata: true,
+		Year:        2022,
+		Overview:    "Remote description",
+		ReleaseDate: "2022-04-05",
+		Genres:      []string{"Remote genre"},
+		Studios:     []string{"Remote publisher"},
+		PosterPath:  "https://example.test/remote.jpg",
+		Tagline:     "Remote-only field",
+		ProviderIDs: map[string]string{"isbn": "9780306406157"},
+		People: []models.ItemPerson{
+			{Person: models.Person{Name: "Remote Author"}, Kind: models.PersonKindAuthor},
+		},
+	}
+
+	preserveEbookLocalMetadata(item, result)
+
+	if result.Year != 0 || result.Overview != "" || result.ReleaseDate != "" ||
+		len(result.Genres) != 0 || len(result.Studios) != 0 || result.PosterPath != "" ||
+		len(result.People) != 0 {
+		t.Fatalf("remote fields would overwrite scanner metadata: %+v", result)
+	}
+	if result.Tagline != "Remote-only field" {
+		t.Fatalf("empty local field was not enrichable: tagline=%q", result.Tagline)
+	}
+	if result.ProviderIDs["isbn"] != "9780306406157" {
+		t.Fatalf("provider identity was discarded: %v", result.ProviderIDs)
+	}
+}
+
+func TestPreservePendingEbookLocalMetadataAllowsRefreshReplacement(t *testing.T) {
+	result := &metadata.MetadataResult{
+		HasMetadata: true,
+		Year:        2022,
+		Overview:    "Corrected remote description",
+	}
+
+	preserveEbookLocalMetadata(enrichmentItemRow{
+		Status:   "matched",
+		Year:     2021,
+		Overview: "Old remote description",
+	}, result)
+
+	if result.Year != 2022 || result.Overview != "Corrected remote description" {
+		t.Fatalf("controlled refresh fields were suppressed: %+v", result)
+	}
+}
+
+func TestPreserveEbookLocalPosterDuringControlledRefresh(t *testing.T) {
+	result := &metadata.MetadataResult{
+		HasMetadata:     true,
+		PosterPath:      "https://example.test/replacement.jpg",
+		PosterThumbhash: "remote-thumb",
+		Overview:        "Corrected remote description",
+	}
+
+	preserveEbookLocalMetadata(enrichmentItemRow{
+		Status:     "matched",
+		PosterPath: "local/ebooks/book/poster/original.webp",
+	}, result)
+
+	if result.PosterPath != "" || result.PosterThumbhash != "" {
+		t.Fatalf("controlled refresh would replace local poster: %+v", result)
+	}
+	if result.Overview != "Corrected remote description" {
+		t.Fatalf("non-artwork refresh field was suppressed: %+v", result)
+	}
+}
+
+func TestPreserveEbookLocalPosterAllowsProviderOwnedReplacement(t *testing.T) {
+	for _, current := range []string{
+		"",
+		"https://provider.test/old.jpg",
+		"ebook-metadata/ebooks/book/poster/original.webp",
+	} {
+		result := &metadata.MetadataResult{
+			HasMetadata:     true,
+			PosterPath:      "https://provider.test/new.jpg",
+			PosterThumbhash: "new-thumb",
+		}
+
+		preserveEbookLocalMetadata(enrichmentItemRow{
+			Status:     "matched",
+			PosterPath: current,
+		}, result)
+
+		if result.PosterPath == "" || result.PosterThumbhash == "" {
+			t.Fatalf("provider-owned poster %q was not replaceable: %+v", current, result)
+		}
+	}
+}
+
 type fakeEbookMetadataProvider struct {
 	slug      string
 	searchErr error
@@ -627,6 +860,68 @@ func (f *fakeEbookImageCacher) CacheImage(_ context.Context, req metadata.CacheI
 		Thumbhash: "thumb",
 		Ext:       ".webp",
 	}, nil
+}
+
+type fakeEnrichmentQueue struct {
+	mu                        sync.Mutex
+	jobs                      []EnrichmentJob
+	materializeCalls          int
+	claimCalls                int
+	claimLimit                int
+	leaseDuration             time.Duration
+	completed                 map[string]EnrichmentOutcome
+	failed                    map[string]EnrichmentErrorClass
+	released                  []string
+	releaseSawCanceledContext bool
+	completeCancel            context.CancelFunc
+	completeErr               error
+}
+
+func (f *fakeEnrichmentQueue) MaterializeCandidates(context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.materializeCalls++
+	return nil
+}
+
+func (f *fakeEnrichmentQueue) ClaimBatch(_ context.Context, limit int, leaseDuration time.Duration) ([]EnrichmentJob, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.claimCalls++
+	f.claimLimit = limit
+	f.leaseDuration = leaseDuration
+	return append([]EnrichmentJob(nil), f.jobs...), nil
+}
+
+func (f *fakeEnrichmentQueue) Complete(_ context.Context, contentID string, outcome EnrichmentOutcome, _ time.Duration) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.completed == nil {
+		f.completed = make(map[string]EnrichmentOutcome)
+	}
+	f.completed[contentID] = outcome
+	if f.completeCancel != nil {
+		f.completeCancel()
+	}
+	return f.completeErr
+}
+
+func (f *fakeEnrichmentQueue) Fail(_ context.Context, contentID string, errorClass EnrichmentErrorClass, _ string, _ time.Duration) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failed == nil {
+		f.failed = make(map[string]EnrichmentErrorClass)
+	}
+	f.failed[contentID] = errorClass
+	return nil
+}
+
+func (f *fakeEnrichmentQueue) Release(ctx context.Context, contentID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.releaseSawCanceledContext = f.releaseSawCanceledContext || ctx.Err() != nil
+	f.released = append(f.released, contentID)
+	return nil
 }
 
 func TestCleanEbookSearchTitle(t *testing.T) {

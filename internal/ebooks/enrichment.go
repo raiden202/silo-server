@@ -19,6 +19,9 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/metadata"
@@ -30,19 +33,11 @@ const (
 
 	defaultEnrichBatchSize = 50
 	defaultEnrichWorkers   = 4
-
-	// enrichFailureCap is the ebook_enrichment_state.failures count at which
-	// an ebook stops being claimed for enrichment. Combined with the
-	// failure-count-first claim ordering this prevents a head-of-line block
-	// of permanently failing items from starving newer items and hammering
-	// providers.
-	enrichFailureCap = 5
 )
 
-// errEnrichmentSkipped marks an item that could not be attempted at all (no
-// library folder linked yet, no providers configured). Skipped items are
-// neither stamped as refreshed nor counted against the failure cap, so they
-// are retried on every sweep until the missing prerequisite appears.
+// errEnrichmentSkipped preserves the direct helper contract for an item that
+// cannot be attempted. Queue-backed runs record a short skipped horizon instead
+// of counting the missing prerequisite as a provider failure.
 var errEnrichmentSkipped = errors.New("ebook enrichment skipped")
 
 func ebookContentType() string {
@@ -70,6 +65,26 @@ type enrichmentItemRow struct {
 	Language    string
 	Author      string
 	ProviderIDs map[string]string
+	Status      string
+	Overview    string
+	ReleaseDate string
+	Genres      []string
+	Studios     []string
+	PosterPath  string
+}
+
+type enrichmentQueue interface {
+	MaterializeCandidates(ctx context.Context) error
+	ClaimBatch(ctx context.Context, limit int, leaseDuration time.Duration) ([]EnrichmentJob, error)
+	Complete(ctx context.Context, contentID string, outcome EnrichmentOutcome, refreshAfter time.Duration) error
+	Fail(ctx context.Context, contentID string, errorClass EnrichmentErrorClass, message string, retryAfter time.Duration) error
+	Release(ctx context.Context, contentID string) error
+}
+
+type claimAwareEnrichmentQueue interface {
+	CompleteClaim(ctx context.Context, job EnrichmentJob, outcome EnrichmentOutcome, refreshAfter time.Duration) error
+	FailClaim(ctx context.Context, job EnrichmentJob, errorClass EnrichmentErrorClass, message string, retryAfter time.Duration) error
+	ReleaseClaim(ctx context.Context, job EnrichmentJob) error
 }
 
 // Enricher drives the ebook metadata enrichment sweep.
@@ -85,6 +100,10 @@ type Enricher struct {
 	workLinker     literaryWorkLinker
 	batchSize      int
 	workers        int
+	queue          enrichmentQueue
+
+	loadClaimedItemsFn  func(context.Context, []EnrichmentJob) ([]enrichmentItemRow, error)
+	enrichClaimedItemFn func(context.Context, enrichmentItemRow) (EnrichmentOutcome, error)
 }
 
 type literaryWorkLinker interface {
@@ -108,6 +127,7 @@ func NewEnricher(
 		providerIDs: providerIDs,
 		batchSize:   defaultEnrichBatchSize,
 		workers:     ebookEnrichWorkers(),
+		queue:       NewEnrichmentQueue(pool),
 	}
 }
 
@@ -133,16 +153,36 @@ func (e *Enricher) SetLiteraryWorkLinker(linker literaryWorkLinker) {
 }
 
 func (e *Enricher) Run(ctx context.Context) (int, error) {
-	if e == nil || e.pool == nil || e.chainRepo == nil {
+	if e == nil {
 		return 0, nil
 	}
 
-	items, err := e.claimBatch(ctx)
+	queue := e.queue
+	if queue == nil && e.pool != nil {
+		queue = NewEnrichmentQueue(e.pool)
+	}
+	if queue == nil || (e.chainRepo == nil && e.enrichClaimedItemFn == nil) {
+		return 0, nil
+	}
+	if err := queue.MaterializeCandidates(ctx); err != nil {
+		return 0, fmt.Errorf("ebook enrichment: materialize candidates: %w", err)
+	}
+	jobs, err := queue.ClaimBatch(ctx, e.batchSize, defaultEnrichmentLease)
 	if err != nil {
 		return 0, fmt.Errorf("ebook enrichment: claim batch: %w", err)
 	}
-	if len(items) == 0 {
+	if len(jobs) == 0 {
 		return 0, nil
+	}
+
+	loadItems := e.loadClaimedItems
+	if e.loadClaimedItemsFn != nil {
+		loadItems = e.loadClaimedItemsFn
+	}
+	items, err := loadItems(ctx, jobs)
+	if err != nil {
+		e.releaseJobs(queue, jobs)
+		return 0, fmt.Errorf("ebook enrichment: load claimed items: %w", err)
 	}
 
 	slog.InfoContext(ctx, "ebook enrichment: sweep started", "component", "ebooks",
@@ -150,13 +190,173 @@ func (e *Enricher) Run(ctx context.Context) (int, error) {
 		"workers", e.workers,
 	)
 
-	enriched := e.runBatch(ctx, items, e.enrichItem, e.recordEnrichFailure)
+	enrichItem := e.enrichClaimedItem
+	if e.enrichClaimedItemFn != nil {
+		enrichItem = e.enrichClaimedItemFn
+	}
+	enriched, runErr := e.runQueueBatch(ctx, queue, jobs, items, enrichItem)
 
 	slog.InfoContext(ctx, "ebook enrichment: sweep complete", "component", "ebooks",
 		"attempted", len(items),
 		"enriched", enriched,
 	)
-	return enriched, nil
+	return enriched, runErr
+}
+
+func (e *Enricher) runQueueBatch(
+	ctx context.Context,
+	queue enrichmentQueue,
+	jobs []EnrichmentJob,
+	items []enrichmentItemRow,
+	enrichFn func(context.Context, enrichmentItemRow) (EnrichmentOutcome, error),
+) (int, error) {
+	claimedJobs := make(map[string]EnrichmentJob, len(jobs))
+	for _, job := range jobs {
+		claimedJobs[job.ContentID] = job
+	}
+	loaded := make(map[string]struct{}, len(items))
+	for i := range items {
+		loaded[items[i].ContentID] = struct{}{}
+	}
+	for _, job := range jobs {
+		if _, ok := loaded[job.ContentID]; !ok {
+			_ = e.releaseJob(queue, job)
+		}
+	}
+
+	workers := e.workers
+	if workers <= 0 {
+		workers = 1
+	}
+	if workers > len(items) {
+		workers = len(items)
+	}
+	if workers == 0 {
+		return 0, nil
+	}
+
+	ch := make(chan enrichmentItemRow, workers)
+	var (
+		wg             sync.WaitGroup
+		enriched       int64
+		transitionMu   sync.Mutex
+		transitionErrs []error
+	)
+	recordTransitionError := func(contentID string, err error) {
+		if err == nil || errors.Is(err, ErrEnrichmentLeaseLost) {
+			return
+		}
+		transitionMu.Lock()
+		defer transitionMu.Unlock()
+		transitionErrs = append(transitionErrs, fmt.Errorf("%s: %w", contentID, err))
+	}
+
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for item := range ch {
+				job := claimedJobs[item.ContentID]
+				if ctx.Err() != nil {
+					recordTransitionError(item.ContentID, e.releaseJob(queue, job))
+					continue
+				}
+
+				outcome, enrichErr := enrichFn(ctx, item)
+				if ctx.Err() != nil || errors.Is(enrichErr, context.Canceled) || errors.Is(enrichErr, context.DeadlineExceeded) {
+					recordTransitionError(item.ContentID, e.releaseJob(queue, job))
+					continue
+				}
+				if enrichErr != nil {
+					errorClass, retryAfter := classifyEnrichmentError(enrichErr)
+					transitionErr := e.failJob(
+						queue,
+						ctx,
+						job,
+						errorClass,
+						enrichErr.Error(),
+						retryAfter,
+					)
+					if transitionErr != nil && (ctx.Err() != nil ||
+						errors.Is(transitionErr, context.Canceled) ||
+						errors.Is(transitionErr, context.DeadlineExceeded)) {
+						recordTransitionError(item.ContentID, e.releaseJob(queue, job))
+					}
+					recordTransitionError(item.ContentID, transitionErr)
+					continue
+				}
+				transitionErr := e.completeJob(queue, ctx, job, outcome)
+				if transitionErr != nil && (ctx.Err() != nil ||
+					errors.Is(transitionErr, context.Canceled) ||
+					errors.Is(transitionErr, context.DeadlineExceeded)) {
+					recordTransitionError(item.ContentID, e.releaseJob(queue, job))
+				}
+				if transitionErr != nil {
+					recordTransitionError(item.ContentID, transitionErr)
+					continue
+				}
+				if outcome == EnrichmentOutcomeSuccess {
+					atomic.AddInt64(&enriched, 1)
+				}
+			}
+		}()
+	}
+	for _, item := range items {
+		ch <- item
+	}
+	close(ch)
+	wg.Wait()
+
+	if ctx.Err() != nil {
+		transitionErrs = append([]error{ctx.Err()}, transitionErrs...)
+	}
+	return int(enriched), errors.Join(transitionErrs...)
+}
+
+func (e *Enricher) releaseJobs(queue enrichmentQueue, jobs []EnrichmentJob) {
+	for _, job := range jobs {
+		if err := e.releaseJob(queue, job); err != nil && !errors.Is(err, ErrEnrichmentLeaseLost) {
+			slog.Warn("ebook enrichment: failed to release lease", "component", "ebooks",
+				"content_id", job.ContentID,
+				"error", err,
+			)
+		}
+	}
+}
+
+func (e *Enricher) completeJob(
+	queue enrichmentQueue,
+	ctx context.Context,
+	job EnrichmentJob,
+	outcome EnrichmentOutcome,
+) error {
+	if claimQueue, ok := queue.(claimAwareEnrichmentQueue); ok {
+		return claimQueue.CompleteClaim(ctx, job, outcome, enrichmentRefreshHorizon(outcome))
+	}
+	return queue.Complete(ctx, job.ContentID, outcome, enrichmentRefreshHorizon(outcome))
+}
+
+func (e *Enricher) failJob(
+	queue enrichmentQueue,
+	ctx context.Context,
+	job EnrichmentJob,
+	errorClass EnrichmentErrorClass,
+	message string,
+	retryAfter time.Duration,
+) error {
+	if claimQueue, ok := queue.(claimAwareEnrichmentQueue); ok {
+		return claimQueue.FailClaim(ctx, job, errorClass, message, retryAfter)
+	}
+	return queue.Fail(ctx, job.ContentID, errorClass, message, retryAfter)
+}
+
+func (e *Enricher) releaseJob(queue enrichmentQueue, job EnrichmentJob) error {
+	releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if claimQueue, ok := queue.(claimAwareEnrichmentQueue); ok {
+		return claimQueue.ReleaseClaim(releaseCtx, job)
+	}
+	return queue.Release(releaseCtx, job.ContentID)
 }
 
 func (e *Enricher) runBatch(
@@ -222,15 +422,12 @@ func (e *Enricher) runBatch(
 	return int(enriched)
 }
 
-// claimBatchQuery selects unenriched ebooks. Items with fewer prior failures
-// are claimed first and items at/above enrichFailureCap are skipped entirely,
-// so a block of permanently failing items cannot occupy every sweep.
-var claimBatchQuery = `
+var loadEnrichmentItemsQuery = `
 	SELECT
 		mi.content_id,
 		mi.title,
-		mi.year,
-		COALESCE(mil.media_folder_id, 0) AS folder_id,
+		COALESCE(mi.year, 0),
+		COALESCE(membership.media_folder_id, 0) AS folder_id,
 		COALESCE(mf.metadata_language, 'en') AS language,
 		COALESCE(
 			(SELECT p.name
@@ -241,33 +438,40 @@ var claimBatchQuery = `
 			 ORDER BY ip.sort_order, ip.id
 			 LIMIT 1),
 			''
-		) AS author
-	FROM media_items mi
-	LEFT JOIN media_item_libraries mil ON mil.content_id = mi.content_id
-	LEFT JOIN media_folders mf ON mf.id = mil.media_folder_id
-	LEFT JOIN ebook_enrichment_state ees ON ees.content_id = mi.content_id
+		) AS author,
+		COALESCE(mi.status, ''),
+		COALESCE(mi.overview, ''),
+		COALESCE(mi.release_date, ''),
+		COALESCE(mi.genres, '{}'),
+		COALESCE(mi.studios, '{}'),
+		COALESCE(mi.poster_path, '')
+	FROM unnest($1::text[]) WITH ORDINALITY AS claimed(content_id, position)
+	JOIN media_items mi ON mi.content_id = claimed.content_id
+	LEFT JOIN LATERAL (
+		SELECT mil.media_folder_id
+		FROM media_item_libraries mil
+		WHERE mil.content_id = mi.content_id
+		ORDER BY mil.first_seen_at, mil.media_folder_id
+		LIMIT 1
+	) membership ON true
+	LEFT JOIN media_folders mf ON mf.id = membership.media_folder_id
 	WHERE mi.type = 'ebook'
-	  -- Manga chapters are type='ebook' but are parts of a series, not
-	  -- standalone books. They are enriched via their type='manga' series (a
-	  -- separate path), never individually against book sources — excluding
-	  -- them here stops a pointless search storm over Gutenberg/Anna's/etc.
 	  AND ` + catalog.MangaChapterExclusionWhere("mi") + `
-	  AND (mi.poster_path IS NULL OR mi.poster_path = '')
-	  AND mi.last_refreshed IS NULL
-	  AND COALESCE(ees.failures, 0) < $2
-	ORDER BY COALESCE(ees.failures, 0) ASC, mi.created_at ASC
-	LIMIT $1
+	ORDER BY claimed.position
 `
 
-func (e *Enricher) claimBatch(ctx context.Context) ([]enrichmentItemRow, error) {
-	rows, err := e.pool.Query(ctx, claimBatchQuery, e.batchSize, enrichFailureCap)
+func (e *Enricher) loadClaimedItems(ctx context.Context, jobs []EnrichmentJob) ([]enrichmentItemRow, error) {
+	contentIDs := make([]string, 0, len(jobs))
+	for _, job := range jobs {
+		contentIDs = append(contentIDs, job.ContentID)
+	}
+	rows, err := e.pool.Query(ctx, loadEnrichmentItemsQuery, contentIDs)
 	if err != nil {
-		return nil, fmt.Errorf("querying unenriched ebooks: %w", err)
+		return nil, fmt.Errorf("querying claimed ebooks: %w", err)
 	}
 	defer rows.Close()
 
 	var items []enrichmentItemRow
-	seen := make(map[string]struct{})
 	for rows.Next() {
 		var item enrichmentItemRow
 		if err := rows.Scan(
@@ -277,13 +481,15 @@ func (e *Enricher) claimBatch(ctx context.Context) ([]enrichmentItemRow, error) 
 			&item.FolderID,
 			&item.Language,
 			&item.Author,
+			&item.Status,
+			&item.Overview,
+			&item.ReleaseDate,
+			&item.Genres,
+			&item.Studios,
+			&item.PosterPath,
 		); err != nil {
 			return nil, fmt.Errorf("scanning ebook enrichment row: %w", err)
 		}
-		if _, dup := seen[item.ContentID]; dup {
-			continue
-		}
-		seen[item.ContentID] = struct{}{}
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
@@ -303,19 +509,27 @@ func (e *Enricher) claimBatch(ctx context.Context) ([]enrichmentItemRow, error) 
 }
 
 func (e *Enricher) enrichItem(ctx context.Context, item enrichmentItemRow) error {
+	outcome, err := e.enrichClaimedItem(ctx, item)
+	if err == nil && outcome == EnrichmentOutcomeSkipped {
+		return fmt.Errorf("%w: item %s is not ready", errEnrichmentSkipped, item.ContentID)
+	}
+	return err
+}
+
+func (e *Enricher) enrichClaimedItem(ctx context.Context, item enrichmentItemRow) (EnrichmentOutcome, error) {
 	if item.FolderID == 0 {
 		// The scanner inserts the library membership after the item upsert, so
 		// a freshly indexed ebook can be claimed inside that window. Skip it:
 		// stamping here would terminally mark the item refreshed before any
 		// provider ever saw it.
-		return fmt.Errorf("%w: item %s has no library folder yet", errEnrichmentSkipped, item.ContentID)
+		return EnrichmentOutcomeSkipped, nil
 	}
 
 	providers, err := metadata.ResolveChain(ctx, item.FolderID, ebookContentType(), e.chainRepo, e.resolver)
 	if err != nil {
-		return fmt.Errorf("resolving ebook chain for folder %d: %w", item.FolderID, err)
+		return "", fmt.Errorf("resolving ebook chain for folder %d: %w", item.FolderID, err)
 	}
-	return e.enrichWithProviders(ctx, item, providers)
+	return e.enrichWithProvidersOutcome(ctx, item, providers)
 }
 
 // enrichWithProviders runs the provider chain for one claimed item. Outcomes:
@@ -323,12 +537,24 @@ func (e *Enricher) enrichItem(ctx context.Context, item enrichmentItemRow) error
 //   - providers answered but nothing matched: stamp last_refreshed so the
 //     item is not re-claimed every sweep (nil error);
 //   - one or more providers errored and no metadata was obtained: return an
-//     error so the failure cap/backoff engages, without stamping;
+//     error so durable queue backoff engages, without stamping;
 //   - no providers configured: skip (no stamp, no failure) so the item is
 //     retried once a chain exists.
 func (e *Enricher) enrichWithProviders(ctx context.Context, item enrichmentItemRow, providers []metadata.Provider) error {
-	if len(providers) == 0 {
+	outcome, err := e.enrichWithProvidersOutcome(ctx, item, providers)
+	if err == nil && outcome == EnrichmentOutcomeSkipped {
 		return fmt.Errorf("%w: no metadata providers configured for folder %d", errEnrichmentSkipped, item.FolderID)
+	}
+	return err
+}
+
+func (e *Enricher) enrichWithProvidersOutcome(
+	ctx context.Context,
+	item enrichmentItemRow,
+	providers []metadata.Provider,
+) (EnrichmentOutcome, error) {
+	if len(providers) == 0 {
+		return EnrichmentOutcomeSkipped, nil
 	}
 
 	var owner providerIDOwnerLookup
@@ -340,23 +566,25 @@ func (e *Enricher) enrichWithProviders(ctx context.Context, item enrichmentItemR
 	if !accumulator.HasMetadata && accumulator.PosterPath == "" && accumulator.Overview == "" {
 		if err := ctx.Err(); err != nil {
 			// A cancelled sweep says nothing about the item or the providers.
-			return err
+			return "", err
 		}
 		if len(providerErrs) > 0 {
-			// Transient provider trouble must not stamp the item terminally;
-			// surfacing an error engages the failure cap and backoff instead.
-			return fmt.Errorf("no metadata obtained, %d provider error(s): %w",
+			return "", fmt.Errorf("no metadata obtained, %d provider error(s): %w",
 				len(providerErrs), errors.Join(providerErrs...))
 		}
 		slog.InfoContext(ctx, "ebook enrichment: no metadata found", "component", "ebooks",
 			"content_id", item.ContentID,
 			"title", item.Title,
 		)
-		return e.stampLastRefreshed(ctx, item.ContentID)
+		if err := e.stampLastRefreshed(ctx, item.ContentID); err != nil {
+			return "", err
+		}
+		return EnrichmentOutcomeNoMatch, nil
 	}
 
+	preserveEbookLocalMetadata(item, accumulator)
 	if err := e.persist(ctx, item.ContentID, accumulatedIDs, accumulator); err != nil {
-		return fmt.Errorf("persisting enrichment for %s: %w", item.ContentID, err)
+		return "", fmt.Errorf("persisting enrichment for %s: %w", item.ContentID, err)
 	}
 	e.enqueueRemoteArtwork(ctx, item.ContentID, accumulator)
 	e.autoLinkLiteraryWork(ctx, item.ContentID)
@@ -369,7 +597,69 @@ func (e *Enricher) enrichWithProviders(ctx context.Context, item enrichmentItemR
 		"people", len(filterEbookPeople(accumulator.People)),
 	)
 
-	return nil
+	return EnrichmentOutcomeSuccess, nil
+}
+
+func preserveEbookLocalMetadata(item enrichmentItemRow, result *metadata.MetadataResult) {
+	if result == nil {
+		return
+	}
+	if item.PosterPath != "" && !ebookPosterOwnedByRemoteProvider(item.PosterPath) {
+		result.PosterPath = ""
+		result.PosterThumbhash = ""
+	}
+	if !strings.EqualFold(strings.TrimSpace(item.Status), "pending") {
+		return
+	}
+	if item.Year > 0 {
+		result.Year = 0
+	}
+	if item.Overview != "" {
+		result.Overview = ""
+	}
+	if item.ReleaseDate != "" {
+		result.ReleaseDate = ""
+	}
+	if len(item.Genres) > 0 {
+		result.Genres = nil
+	}
+	if len(item.Studios) > 0 {
+		result.Studios = nil
+	}
+	if item.Author != "" {
+		result.People = nil
+	}
+}
+
+func ebookPosterOwnedByRemoteProvider(path string) bool {
+	path = strings.TrimSpace(path)
+	return isRemoteHTTPImage(path) || strings.HasPrefix(path, ebookMetadataImageProviderID+"/ebooks/")
+}
+
+func classifyEnrichmentError(err error) (EnrichmentErrorClass, time.Duration) {
+	grpcStatus, ok := status.FromError(err)
+	if !ok {
+		return EnrichmentErrorTransient, 0
+	}
+
+	switch grpcStatus.Code() {
+	case codes.ResourceExhausted:
+		for _, detail := range grpcStatus.Details() {
+			if retry, ok := detail.(*errdetails.RetryInfo); ok && retry.GetRetryDelay() != nil {
+				return EnrichmentErrorRateLimited, retry.GetRetryDelay().AsDuration()
+			}
+		}
+		return EnrichmentErrorRateLimited, 0
+	case codes.InvalidArgument,
+		codes.NotFound,
+		codes.PermissionDenied,
+		codes.Unauthenticated,
+		codes.FailedPrecondition,
+		codes.Unimplemented:
+		return EnrichmentErrorPermanent, 0
+	default:
+		return EnrichmentErrorTransient, 0
+	}
 }
 
 // providerIDOwnerLookup reports the content item (if any) that already owns a
@@ -685,44 +975,14 @@ func (e *Enricher) stampLastRefreshed(ctx context.Context, contentID string) err
 		return nil
 	}
 	now := time.Now().UTC()
-	if _, err := e.pool.Exec(ctx, `
+	_, err := e.pool.Exec(ctx, `
 		UPDATE media_items
 		SET last_refreshed = $1,
 		    matched_at = COALESCE(matched_at, $1),
 		    status = CASE WHEN status = 'pending' THEN 'matched' ELSE status END
 		WHERE content_id = $2
-	`, now, contentID); err != nil {
-		return err
-	}
-	// Success clears the enrichment failure backlog. media_items.refresh_failures
-	// is intentionally left alone: it belongs to the metadata refresh-debt system.
-	_, err := e.pool.Exec(ctx, `
-		DELETE FROM ebook_enrichment_state WHERE content_id = $1
-	`, contentID)
+	`, now, contentID)
 	return err
-}
-
-// recordEnrichFailure increments the item's ebook_enrichment_state failure
-// counter so claimBatch deprioritizes it on the next sweep and stops claiming
-// it at enrichFailureCap. The state is dedicated to ebook enrichment;
-// media_items.refresh_failures is owned by the metadata refresh-debt system
-// and is never touched here.
-func (e *Enricher) recordEnrichFailure(ctx context.Context, item enrichmentItemRow) {
-	if e == nil || e.pool == nil {
-		return
-	}
-	if _, err := e.pool.Exec(ctx, `
-		INSERT INTO ebook_enrichment_state (content_id, failures, updated_at)
-		VALUES ($1, 1, NOW())
-		ON CONFLICT (content_id) DO UPDATE SET
-			failures   = ebook_enrichment_state.failures + 1,
-			updated_at = NOW()
-	`, item.ContentID); err != nil {
-		slog.WarnContext(ctx, "ebook enrichment: failed to record enrichment failure", "component", "ebooks",
-			"content_id", item.ContentID,
-			"error", err,
-		)
-	}
 }
 
 func (e *Enricher) persistPeople(ctx context.Context, contentID string, people []models.ItemPerson) error {
