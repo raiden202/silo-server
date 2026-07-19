@@ -171,6 +171,30 @@ func TestEnrichmentQueueHasReadyUsesBoundedOrderedScalarQueries(t *testing.T) {
 }
 
 func TestEnrichmentQueueReconcileMissingIsBoundedAndLaneSafe(t *testing.T) {
+	recentQuery := strings.Join(strings.Fields(reconcileRecentMissingEnrichmentJobsQuery), " ")
+	for _, fragment := range []string{
+		"recent_memberships AS MATERIALIZED",
+		"WHERE membership.media_folder_id = $1",
+		"ORDER BY membership.first_seen_at DESC, membership.content_id DESC",
+		"LIMIT $3",
+		"FROM recent_memberships candidate",
+		"LEFT JOIN ebook_enrichment_state state ON state.content_id = candidate.content_id",
+		"state.content_id IS NULL",
+		"(SELECT COUNT(*)::integer FROM inserted) AS reconciled",
+		"(SELECT COUNT(*)::integer FROM recent_memberships) AS inspected",
+	} {
+		if !strings.Contains(recentQuery, fragment) {
+			t.Fatalf("recent reconcile query missing %q:\n%s", fragment, reconcileRecentMissingEnrichmentJobsQuery)
+		}
+	}
+	recentLimitAt := strings.Index(recentQuery, "LIMIT $3")
+	recentItemJoinAt := strings.Index(recentQuery, "JOIN media_items mi")
+	recentStateJoinAt := strings.Index(recentQuery, "LEFT JOIN ebook_enrichment_state state")
+	if recentLimitAt < 0 || recentItemJoinAt < 0 || recentStateJoinAt < 0 ||
+		recentLimitAt > recentItemJoinAt || recentLimitAt > recentStateJoinAt {
+		t.Fatalf("recent reconciliation is not bounded before catalog joins:\n%s", reconcileRecentMissingEnrichmentJobsQuery)
+	}
+
 	query := strings.Join(strings.Fields(reconcileMissingEnrichmentJobsQuery), " ")
 	for _, fragment := range []string{
 		"membership_candidates AS MATERIALIZED",

@@ -170,6 +170,37 @@ const lockEnrichmentReconcileCursorQuery = `
 	FOR UPDATE
 `
 
+var reconcileRecentMissingEnrichmentJobsQuery = `
+	WITH recent_memberships AS MATERIALIZED (
+		SELECT membership.content_id
+		FROM media_item_libraries membership
+		WHERE membership.media_folder_id = $1
+		ORDER BY membership.first_seen_at DESC, membership.content_id DESC
+		LIMIT $3
+	),
+	candidates AS MATERIALIZED (
+		SELECT candidate.content_id, ` + ebookProtectedFieldsSQL + ` AS protected_fields
+		FROM recent_memberships candidate
+		JOIN media_items mi ON mi.content_id = candidate.content_id
+		LEFT JOIN ebook_enrichment_state state ON state.content_id = candidate.content_id
+		WHERE mi.type = 'ebook'
+		  AND ` + catalog.MangaChapterExclusionWhere("mi") + `
+		  AND state.content_id IS NULL
+	),
+	inserted AS (
+		INSERT INTO ebook_enrichment_state (
+			content_id, status, priority, next_attempt_at, protected_fields, updated_at
+		)
+		SELECT candidates.content_id, 'pending', $2, now(), candidates.protected_fields, now()
+		FROM candidates
+		ON CONFLICT (content_id) DO NOTHING
+		RETURNING content_id
+	)
+	SELECT
+		(SELECT COUNT(*)::integer FROM inserted) AS reconciled,
+		(SELECT COUNT(*)::integer FROM recent_memberships) AS inspected
+`
+
 var reconcileMissingEnrichmentJobsQuery = `
 	WITH membership_candidates AS MATERIALIZED (
 		SELECT membership.content_id, membership.first_seen_at
@@ -272,6 +303,17 @@ func (q *EnrichmentQueue) ReconcileMissing(
 		return 0, 0, false, err
 	}
 
+	var recentReconciled, recentInspected int
+	if err = tx.QueryRow(
+		ctx,
+		reconcileRecentMissingEnrichmentJobsQuery,
+		folderID,
+		priority,
+		limit,
+	).Scan(&recentReconciled, &recentInspected); err != nil {
+		return 0, 0, false, err
+	}
+
 	var lastFirstSeenAt *time.Time
 	var lastContentID *string
 	err = tx.QueryRow(
@@ -303,6 +345,8 @@ func (q *EnrichmentQueue) ReconcileMissing(
 	if err = tx.Commit(ctx); err != nil {
 		return 0, 0, false, err
 	}
+	reconciled += recentReconciled
+	inspected += recentInspected
 	return reconciled, inspected, wrapped, nil
 }
 
