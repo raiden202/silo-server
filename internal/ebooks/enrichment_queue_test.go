@@ -151,6 +151,8 @@ func TestEnrichmentQueueHasReadyUsesBoundedExistenceQueries(t *testing.T) {
 				"next_attempt_at <= now()",
 				"status = 'pending' OR (status = 'running' AND lease_until < now())",
 				tt.predicate,
+				"ORDER BY next_attempt_at, updated_at, priority DESC",
+				"LIMIT 1",
 			} {
 				if !strings.Contains(query, fragment) {
 					t.Fatalf("has-ready query missing %q:\n%s", fragment, tt.query)
@@ -166,15 +168,66 @@ func TestEnrichmentQueueHasReadyUsesBoundedExistenceQueries(t *testing.T) {
 func TestEnrichmentQueueReconcileMissingIsBoundedAndLaneSafe(t *testing.T) {
 	query := strings.Join(strings.Fields(reconcileMissingEnrichmentJobsQuery), " ")
 	for _, fragment := range []string{
-		"WHERE mil.media_folder_id = $1",
+		"membership_candidates AS MATERIALIZED",
+		"WHERE membership.media_folder_id = $1",
+		"$4::timestamptz IS NULL",
+		"membership.first_seen_at < $4",
+		"membership.content_id > $5",
+		"ORDER BY membership.first_seen_at DESC, membership.content_id",
+		"LIMIT $3",
+		"FROM membership_candidates candidate",
 		"mi.type = 'ebook'",
 		"state.content_id IS NULL",
-		"LIMIT $3",
 		"SELECT candidates.content_id, 'pending', $2",
 		"ON CONFLICT (content_id) DO NOTHING",
+		"COUNT(*)::integer AS inspected",
+		"FROM membership_candidates",
+		"(SELECT COUNT(*)::integer FROM inserted) AS reconciled",
 	} {
 		if !strings.Contains(query, fragment) {
 			t.Fatalf("reconcile query missing %q:\n%s", fragment, reconcileMissingEnrichmentJobsQuery)
+		}
+	}
+	windowAt := strings.Index(query, "membership_candidates AS MATERIALIZED")
+	boundedQuery := query[windowAt:]
+	limitAt := strings.Index(boundedQuery, "LIMIT $3")
+	itemJoinAt := strings.Index(boundedQuery, "JOIN media_items mi")
+	stateJoinAt := strings.Index(boundedQuery, "LEFT JOIN ebook_enrichment_state state")
+	if windowAt < 0 || limitAt < 0 || itemJoinAt < 0 || stateJoinAt < 0 {
+		t.Fatalf("reconcile query is missing bounded traversal structure:\n%s", reconcileMissingEnrichmentJobsQuery)
+	}
+	if limitAt > itemJoinAt || limitAt > stateJoinAt {
+		t.Fatalf("reconcile query filters missing jobs before bounding raw membership traversal:\n%s", reconcileMissingEnrichmentJobsQuery)
+	}
+	statsAt := strings.Index(query, "COUNT(*)::integer AS inspected")
+	insertedAt := strings.Index(query, "(SELECT COUNT(*)::integer FROM inserted) AS reconciled")
+	if statsAt < 0 || insertedAt < 0 || statsAt > insertedAt {
+		t.Fatalf("cursor advancement is not derived independently from the inspected membership window:\n%s", reconcileMissingEnrichmentJobsQuery)
+	}
+
+	ensureQuery := strings.Join(strings.Fields(ensureEnrichmentReconcileCursorQuery), " ")
+	if !strings.Contains(ensureQuery, "ON CONFLICT (folder_id) DO NOTHING") {
+		t.Fatalf("cursor ensure query is not idempotent: %s", ensureEnrichmentReconcileCursorQuery)
+	}
+	lockQuery := strings.Join(strings.Fields(lockEnrichmentReconcileCursorQuery), " ")
+	for _, fragment := range []string{
+		"SELECT after_first_seen_at, after_content_id",
+		"WHERE folder_id = $1",
+		"FOR UPDATE",
+	} {
+		if !strings.Contains(lockQuery, fragment) {
+			t.Fatalf("cursor lock query missing %q: %s", fragment, lockEnrichmentReconcileCursorQuery)
+		}
+	}
+	updateQuery := strings.Join(strings.Fields(updateEnrichmentReconcileCursorQuery), " ")
+	for _, fragment := range []string{
+		"UPDATE ebook_enrichment_reconcile_cursors",
+		"SET after_first_seen_at = $2",
+		"after_content_id = $3",
+		"WHERE folder_id = $1",
+	} {
+		if !strings.Contains(updateQuery, fragment) {
+			t.Fatalf("cursor update query missing %q: %s", fragment, updateEnrichmentReconcileCursorQuery)
 		}
 	}
 }

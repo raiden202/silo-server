@@ -155,42 +155,159 @@ func (q *EnrichmentQueue) Enqueue(ctx context.Context, contentID string, priorit
 	return err
 }
 
-var reconcileMissingEnrichmentJobsQuery = `
-	WITH candidates AS MATERIALIZED (
-		SELECT mi.content_id, ` + ebookProtectedFieldsSQL + ` AS protected_fields
-		FROM media_item_libraries mil
-		JOIN media_items mi ON mi.content_id = mil.content_id
-		LEFT JOIN ebook_enrichment_state state ON state.content_id = mi.content_id
-		WHERE mil.media_folder_id = $1
-		  AND mi.type = 'ebook'
-		  AND ` + catalog.MangaChapterExclusionWhere("mi") + `
-		  AND state.content_id IS NULL
-		ORDER BY mi.content_id
-		LIMIT $3
+const ensureEnrichmentReconcileCursorQuery = `
+	INSERT INTO ebook_enrichment_reconcile_cursors (
+		folder_id, after_first_seen_at, after_content_id, updated_at
 	)
-	INSERT INTO ebook_enrichment_state (
-		content_id, status, priority, next_attempt_at, protected_fields, updated_at
-	)
-	SELECT candidates.content_id, 'pending', $2, now(), candidates.protected_fields, now()
-	FROM candidates
-	ON CONFLICT (content_id) DO NOTHING
+	VALUES ($1, NULL, NULL, now())
+	ON CONFLICT (folder_id) DO NOTHING
 `
 
-func (q *EnrichmentQueue) ReconcileMissing(ctx context.Context, folderID, priority, limit int) (int, error) {
+const lockEnrichmentReconcileCursorQuery = `
+	SELECT after_first_seen_at, after_content_id
+	FROM ebook_enrichment_reconcile_cursors
+	WHERE folder_id = $1
+	FOR UPDATE
+`
+
+var reconcileMissingEnrichmentJobsQuery = `
+	WITH membership_candidates AS MATERIALIZED (
+		SELECT membership.content_id, membership.first_seen_at
+		FROM media_item_libraries membership
+		WHERE membership.media_folder_id = $1
+		  AND (
+			$4::timestamptz IS NULL
+			OR membership.first_seen_at < $4
+			OR (
+				membership.first_seen_at = $4
+				AND membership.content_id > $5
+			)
+		  )
+		ORDER BY membership.first_seen_at DESC, membership.content_id
+		LIMIT $3
+	),
+	candidates AS MATERIALIZED (
+		SELECT candidate.content_id, ` + ebookProtectedFieldsSQL + ` AS protected_fields
+		FROM membership_candidates candidate
+		JOIN media_items mi ON mi.content_id = candidate.content_id
+		LEFT JOIN ebook_enrichment_state state ON state.content_id = candidate.content_id
+		WHERE mi.type = 'ebook'
+		  AND ` + catalog.MangaChapterExclusionWhere("mi") + `
+		  AND state.content_id IS NULL
+	),
+	inserted AS (
+		INSERT INTO ebook_enrichment_state (
+			content_id, status, priority, next_attempt_at, protected_fields, updated_at
+		)
+		SELECT candidates.content_id, 'pending', $2, now(), candidates.protected_fields, now()
+		FROM candidates
+		ON CONFLICT (content_id) DO NOTHING
+		RETURNING content_id
+	),
+	window_stats AS MATERIALIZED (
+		SELECT
+			COUNT(*)::integer AS inspected,
+			(
+				SELECT first_seen_at
+				FROM membership_candidates
+				ORDER BY first_seen_at, content_id DESC
+				LIMIT 1
+			) AS last_first_seen_at,
+			(
+				SELECT content_id
+				FROM membership_candidates
+				ORDER BY first_seen_at, content_id DESC
+				LIMIT 1
+		) AS last_content_id
+		FROM membership_candidates
+	)
+	SELECT
+		(SELECT COUNT(*)::integer FROM inserted) AS reconciled,
+		window_stats.inspected,
+		window_stats.last_first_seen_at,
+		window_stats.last_content_id
+	FROM window_stats
+`
+
+const updateEnrichmentReconcileCursorQuery = `
+	UPDATE ebook_enrichment_reconcile_cursors
+	SET after_first_seen_at = $2,
+		after_content_id = $3,
+		updated_at = now()
+	WHERE folder_id = $1
+`
+
+// ReconcileMissing advances a database-persisted keyset cursor while holding
+// its folder row lock. Queue repairs and cursor movement commit atomically.
+// A server restart resumes from the persisted cursor; completed repairs remain
+// durable, and reaching the end resets the cursor so later passes wrap safely.
+func (q *EnrichmentQueue) ReconcileMissing(
+	ctx context.Context,
+	folderID, priority, limit int,
+) (reconciled, inspected int, wrapped bool, err error) {
 	if q == nil || q.pool == nil {
-		return 0, errors.New("ebook enrichment queue is not configured")
+		return 0, 0, false, errors.New("ebook enrichment queue is not configured")
 	}
 	if folderID <= 0 {
-		return 0, errors.New("ebook enrichment folder id is required")
+		return 0, 0, false, errors.New("ebook enrichment folder id is required")
 	}
 	if limit <= 0 {
-		return 0, nil
+		return 0, 0, false, nil
 	}
-	tag, err := q.pool.Exec(ctx, reconcileMissingEnrichmentJobsQuery, folderID, priority, limit)
+
+	tx, err := q.pool.Begin(ctx)
 	if err != nil {
-		return 0, err
+		return 0, 0, false, err
 	}
-	return int(tag.RowsAffected()), nil
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+
+	if _, err = tx.Exec(ctx, ensureEnrichmentReconcileCursorQuery, folderID); err != nil {
+		return 0, 0, false, err
+	}
+	var afterFirstSeenAt *time.Time
+	var afterContentID *string
+	if err = tx.QueryRow(
+		ctx,
+		lockEnrichmentReconcileCursorQuery,
+		folderID,
+	).Scan(&afterFirstSeenAt, &afterContentID); err != nil {
+		return 0, 0, false, err
+	}
+
+	var lastFirstSeenAt *time.Time
+	var lastContentID *string
+	err = tx.QueryRow(
+		ctx,
+		reconcileMissingEnrichmentJobsQuery,
+		folderID,
+		priority,
+		limit,
+		afterFirstSeenAt,
+		afterContentID,
+	).Scan(&reconciled, &inspected, &lastFirstSeenAt, &lastContentID)
+	if err != nil {
+		return 0, 0, false, err
+	}
+	wrapped = inspected < limit
+	if wrapped {
+		lastFirstSeenAt = nil
+		lastContentID = nil
+	}
+	if _, err = tx.Exec(
+		ctx,
+		updateEnrichmentReconcileCursorQuery,
+		folderID,
+		lastFirstSeenAt,
+		lastContentID,
+	); err != nil {
+		return 0, 0, false, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return 0, 0, false, err
+	}
+	return reconciled, inspected, wrapped, nil
 }
 
 // Each indexed window is fixed-size; only their deduplicated union pays for
@@ -346,6 +463,8 @@ const hasReadyEnrichmentJobsQueryTemplate = `
 		WHERE next_attempt_at <= now()
 		  AND (status = 'pending' OR (status = 'running' AND lease_until < now()))
 		  AND {{lane_predicate}}
+		ORDER BY next_attempt_at, updated_at, priority DESC
+		LIMIT 1
 	)
 `
 

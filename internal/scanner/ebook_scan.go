@@ -582,7 +582,7 @@ func (s *Scanner) reconcileMissingEbookEnrichment(ctx context.Context, folderID 
 	if s == nil || s.ebookEnrichmentQueue == nil || folderID <= 0 {
 		return
 	}
-	reconciled, err := s.ebookEnrichmentQueue.ReconcileMissing(
+	reconciled, inspected, wrapped, err := s.ebookEnrichmentQueue.ReconcileMissing(
 		ctx,
 		folderID,
 		ebookEnrichmentPriority,
@@ -604,6 +604,13 @@ func (s *Scanner) reconcileMissingEbookEnrichment(ctx context.Context, folderID 
 			"reconciled", reconciled,
 		)
 	}
+	slog.DebugContext(ctx, "ebook scan: metadata enrichment reconciliation window complete",
+		"component", "scanner",
+		"folder_id", folderID,
+		"inspected", inspected,
+		"reconciled", reconciled,
+		"wrapped", wrapped,
+	)
 }
 
 func (s *Scanner) autoLinkLiteraryWork(ctx context.Context, contentID string) {

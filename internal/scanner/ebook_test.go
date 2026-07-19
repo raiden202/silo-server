@@ -25,6 +25,8 @@ type fakeEbookEnrichmentQueue struct {
 	reconcileCalls int
 	reconcileLimit int
 	reconcileErr   error
+	inspected      int
+	wrapped        bool
 }
 
 func (f *fakeEbookEnrichmentQueue) Enqueue(_ context.Context, contentID string, priority int) error {
@@ -33,10 +35,10 @@ func (f *fakeEbookEnrichmentQueue) Enqueue(_ context.Context, contentID string, 
 	return f.err
 }
 
-func (f *fakeEbookEnrichmentQueue) ReconcileMissing(_ context.Context, _ int, _ int, limit int) (int, error) {
+func (f *fakeEbookEnrichmentQueue) ReconcileMissing(_ context.Context, _ int, _ int, limit int) (int, int, bool, error) {
 	f.reconcileCalls++
 	f.reconcileLimit = limit
-	return 0, f.reconcileErr
+	return 0, f.inspected, f.wrapped, f.reconcileErr
 }
 
 func TestScannerEbookEnrichmentHookEnqueuesHighPriorityWork(t *testing.T) {

@@ -204,7 +204,7 @@ type MetadataQueueProducer interface {
 // provider work in the scanner.
 type EbookEnrichmentQueue interface {
 	Enqueue(ctx context.Context, contentID string, priority int) error
-	ReconcileMissing(ctx context.Context, folderID, priority, limit int) (int, error)
+	ReconcileMissing(ctx context.Context, folderID, priority, limit int) (reconciled, inspected int, wrapped bool, err error)
 }
 
 type LiteraryWorkLinker interface {
