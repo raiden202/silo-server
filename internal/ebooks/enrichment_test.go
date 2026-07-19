@@ -169,13 +169,13 @@ func TestRunBatchSkipsFailureRecordingOnCancellation(t *testing.T) {
 }
 
 func TestEnrichmentQueriesKeepEbookAndAudiobookMetadataSeparate(t *testing.T) {
-	if !strings.Contains(materializeEnrichmentJobsQuery, "mi.type = 'ebook'") {
-		t.Fatalf("materialization query must target ebooks:\n%s", materializeEnrichmentJobsQuery)
+	if !strings.Contains(enqueueEnrichmentJobQuery, "mi.type = 'ebook'") {
+		t.Fatalf("enqueue query must target ebooks:\n%s", enqueueEnrichmentJobQuery)
 	}
-	if !strings.Contains(materializeEnrichmentJobsQuery, "NOT EXISTS") ||
-		!strings.Contains(materializeEnrichmentJobsQuery, "manga_chapters") ||
-		!strings.Contains(materializeEnrichmentJobsQuery, "chapter_content_id") {
-		t.Fatalf("materialization query must exclude manga chapters:\n%s", materializeEnrichmentJobsQuery)
+	if !strings.Contains(enqueueEnrichmentJobQuery, "NOT EXISTS") ||
+		!strings.Contains(enqueueEnrichmentJobQuery, "manga_chapters") ||
+		!strings.Contains(enqueueEnrichmentJobQuery, "chapter_content_id") {
+		t.Fatalf("enqueue query must exclude manga chapters:\n%s", enqueueEnrichmentJobQuery)
 	}
 	if strings.Contains(loadEnrichmentItemsQuery, "narrator") ||
 		strings.Contains(loadEnrichmentItemsQuery, "asin") {
@@ -234,10 +234,10 @@ func TestEnricherRunTransitionsClaimedJobsByOutcome(t *testing.T) {
 	if enriched != 1 {
 		t.Fatalf("Run() enriched = %d, want 1", enriched)
 	}
-	if queue.materializeCalls != 1 || queue.claimCalls != 1 {
-		t.Fatalf("queue calls: materialize=%d claim=%d, want 1 each", queue.materializeCalls, queue.claimCalls)
+	if queue.claimCalls != 1 {
+		t.Fatalf("claim calls = %d, want 1", queue.claimCalls)
 	}
-	if queue.claimLimit != len(items) || queue.leaseDuration <= 0 {
+	if queue.claimLimit != e.workers || queue.leaseDuration <= 0 {
 		t.Fatalf("claim args: limit=%d lease=%s", queue.claimLimit, queue.leaseDuration)
 	}
 	for contentID, want := range map[string]EnrichmentOutcome{
@@ -386,11 +386,68 @@ func TestEnricherRunBoundsEachItemBelowTheLease(t *testing.T) {
 	if elapsed := time.Since(started); elapsed > time.Second {
 		t.Fatalf("per-item timeout took %s", elapsed)
 	}
-	if got := strings.Join(queue.released, ","); got != "slow" {
-		t.Fatalf("released = %q, want slow", got)
+	if got := queue.failed["slow"]; got != EnrichmentErrorTransient {
+		t.Fatalf("timeout failure class = %q, want transient", got)
+	}
+	if len(queue.released) != 0 {
+		t.Fatalf("timed-out work was released immediately due: %v", queue.released)
 	}
 	if defaultEnrichmentItemTimeout >= defaultEnrichmentLease/2 {
 		t.Fatalf("default item timeout %s is not materially shorter than lease %s", defaultEnrichmentItemTimeout, defaultEnrichmentLease)
+	}
+}
+
+func TestEnricherRunClaimsAtMostOneJobPerWorker(t *testing.T) {
+	queue := &fakeEnrichmentQueue{}
+	e := &Enricher{
+		queue:     queue,
+		batchSize: 50,
+		workers:   4,
+		enrichClaimedItemFn: func(context.Context, enrichmentItemRow) (EnrichmentOutcome, error) {
+			return EnrichmentOutcomeSuccess, nil
+		},
+	}
+
+	if _, err := e.Run(context.Background()); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if queue.claimLimit != 4 {
+		t.Fatalf("claim limit = %d, want worker count 4", queue.claimLimit)
+	}
+	if queue.leaseDuration != defaultEnrichmentLease {
+		t.Fatalf("lease duration = %s, want %s", queue.leaseDuration, defaultEnrichmentLease)
+	}
+}
+
+func TestEnricherRunInjectsExactClaimOwnershipCheck(t *testing.T) {
+	queue := &fakeEnrichmentQueue{
+		jobs:          []EnrichmentJob{{ContentID: "lost", Token: "exact-token", Attempts: 1}},
+		claimCheckErr: ErrEnrichmentLeaseLost,
+		failErr:       ErrEnrichmentLeaseLost,
+	}
+	e := &Enricher{
+		queue:     queue,
+		batchSize: 1,
+		workers:   1,
+		loadClaimedItemsFn: func(context.Context, []EnrichmentJob) ([]enrichmentItemRow, error) {
+			return []enrichmentItemRow{{ContentID: "lost"}}, nil
+		},
+		enrichClaimedItemFn: func(ctx context.Context, _ enrichmentItemRow) (EnrichmentOutcome, error) {
+			return "", requireEnrichmentClaim(ctx)
+		},
+	}
+
+	if _, err := e.Run(context.Background()); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if queue.claimCheckCalls != 1 {
+		t.Fatalf("claim checks = %d, want 1", queue.claimCheckCalls)
+	}
+	if got := queue.transitionedJobs["lost"].Token; got != "exact-token" {
+		t.Fatalf("ownership check token = %q, want exact-token", got)
+	}
+	if len(queue.completed) != 0 {
+		t.Fatalf("lost claim completed: %v", queue.completed)
 	}
 }
 
@@ -410,6 +467,50 @@ func TestEnrichWithProvidersSkipsWhenNoProvidersConfigured(t *testing.T) {
 	err := e.enrichWithProviders(context.Background(), enrichmentItemRow{ContentID: "c1", FolderID: 7}, nil)
 	if !errors.Is(err, errEnrichmentSkipped) {
 		t.Fatalf("enrichWithProviders error = %v, want errEnrichmentSkipped", err)
+	}
+}
+
+func TestEnrichWithProvidersRejectsLostLeaseBeforePersistence(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider metadata.Provider
+	}{
+		{
+			name: "matched metadata",
+			provider: &fakeEbookMetadataProvider{
+				slug: "provider",
+				result: &metadata.MetadataResult{
+					HasMetadata: true,
+					Overview:    "remote overview",
+				},
+			},
+		},
+		{
+			name:     "no match timestamp",
+			provider: &fakeEbookMetadataProvider{slug: "provider"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			checks := 0
+			ctx := withEnrichmentClaimCheck(context.Background(), func(context.Context) error {
+				checks++
+				return ErrEnrichmentLeaseLost
+			})
+			e := &Enricher{}
+
+			_, err := e.enrichWithProvidersOutcome(ctx, enrichmentItemRow{
+				ContentID: "lost",
+				FolderID:  7,
+			}, []metadata.Provider{tt.provider})
+			if !errors.Is(err, ErrEnrichmentLeaseLost) {
+				t.Fatalf("enrich error = %v, want ErrEnrichmentLeaseLost", err)
+			}
+			if checks != 1 {
+				t.Fatalf("claim ownership checks = %d, want 1", checks)
+			}
+		})
 	}
 }
 
@@ -980,7 +1081,6 @@ func (f *fakeEbookImageCacher) CacheImage(_ context.Context, req metadata.CacheI
 type fakeEnrichmentQueue struct {
 	mu                        sync.Mutex
 	jobs                      []EnrichmentJob
-	materializeCalls          int
 	claimCalls                int
 	claimLimit                int
 	leaseDuration             time.Duration
@@ -989,16 +1089,12 @@ type fakeEnrichmentQueue struct {
 	released                  []string
 	discarded                 []string
 	transitionedJobs          map[string]EnrichmentJob
+	claimCheckCalls           int
+	claimCheckErr             error
+	failErr                   error
 	releaseSawCanceledContext bool
 	completeCancel            context.CancelFunc
 	completeErr               error
-}
-
-func (f *fakeEnrichmentQueue) MaterializeCandidates(context.Context) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.materializeCalls++
-	return nil
 }
 
 func (f *fakeEnrichmentQueue) ClaimBatch(_ context.Context, limit int, leaseDuration time.Duration) ([]EnrichmentJob, error) {
@@ -1032,7 +1128,7 @@ func (f *fakeEnrichmentQueue) Fail(_ context.Context, job EnrichmentJob, errorCl
 	}
 	f.failed[job.ContentID] = errorClass
 	f.recordTransition(job)
-	return nil
+	return f.failErr
 }
 
 func (f *fakeEnrichmentQueue) Release(ctx context.Context, job EnrichmentJob) error {
@@ -1050,6 +1146,14 @@ func (f *fakeEnrichmentQueue) Discard(_ context.Context, job EnrichmentJob) erro
 	f.discarded = append(f.discarded, job.ContentID)
 	f.recordTransition(job)
 	return nil
+}
+
+func (f *fakeEnrichmentQueue) CheckClaim(_ context.Context, job EnrichmentJob) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.claimCheckCalls++
+	f.recordTransition(job)
+	return f.claimCheckErr
 }
 
 func (f *fakeEnrichmentQueue) recordTransition(job EnrichmentJob) {

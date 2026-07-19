@@ -138,66 +138,6 @@ func (q *EnrichmentQueue) Enqueue(ctx context.Context, contentID string, priorit
 	return err
 }
 
-var materializeEnrichmentJobsQuery = `
-	INSERT INTO ebook_enrichment_state (
-		content_id, status, priority, next_attempt_at, completed_at, protected_fields, updated_at
-	)
-	SELECT
-		mi.content_id,
-		'pending',
-		CASE WHEN mi.last_refreshed IS NULL THEN 100 ELSE 0 END,
-		CASE
-			WHEN mi.last_refreshed IS NULL THEN now()
-			ELSE GREATEST(mi.last_refreshed + interval '90 days', now())
-		END,
-		mi.last_refreshed,
-		` + ebookProtectedFieldsSQL + `,
-		now()
-	FROM media_items mi
-	WHERE mi.type = 'ebook'
-	  AND ` + catalog.MangaChapterExclusionWhere("mi") + `
-	ON CONFLICT (content_id) DO UPDATE SET
-		status = CASE
-			WHEN ebook_enrichment_state.status = 'running' THEN ebook_enrichment_state.status
-			WHEN ebook_enrichment_state.status = 'discarded' THEN 'pending'
-			ELSE ebook_enrichment_state.status
-		END,
-		priority = CASE
-			WHEN ebook_enrichment_state.status = 'running' THEN ebook_enrichment_state.priority
-			WHEN ebook_enrichment_state.status = 'discarded' THEN EXCLUDED.priority
-			WHEN EXCLUDED.completed_at IS NULL AND ebook_enrichment_state.completed_at IS NOT NULL THEN 100
-			ELSE ebook_enrichment_state.priority
-		END,
-		next_attempt_at = CASE
-			WHEN ebook_enrichment_state.status = 'running' THEN ebook_enrichment_state.next_attempt_at
-			WHEN ebook_enrichment_state.status = 'discarded' THEN EXCLUDED.next_attempt_at
-			WHEN EXCLUDED.completed_at IS NULL AND ebook_enrichment_state.completed_at IS NOT NULL THEN now()
-			ELSE ebook_enrichment_state.next_attempt_at
-		END,
-		completed_at = CASE
-			WHEN ebook_enrichment_state.status = 'running' THEN ebook_enrichment_state.completed_at
-			WHEN ebook_enrichment_state.status = 'discarded' THEN EXCLUDED.completed_at
-			WHEN EXCLUDED.completed_at IS NULL AND ebook_enrichment_state.completed_at IS NOT NULL THEN NULL
-			ELSE ebook_enrichment_state.completed_at
-		END,
-		outcome = CASE
-			WHEN ebook_enrichment_state.status = 'discarded'
-				OR (EXCLUDED.completed_at IS NULL AND ebook_enrichment_state.completed_at IS NOT NULL)
-			THEN NULL
-			ELSE ebook_enrichment_state.outcome
-		END,
-		protected_fields = ` + mergeEbookProtectedFieldsSQL + `,
-		updated_at = now()
-`
-
-func (q *EnrichmentQueue) MaterializeCandidates(ctx context.Context) error {
-	if q == nil || q.pool == nil {
-		return errors.New("ebook enrichment queue is not configured")
-	}
-	_, err := q.pool.Exec(ctx, materializeEnrichmentJobsQuery)
-	return err
-}
-
 var claimEnrichmentJobsQuery = `
 	WITH candidates AS (
 		SELECT content_id
@@ -253,6 +193,34 @@ func (q *EnrichmentQueue) ClaimBatch(ctx context.Context, limit int, leaseDurati
 		return nil, err
 	}
 	return jobs, nil
+}
+
+var checkEnrichmentClaimQuery = `
+	SELECT EXISTS (
+		SELECT 1
+		FROM ebook_enrichment_state
+		WHERE content_id = $1
+		  AND status = 'running'
+		  AND claim_token = $2
+		  AND lease_until > now()
+	)
+`
+
+func (q *EnrichmentQueue) CheckClaim(ctx context.Context, job EnrichmentJob) error {
+	if q == nil || q.pool == nil {
+		return errors.New("ebook enrichment queue is not configured")
+	}
+	if job.ContentID == "" || job.Token == "" {
+		return ErrEnrichmentLeaseLost
+	}
+	var owned bool
+	if err := q.pool.QueryRow(ctx, checkEnrichmentClaimQuery, job.ContentID, job.Token).Scan(&owned); err != nil {
+		return err
+	}
+	if !owned {
+		return ErrEnrichmentLeaseLost
+	}
+	return nil
 }
 
 var completeEnrichmentJobQuery = `

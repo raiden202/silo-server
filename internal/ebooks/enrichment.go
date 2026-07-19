@@ -42,6 +42,22 @@ const (
 // of counting the missing prerequisite as a provider failure.
 var errEnrichmentSkipped = errors.New("ebook enrichment skipped")
 
+type enrichmentClaimCheck func(context.Context) error
+
+type enrichmentClaimCheckContextKey struct{}
+
+func withEnrichmentClaimCheck(ctx context.Context, check enrichmentClaimCheck) context.Context {
+	return context.WithValue(ctx, enrichmentClaimCheckContextKey{}, check)
+}
+
+func requireEnrichmentClaim(ctx context.Context) error {
+	check, _ := ctx.Value(enrichmentClaimCheckContextKey{}).(enrichmentClaimCheck)
+	if check == nil {
+		return nil
+	}
+	return check(ctx)
+}
+
 func ebookContentType() string {
 	return "ebook"
 }
@@ -83,8 +99,8 @@ type enrichmentItemRow struct {
 }
 
 type enrichmentQueue interface {
-	MaterializeCandidates(ctx context.Context) error
 	ClaimBatch(ctx context.Context, limit int, leaseDuration time.Duration) ([]EnrichmentJob, error)
+	CheckClaim(ctx context.Context, job EnrichmentJob) error
 	Complete(ctx context.Context, job EnrichmentJob, outcome EnrichmentOutcome, refreshAfter time.Duration) error
 	Fail(ctx context.Context, job EnrichmentJob, errorClass EnrichmentErrorClass, message string, retryAfter time.Duration) error
 	Release(ctx context.Context, job EnrichmentJob) error
@@ -169,10 +185,7 @@ func (e *Enricher) Run(ctx context.Context) (int, error) {
 	if queue == nil || (e.chainRepo == nil && e.enrichClaimedItemFn == nil) {
 		return 0, nil
 	}
-	if err := queue.MaterializeCandidates(ctx); err != nil {
-		return 0, fmt.Errorf("ebook enrichment: materialize candidates: %w", err)
-	}
-	jobs, err := queue.ClaimBatch(ctx, e.batchSize, defaultEnrichmentLease)
+	jobs, err := queue.ClaimBatch(ctx, e.claimLimit(), defaultEnrichmentLease)
 	if err != nil {
 		return 0, fmt.Errorf("ebook enrichment: claim batch: %w", err)
 	}
@@ -206,6 +219,18 @@ func (e *Enricher) Run(ctx context.Context) (int, error) {
 		"enriched", enriched,
 	)
 	return enriched, runErr
+}
+
+func (e *Enricher) claimLimit() int {
+	batchSize := e.batchSize
+	if batchSize <= 0 {
+		batchSize = defaultEnrichBatchSize
+	}
+	workers := e.workers
+	if workers <= 0 {
+		workers = 1
+	}
+	return min(batchSize, workers)
 }
 
 func (e *Enricher) runQueueBatch(
@@ -274,11 +299,34 @@ func (e *Enricher) runQueueBatch(
 				}
 
 				itemCtx, cancelItem := context.WithTimeout(ctx, itemTimeout)
+				itemCtx = withEnrichmentClaimCheck(itemCtx, func(checkCtx context.Context) error {
+					return queue.CheckClaim(checkCtx, job)
+				})
 				outcome, enrichErr := enrichFn(itemCtx, item)
 				itemCtxErr := itemCtx.Err()
 				cancelItem()
-				if ctx.Err() != nil || itemCtxErr != nil ||
-					errors.Is(enrichErr, context.Canceled) || errors.Is(enrichErr, context.DeadlineExceeded) {
+				if ctx.Err() != nil {
+					recordTransitionError(item.ContentID, e.releaseJob(queue, job))
+					continue
+				}
+				if errors.Is(itemCtxErr, context.DeadlineExceeded) ||
+					errors.Is(enrichErr, context.DeadlineExceeded) {
+					timeoutErr := itemCtxErr
+					if timeoutErr == nil {
+						timeoutErr = enrichErr
+					}
+					transitionErr := e.failJob(
+						queue,
+						ctx,
+						job,
+						EnrichmentErrorTransient,
+						fmt.Sprintf("ebook enrichment item timeout: %v", timeoutErr),
+						0,
+					)
+					recordTransitionError(item.ContentID, transitionErr)
+					continue
+				}
+				if errors.Is(enrichErr, context.Canceled) {
 					recordTransitionError(item.ContentID, e.releaseJob(queue, job))
 					continue
 				}
@@ -603,6 +651,9 @@ func (e *Enricher) enrichWithProvidersOutcome(
 			"content_id", item.ContentID,
 			"title", item.Title,
 		)
+		if err := requireEnrichmentClaim(ctx); err != nil {
+			return "", err
+		}
 		if err := e.stampLastRefreshed(ctx, item.ContentID); err != nil {
 			return "", err
 		}
@@ -947,6 +998,9 @@ func isNilImageCacher(cacher metadata.ImageCacher) bool {
 }
 
 func (e *Enricher) persist(ctx context.Context, contentID string, providerIDs map[string]string, result *metadata.MetadataResult) error {
+	if err := requireEnrichmentClaim(ctx); err != nil {
+		return err
+	}
 	upd := &catalog.MetadataUpdate{}
 
 	if result.PosterPath != "" {

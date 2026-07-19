@@ -544,6 +544,9 @@ func (s *Scanner) reconcileEbookFile(ctx context.Context, folder *models.MediaFo
 			return fmt.Errorf("upsert ebook ISBN provider id: %w", err)
 		}
 	}
+	if err := s.enqueueEbookEnrichment(ctx, contentID); err != nil {
+		return fmt.Errorf("enqueue ebook enrichment: %w", err)
+	}
 	s.autoLinkLiteraryWork(ctx, contentID)
 	slog.InfoContext(ctx, "ebook scan: indexed", "component", "scanner",
 		"folder_id", folder.ID,
@@ -553,6 +556,15 @@ func (s *Scanner) reconcileEbookFile(ctx context.Context, folder *models.MediaFo
 		"path", filePath,
 	)
 	return nil
+}
+
+const ebookEnrichmentPriority = 100
+
+func (s *Scanner) enqueueEbookEnrichment(ctx context.Context, contentID string) error {
+	if s == nil || s.ebookEnrichmentQueue == nil || strings.TrimSpace(contentID) == "" {
+		return nil
+	}
+	return s.ebookEnrichmentQueue.Enqueue(ctx, contentID, ebookEnrichmentPriority)
 }
 
 func (s *Scanner) autoLinkLiteraryWork(ctx context.Context, contentID string) {

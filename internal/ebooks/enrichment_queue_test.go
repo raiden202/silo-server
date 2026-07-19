@@ -36,33 +36,6 @@ func TestEnrichmentQueueClaimQueryUsesAtomicLeasedClaims(t *testing.T) {
 	}
 }
 
-func TestEnrichmentQueueMaterializesEveryStandaloneEbookAndReactivatesResets(t *testing.T) {
-	query := strings.Join(strings.Fields(materializeEnrichmentJobsQuery), " ")
-
-	for _, fragment := range []string{
-		"CASE WHEN mi.last_refreshed IS NULL THEN 100 ELSE 0 END",
-		"GREATEST(mi.last_refreshed + interval '90 days', now())",
-		"mi.type = 'ebook'",
-		"manga_chapters",
-		"ON CONFLICT (content_id) DO UPDATE SET",
-		"ebook_enrichment_state.status = 'discarded'",
-		"EXCLUDED.completed_at IS NULL AND ebook_enrichment_state.completed_at IS NOT NULL",
-		"protected_fields",
-		"lower(trim(mi.status)) = 'pending'",
-		"ip.kind = 7",
-		"poster_path",
-		"ebook_enrichment_state.protected_fields ||",
-		"WHERE candidate IN ('poster_path', 'backdrop_path', 'logo_path')",
-	} {
-		if !strings.Contains(query, fragment) {
-			t.Fatalf("materialization query missing %q:\n%s", fragment, materializeEnrichmentJobsQuery)
-		}
-	}
-	if strings.Contains(query, "AND mi.last_refreshed IS NULL") {
-		t.Fatalf("last_refreshed must schedule work, not exclude refreshed ebooks:\n%s", materializeEnrichmentJobsQuery)
-	}
-}
-
 func TestEnrichmentQueueCapturesEveryProviderWritablePendingField(t *testing.T) {
 	query := strings.Join(strings.Fields(ebookProtectedFieldsSQL), " ")
 	for _, field := range []string{
@@ -82,6 +55,21 @@ func TestEnrichmentQueueCapturesEveryProviderWritablePendingField(t *testing.T) 
 	} {
 		if !strings.Contains(query, "'"+field+"'") {
 			t.Fatalf("protected-field capture missing %q:\n%s", field, ebookProtectedFieldsSQL)
+		}
+	}
+}
+
+func TestEnrichmentQueueChecksExactClaimTokenBeforePersistence(t *testing.T) {
+	query := strings.Join(strings.Fields(checkEnrichmentClaimQuery), " ")
+	for _, fragment := range []string{
+		"SELECT EXISTS",
+		"content_id = $1",
+		"status = 'running'",
+		"claim_token = $2",
+		"lease_until > now()",
+	} {
+		if !strings.Contains(query, fragment) {
+			t.Fatalf("claim ownership query missing %q:\n%s", fragment, checkEnrichmentClaimQuery)
 		}
 	}
 }

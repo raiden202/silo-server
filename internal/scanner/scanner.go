@@ -161,12 +161,13 @@ type Scanner struct {
 	// emptying trash hard-deletes its row. Missing files are hidden from
 	// clients immediately; the grace only delays losing per-file state so a
 	// file that reappears (flapping mount, reverted upgrade) restores cheaply.
-	fileRemovalGrace   time.Duration
-	markerFetcher      func(context.Context, string) *IntroCreditsMarkers
-	metadataQueue      MetadataQueueProducer
-	movieQueueSyncer   MovieQueueSyncer
-	seriesQueueSyncer  SeriesQueueSyncer
-	literaryWorkLinker LiteraryWorkLinker
+	fileRemovalGrace     time.Duration
+	markerFetcher        func(context.Context, string) *IntroCreditsMarkers
+	metadataQueue        MetadataQueueProducer
+	ebookEnrichmentQueue EbookEnrichmentQueue
+	movieQueueSyncer     MovieQueueSyncer
+	seriesQueueSyncer    SeriesQueueSyncer
+	literaryWorkLinker   LiteraryWorkLinker
 }
 
 // SetImageCacher installs the imagecache.Cacher used by book scanners to push
@@ -197,6 +198,12 @@ const scanProgressLogInterval = 10 * time.Second
 type MetadataQueueProducer interface {
 	EnqueueMovieFile(ctx context.Context, fileID int) error
 	EnqueueSeriesRoot(ctx context.Context, folderID int, observedRootPath string) error
+}
+
+// EbookEnrichmentQueue durably schedules provider enrichment without running
+// provider work in the scanner.
+type EbookEnrichmentQueue interface {
+	Enqueue(ctx context.Context, contentID string, priority int) error
 }
 
 type LiteraryWorkLinker interface {
@@ -287,6 +294,13 @@ func (s *Scanner) SetMetadataQueueProducer(producer MetadataQueueProducer) {
 		return
 	}
 	s.metadataQueue = producer
+}
+
+func (s *Scanner) SetEbookEnrichmentQueue(queue EbookEnrichmentQueue) {
+	if s == nil {
+		return
+	}
+	s.ebookEnrichmentQueue = queue
 }
 
 // ScanFolder walks a media folder's directory tree, discovers media files,

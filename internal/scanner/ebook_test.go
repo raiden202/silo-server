@@ -18,6 +18,42 @@ import (
 
 const ebookCoverTestThumbhash = "thumb"
 
+type fakeEbookEnrichmentQueue struct {
+	contentID string
+	priority  int
+	err       error
+}
+
+func (f *fakeEbookEnrichmentQueue) Enqueue(_ context.Context, contentID string, priority int) error {
+	f.contentID = contentID
+	f.priority = priority
+	return f.err
+}
+
+func TestScannerEbookEnrichmentHookEnqueuesHighPriorityWork(t *testing.T) {
+	queue := &fakeEbookEnrichmentQueue{}
+	s := &Scanner{}
+	s.SetEbookEnrichmentQueue(queue)
+
+	if err := s.enqueueEbookEnrichment(context.Background(), "ebook-1"); err != nil {
+		t.Fatalf("enqueueEbookEnrichment() error = %v", err)
+	}
+	if queue.contentID != "ebook-1" || queue.priority != 100 {
+		t.Fatalf("enqueue = (%q, %d), want (ebook-1, 100)", queue.contentID, queue.priority)
+	}
+}
+
+func TestScannerEbookEnrichmentHookPropagatesQueueFailure(t *testing.T) {
+	queueErr := errors.New("queue unavailable")
+	s := &Scanner{}
+	s.SetEbookEnrichmentQueue(&fakeEbookEnrichmentQueue{err: queueErr})
+
+	err := s.enqueueEbookEnrichment(context.Background(), "ebook-1")
+	if !errors.Is(err, queueErr) {
+		t.Fatalf("enqueueEbookEnrichment() error = %v, want queue failure", err)
+	}
+}
+
 type recordingEbookExecutor struct {
 	queries []string
 	args    [][]any
