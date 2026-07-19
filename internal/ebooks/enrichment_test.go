@@ -184,15 +184,20 @@ func TestEnrichmentQueriesKeepEbookAndAudiobookMetadataSeparate(t *testing.T) {
 	if !strings.Contains(loadEnrichmentItemsQuery, "ip.kind = 7") {
 		t.Fatalf("ebook load query must load author credits only:\n%s", loadEnrichmentItemsQuery)
 	}
+	for _, field := range []string{"locked_fields", "backdrop_path", "logo_path"} {
+		if !strings.Contains(loadEnrichmentItemsQuery, field) {
+			t.Fatalf("ebook load query must load %s for protection decisions:\n%s", field, loadEnrichmentItemsQuery)
+		}
+	}
 }
 
 func TestEnricherRunTransitionsClaimedJobsByOutcome(t *testing.T) {
 	queue := &fakeEnrichmentQueue{
 		jobs: []EnrichmentJob{
-			{ContentID: "success", Attempts: 1},
-			{ContentID: "no-match", Attempts: 1},
-			{ContentID: "skipped", Attempts: 1},
-			{ContentID: "failed", Attempts: 3},
+			{ContentID: "success", Token: "success-token", Attempts: 1},
+			{ContentID: "no-match", Token: "no-match-token", Attempts: 1},
+			{ContentID: "skipped", Token: "skipped-token", Attempts: 1},
+			{ContentID: "failed", Token: "failed-token", Attempts: 3},
 		},
 	}
 	items := []enrichmentItemRow{
@@ -247,14 +252,19 @@ func TestEnricherRunTransitionsClaimedJobsByOutcome(t *testing.T) {
 	if got := queue.failed["failed"]; got != EnrichmentErrorTransient {
 		t.Fatalf("failed class = %q, want transient", got)
 	}
+	for contentID, job := range queue.transitionedJobs {
+		if job.Token != contentID+"-token" {
+			t.Fatalf("transition for %q used token %q", contentID, job.Token)
+		}
+	}
 }
 
 func TestEnricherRunReleasesEveryLeaseOnCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	queue := &fakeEnrichmentQueue{
 		jobs: []EnrichmentJob{
-			{ContentID: "first", Attempts: 1},
-			{ContentID: "second", Attempts: 1},
+			{ContentID: "first", Token: "first-token", Attempts: 1},
+			{ContentID: "second", Token: "second-token", Attempts: 1},
 		},
 	}
 	items := []enrichmentItemRow{{ContentID: "first"}, {ContentID: "second"}}
@@ -290,7 +300,7 @@ func TestEnricherRunReleasesEveryLeaseOnCancellation(t *testing.T) {
 func TestEnricherRunReleasesLeaseWhenCompletionLosesContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	queue := &fakeEnrichmentQueue{
-		jobs:           []EnrichmentJob{{ContentID: "success", Attempts: 1}},
+		jobs:           []EnrichmentJob{{ContentID: "success", Token: "success-token", Attempts: 1}},
 		completeCancel: cancel,
 		completeErr:    context.Canceled,
 	}
@@ -315,6 +325,72 @@ func TestEnricherRunReleasesLeaseWhenCompletionLosesContext(t *testing.T) {
 	}
 	if queue.releaseSawCanceledContext {
 		t.Fatal("lease release used the canceled transition context")
+	}
+}
+
+func TestEnricherRunDiscardsClaimedRowsThatAreNoLongerEligible(t *testing.T) {
+	queue := &fakeEnrichmentQueue{
+		jobs: []EnrichmentJob{
+			{ContentID: "became-manga", Token: "manga-token", Attempts: 1},
+			{ContentID: "folderless", Token: "folderless-token", Attempts: 1},
+		},
+	}
+	e := &Enricher{
+		queue:     queue,
+		batchSize: 2,
+		workers:   1,
+		loadClaimedItemsFn: func(context.Context, []EnrichmentJob) ([]enrichmentItemRow, error) {
+			return []enrichmentItemRow{{ContentID: "folderless", FolderID: 0}}, nil
+		},
+		enrichClaimedItemFn: func(context.Context, enrichmentItemRow) (EnrichmentOutcome, error) {
+			return EnrichmentOutcomeSkipped, nil
+		},
+	}
+
+	if _, err := e.Run(context.Background()); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if got := strings.Join(queue.discarded, ","); got != "became-manga" {
+		t.Fatalf("discarded = %q, want became-manga", got)
+	}
+	if got := queue.completed["folderless"]; got != EnrichmentOutcomeSkipped {
+		t.Fatalf("folderless outcome = %q, want skipped", got)
+	}
+	if len(queue.released) != 0 {
+		t.Fatalf("ineligible rows were released back into immediate churn: %v", queue.released)
+	}
+}
+
+func TestEnricherRunBoundsEachItemBelowTheLease(t *testing.T) {
+	queue := &fakeEnrichmentQueue{
+		jobs: []EnrichmentJob{{ContentID: "slow", Token: "slow-token", Attempts: 1}},
+	}
+	e := &Enricher{
+		queue:       queue,
+		batchSize:   1,
+		workers:     1,
+		itemTimeout: 20 * time.Millisecond,
+		loadClaimedItemsFn: func(context.Context, []EnrichmentJob) ([]enrichmentItemRow, error) {
+			return []enrichmentItemRow{{ContentID: "slow"}}, nil
+		},
+		enrichClaimedItemFn: func(ctx context.Context, _ enrichmentItemRow) (EnrichmentOutcome, error) {
+			<-ctx.Done()
+			return "", ctx.Err()
+		},
+	}
+
+	started := time.Now()
+	if _, err := e.Run(context.Background()); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("per-item timeout took %s", elapsed)
+	}
+	if got := strings.Join(queue.released, ","); got != "slow" {
+		t.Fatalf("released = %q, want slow", got)
+	}
+	if defaultEnrichmentItemTimeout >= defaultEnrichmentLease/2 {
+		t.Fatalf("default item timeout %s is not materially shorter than lease %s", defaultEnrichmentItemTimeout, defaultEnrichmentLease)
 	}
 }
 
@@ -718,16 +794,12 @@ func TestBuildEbookMetadataRequestCarriesAccumulatedISBN(t *testing.T) {
 	}
 }
 
-func TestPreservePendingEbookLocalMetadata(t *testing.T) {
+func TestPreserveDurableEbookLocalMetadataAcrossRefreshes(t *testing.T) {
 	item := enrichmentItemRow{
-		Status:      "pending",
-		Year:        2021,
-		Overview:    "Embedded description",
-		ReleaseDate: "2021-03-04",
-		Genres:      []string{"Local genre"},
-		Studios:     []string{"Local publisher"},
-		PosterPath:  "local/ebooks/book/poster/original.webp",
-		Author:      "Embedded Author",
+		Status: "matched",
+		ProtectedFields: []string{
+			"year", "overview", "release_date", "genres", "studios", "poster_path", "authors",
+		},
 	}
 	result := &metadata.MetadataResult{
 		HasMetadata: true,
@@ -759,7 +831,7 @@ func TestPreservePendingEbookLocalMetadata(t *testing.T) {
 	}
 }
 
-func TestPreservePendingEbookLocalMetadataAllowsRefreshReplacement(t *testing.T) {
+func TestPreserveEbookMetadataAllowsProviderOwnedRefreshReplacement(t *testing.T) {
 	result := &metadata.MetadataResult{
 		HasMetadata: true,
 		Year:        2022,
@@ -767,9 +839,7 @@ func TestPreservePendingEbookLocalMetadataAllowsRefreshReplacement(t *testing.T)
 	}
 
 	preserveEbookLocalMetadata(enrichmentItemRow{
-		Status:   "matched",
-		Year:     2021,
-		Overview: "Old remote description",
+		Status: "matched",
 	}, result)
 
 	if result.Year != 2022 || result.Overview != "Corrected remote description" {
@@ -782,19 +852,64 @@ func TestPreserveEbookLocalPosterDuringControlledRefresh(t *testing.T) {
 		HasMetadata:     true,
 		PosterPath:      "https://example.test/replacement.jpg",
 		PosterThumbhash: "remote-thumb",
+		BackdropPath:    "https://example.test/backdrop.jpg",
+		LogoPath:        "https://example.test/logo.png",
 		Overview:        "Corrected remote description",
 	}
 
 	preserveEbookLocalMetadata(enrichmentItemRow{
-		Status:     "matched",
-		PosterPath: "local/ebooks/book/poster/original.webp",
+		Status:       "matched",
+		PosterPath:   "local/ebooks/book/poster/original.webp",
+		BackdropPath: "/books/book/backdrop.jpg",
+		LogoPath:     "embedded/book/logo.png",
 	}, result)
 
-	if result.PosterPath != "" || result.PosterThumbhash != "" {
+	if result.PosterPath != "" || result.PosterThumbhash != "" ||
+		result.BackdropPath != "" || result.LogoPath != "" {
 		t.Fatalf("controlled refresh would replace local poster: %+v", result)
 	}
 	if result.Overview != "Corrected remote description" {
 		t.Fatalf("non-artwork refresh field was suppressed: %+v", result)
+	}
+}
+
+func TestPreserveEbookMetadataHonorsGenericLockedFields(t *testing.T) {
+	result := &metadata.MetadataResult{
+		HasMetadata:   true,
+		Title:         "Remote title",
+		Overview:      "Remote overview",
+		Year:          2024,
+		ReleaseDate:   "2024-01-02",
+		Runtime:       500,
+		Genres:        []string{"Remote genre"},
+		Studios:       []string{"Remote publisher"},
+		ContentRating: "Teen",
+		PosterPath:    "https://example.test/poster.jpg",
+		BackdropPath:  "https://example.test/backdrop.jpg",
+		LogoPath:      "https://example.test/logo.png",
+		People: []models.ItemPerson{
+			{Person: models.Person{Name: "Remote Author"}, Kind: models.PersonKindAuthor},
+		},
+	}
+	item := enrichmentItemRow{LockedFields: []int{
+		int(metadata.FieldName),
+		int(metadata.FieldOverview),
+		int(metadata.FieldGenres),
+		int(metadata.FieldStudios),
+		int(metadata.FieldCrew),
+		int(metadata.FieldRuntime),
+		int(metadata.FieldContentRating),
+		int(metadata.FieldImages),
+		int(metadata.FieldReleaseDates),
+	}}
+
+	preserveEbookLocalMetadata(item, result)
+
+	if result.Title != "" || result.Overview != "" || result.Year != 0 || result.ReleaseDate != "" ||
+		result.Runtime != 0 || len(result.Genres) != 0 || len(result.Studios) != 0 ||
+		result.ContentRating != "" || result.PosterPath != "" || result.BackdropPath != "" ||
+		result.LogoPath != "" || len(result.People) != 0 {
+		t.Fatalf("locked metadata was not protected: %+v", result)
 	}
 }
 
@@ -872,6 +987,8 @@ type fakeEnrichmentQueue struct {
 	completed                 map[string]EnrichmentOutcome
 	failed                    map[string]EnrichmentErrorClass
 	released                  []string
+	discarded                 []string
+	transitionedJobs          map[string]EnrichmentJob
 	releaseSawCanceledContext bool
 	completeCancel            context.CancelFunc
 	completeErr               error
@@ -893,35 +1010,53 @@ func (f *fakeEnrichmentQueue) ClaimBatch(_ context.Context, limit int, leaseDura
 	return append([]EnrichmentJob(nil), f.jobs...), nil
 }
 
-func (f *fakeEnrichmentQueue) Complete(_ context.Context, contentID string, outcome EnrichmentOutcome, _ time.Duration) error {
+func (f *fakeEnrichmentQueue) Complete(_ context.Context, job EnrichmentJob, outcome EnrichmentOutcome, _ time.Duration) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.completed == nil {
 		f.completed = make(map[string]EnrichmentOutcome)
 	}
-	f.completed[contentID] = outcome
+	f.completed[job.ContentID] = outcome
+	f.recordTransition(job)
 	if f.completeCancel != nil {
 		f.completeCancel()
 	}
 	return f.completeErr
 }
 
-func (f *fakeEnrichmentQueue) Fail(_ context.Context, contentID string, errorClass EnrichmentErrorClass, _ string, _ time.Duration) error {
+func (f *fakeEnrichmentQueue) Fail(_ context.Context, job EnrichmentJob, errorClass EnrichmentErrorClass, _ string, _ time.Duration) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.failed == nil {
 		f.failed = make(map[string]EnrichmentErrorClass)
 	}
-	f.failed[contentID] = errorClass
+	f.failed[job.ContentID] = errorClass
+	f.recordTransition(job)
 	return nil
 }
 
-func (f *fakeEnrichmentQueue) Release(ctx context.Context, contentID string) error {
+func (f *fakeEnrichmentQueue) Release(ctx context.Context, job EnrichmentJob) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.releaseSawCanceledContext = f.releaseSawCanceledContext || ctx.Err() != nil
-	f.released = append(f.released, contentID)
+	f.released = append(f.released, job.ContentID)
+	f.recordTransition(job)
 	return nil
+}
+
+func (f *fakeEnrichmentQueue) Discard(_ context.Context, job EnrichmentJob) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.discarded = append(f.discarded, job.ContentID)
+	f.recordTransition(job)
+	return nil
+}
+
+func (f *fakeEnrichmentQueue) recordTransition(job EnrichmentJob) {
+	if f.transitionedJobs == nil {
+		f.transitionedJobs = make(map[string]EnrichmentJob)
+	}
+	f.transitionedJobs[job.ContentID] = job
 }
 
 func TestCleanEbookSearchTitle(t *testing.T) {

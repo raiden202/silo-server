@@ -33,6 +33,8 @@ const (
 
 	defaultEnrichBatchSize = 50
 	defaultEnrichWorkers   = 4
+
+	defaultEnrichmentItemTimeout = 2 * time.Minute
 )
 
 // errEnrichmentSkipped preserves the direct helper contract for an item that
@@ -58,33 +60,35 @@ func ebookEnrichWorkers() int {
 }
 
 type enrichmentItemRow struct {
-	ContentID   string
-	Title       string
-	Year        int
-	FolderID    int
-	Language    string
-	Author      string
-	ProviderIDs map[string]string
-	Status      string
-	Overview    string
-	ReleaseDate string
-	Genres      []string
-	Studios     []string
-	PosterPath  string
+	ContentID       string
+	Title           string
+	Year            int
+	FolderID        int
+	Language        string
+	Author          string
+	ProviderIDs     map[string]string
+	Status          string
+	Overview        string
+	Tagline         string
+	ContentRating   string
+	Runtime         int
+	ReleaseDate     string
+	Genres          []string
+	Studios         []string
+	PosterPath      string
+	BackdropPath    string
+	LogoPath        string
+	LockedFields    []int
+	ProtectedFields []string
 }
 
 type enrichmentQueue interface {
 	MaterializeCandidates(ctx context.Context) error
 	ClaimBatch(ctx context.Context, limit int, leaseDuration time.Duration) ([]EnrichmentJob, error)
-	Complete(ctx context.Context, contentID string, outcome EnrichmentOutcome, refreshAfter time.Duration) error
-	Fail(ctx context.Context, contentID string, errorClass EnrichmentErrorClass, message string, retryAfter time.Duration) error
-	Release(ctx context.Context, contentID string) error
-}
-
-type claimAwareEnrichmentQueue interface {
-	CompleteClaim(ctx context.Context, job EnrichmentJob, outcome EnrichmentOutcome, refreshAfter time.Duration) error
-	FailClaim(ctx context.Context, job EnrichmentJob, errorClass EnrichmentErrorClass, message string, retryAfter time.Duration) error
-	ReleaseClaim(ctx context.Context, job EnrichmentJob) error
+	Complete(ctx context.Context, job EnrichmentJob, outcome EnrichmentOutcome, refreshAfter time.Duration) error
+	Fail(ctx context.Context, job EnrichmentJob, errorClass EnrichmentErrorClass, message string, retryAfter time.Duration) error
+	Release(ctx context.Context, job EnrichmentJob) error
+	Discard(ctx context.Context, job EnrichmentJob) error
 }
 
 // Enricher drives the ebook metadata enrichment sweep.
@@ -100,6 +104,7 @@ type Enricher struct {
 	workLinker     literaryWorkLinker
 	batchSize      int
 	workers        int
+	itemTimeout    time.Duration
 	queue          enrichmentQueue
 
 	loadClaimedItemsFn  func(context.Context, []EnrichmentJob) ([]enrichmentItemRow, error)
@@ -214,13 +219,16 @@ func (e *Enricher) runQueueBatch(
 	for _, job := range jobs {
 		claimedJobs[job.ContentID] = job
 	}
+	var transitionErrs []error
 	loaded := make(map[string]struct{}, len(items))
 	for i := range items {
 		loaded[items[i].ContentID] = struct{}{}
 	}
 	for _, job := range jobs {
 		if _, ok := loaded[job.ContentID]; !ok {
-			_ = e.releaseJob(queue, job)
+			if err := e.discardJob(queue, job); err != nil && !errors.Is(err, ErrEnrichmentLeaseLost) {
+				transitionErrs = append(transitionErrs, fmt.Errorf("%s: %w", job.ContentID, err))
+			}
 		}
 	}
 
@@ -232,15 +240,18 @@ func (e *Enricher) runQueueBatch(
 		workers = len(items)
 	}
 	if workers == 0 {
-		return 0, nil
+		return 0, errors.Join(transitionErrs...)
+	}
+	itemTimeout := e.itemTimeout
+	if itemTimeout <= 0 || itemTimeout >= defaultEnrichmentLease {
+		itemTimeout = defaultEnrichmentItemTimeout
 	}
 
 	ch := make(chan enrichmentItemRow, workers)
 	var (
-		wg             sync.WaitGroup
-		enriched       int64
-		transitionMu   sync.Mutex
-		transitionErrs []error
+		wg           sync.WaitGroup
+		enriched     int64
+		transitionMu sync.Mutex
 	)
 	recordTransitionError := func(contentID string, err error) {
 		if err == nil || errors.Is(err, ErrEnrichmentLeaseLost) {
@@ -262,8 +273,12 @@ func (e *Enricher) runQueueBatch(
 					continue
 				}
 
-				outcome, enrichErr := enrichFn(ctx, item)
-				if ctx.Err() != nil || errors.Is(enrichErr, context.Canceled) || errors.Is(enrichErr, context.DeadlineExceeded) {
+				itemCtx, cancelItem := context.WithTimeout(ctx, itemTimeout)
+				outcome, enrichErr := enrichFn(itemCtx, item)
+				itemCtxErr := itemCtx.Err()
+				cancelItem()
+				if ctx.Err() != nil || itemCtxErr != nil ||
+					errors.Is(enrichErr, context.Canceled) || errors.Is(enrichErr, context.DeadlineExceeded) {
 					recordTransitionError(item.ContentID, e.releaseJob(queue, job))
 					continue
 				}
@@ -330,10 +345,7 @@ func (e *Enricher) completeJob(
 	job EnrichmentJob,
 	outcome EnrichmentOutcome,
 ) error {
-	if claimQueue, ok := queue.(claimAwareEnrichmentQueue); ok {
-		return claimQueue.CompleteClaim(ctx, job, outcome, enrichmentRefreshHorizon(outcome))
-	}
-	return queue.Complete(ctx, job.ContentID, outcome, enrichmentRefreshHorizon(outcome))
+	return queue.Complete(ctx, job, outcome, enrichmentRefreshHorizon(outcome))
 }
 
 func (e *Enricher) failJob(
@@ -344,19 +356,19 @@ func (e *Enricher) failJob(
 	message string,
 	retryAfter time.Duration,
 ) error {
-	if claimQueue, ok := queue.(claimAwareEnrichmentQueue); ok {
-		return claimQueue.FailClaim(ctx, job, errorClass, message, retryAfter)
-	}
-	return queue.Fail(ctx, job.ContentID, errorClass, message, retryAfter)
+	return queue.Fail(ctx, job, errorClass, message, retryAfter)
 }
 
 func (e *Enricher) releaseJob(queue enrichmentQueue, job EnrichmentJob) error {
 	releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if claimQueue, ok := queue.(claimAwareEnrichmentQueue); ok {
-		return claimQueue.ReleaseClaim(releaseCtx, job)
-	}
-	return queue.Release(releaseCtx, job.ContentID)
+	return queue.Release(releaseCtx, job)
+}
+
+func (e *Enricher) discardJob(queue enrichmentQueue, job EnrichmentJob) error {
+	discardCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return queue.Discard(discardCtx, job)
 }
 
 func (e *Enricher) runBatch(
@@ -441,10 +453,16 @@ var loadEnrichmentItemsQuery = `
 		) AS author,
 		COALESCE(mi.status, ''),
 		COALESCE(mi.overview, ''),
-		COALESCE(mi.release_date, ''),
+		COALESCE(mi.tagline, ''),
+		COALESCE(mi.content_rating, ''),
+		COALESCE(mi.runtime, 0),
+		COALESCE(mi.release_date::text, ''),
 		COALESCE(mi.genres, '{}'),
 		COALESCE(mi.studios, '{}'),
-		COALESCE(mi.poster_path, '')
+		COALESCE(mi.poster_path, ''),
+		COALESCE(mi.backdrop_path, ''),
+		COALESCE(mi.logo_path, ''),
+		COALESCE(mi.locked_fields, '{}'::integer[])
 	FROM unnest($1::text[]) WITH ORDINALITY AS claimed(content_id, position)
 	JOIN media_items mi ON mi.content_id = claimed.content_id
 	LEFT JOIN LATERAL (
@@ -462,8 +480,10 @@ var loadEnrichmentItemsQuery = `
 
 func (e *Enricher) loadClaimedItems(ctx context.Context, jobs []EnrichmentJob) ([]enrichmentItemRow, error) {
 	contentIDs := make([]string, 0, len(jobs))
+	claimedJobs := make(map[string]EnrichmentJob, len(jobs))
 	for _, job := range jobs {
 		contentIDs = append(contentIDs, job.ContentID)
+		claimedJobs[job.ContentID] = job
 	}
 	rows, err := e.pool.Query(ctx, loadEnrichmentItemsQuery, contentIDs)
 	if err != nil {
@@ -483,13 +503,20 @@ func (e *Enricher) loadClaimedItems(ctx context.Context, jobs []EnrichmentJob) (
 			&item.Author,
 			&item.Status,
 			&item.Overview,
+			&item.Tagline,
+			&item.ContentRating,
+			&item.Runtime,
 			&item.ReleaseDate,
 			&item.Genres,
 			&item.Studios,
 			&item.PosterPath,
+			&item.BackdropPath,
+			&item.LogoPath,
+			&item.LockedFields,
 		); err != nil {
 			return nil, fmt.Errorf("scanning ebook enrichment row: %w", err)
 		}
+		item.ProtectedFields = append([]string(nil), claimedJobs[item.ContentID].ProtectedFields...)
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
@@ -604,35 +631,75 @@ func preserveEbookLocalMetadata(item enrichmentItemRow, result *metadata.Metadat
 	if result == nil {
 		return
 	}
-	if item.PosterPath != "" && !ebookPosterOwnedByRemoteProvider(item.PosterPath) {
+	protected := make(map[string]struct{}, len(item.ProtectedFields))
+	for _, field := range item.ProtectedFields {
+		protected[strings.ToLower(strings.TrimSpace(field))] = struct{}{}
+	}
+	isProtected := func(field string) bool {
+		_, ok := protected[field]
+		return ok
+	}
+	isLocked := func(field metadata.MetadataField) bool {
+		for _, locked := range item.LockedFields {
+			if locked == int(field) {
+				return true
+			}
+		}
+		return false
+	}
+
+	if isProtected("title") || isLocked(metadata.FieldName) {
+		result.Title = ""
+		result.OriginalTitle = ""
+		result.SortTitle = ""
+	}
+	if isProtected("year") || isLocked(metadata.FieldReleaseDates) {
+		result.Year = 0
+	}
+	if isProtected("overview") || isLocked(metadata.FieldOverview) {
+		result.Overview = ""
+	}
+	if isProtected("tagline") {
+		result.Tagline = ""
+	}
+	if isProtected("content_rating") || isLocked(metadata.FieldContentRating) {
+		result.ContentRating = ""
+	}
+	if isProtected("runtime") || isLocked(metadata.FieldRuntime) {
+		result.Runtime = 0
+	}
+	if isProtected("release_date") || isLocked(metadata.FieldReleaseDates) {
+		result.ReleaseDate = ""
+	}
+	if isProtected("genres") || isLocked(metadata.FieldGenres) {
+		result.Genres = nil
+	}
+	if isProtected("studios") || isLocked(metadata.FieldStudios) {
+		result.Studios = nil
+	}
+	if isProtected("authors") || isLocked(metadata.FieldCrew) || isLocked(metadata.FieldCast) {
+		result.People = nil
+	}
+
+	imagesLocked := isLocked(metadata.FieldImages)
+	if imagesLocked || isProtected("poster_path") ||
+		(item.PosterPath != "" && !ebookArtworkOwnedByRemoteProvider(item.PosterPath)) {
 		result.PosterPath = ""
 		result.PosterThumbhash = ""
 	}
-	if !strings.EqualFold(strings.TrimSpace(item.Status), "pending") {
-		return
+	if imagesLocked || isProtected("backdrop_path") ||
+		(item.BackdropPath != "" && !ebookArtworkOwnedByRemoteProvider(item.BackdropPath)) {
+		result.BackdropPath = ""
+		result.BackdropThumbhash = ""
 	}
-	if item.Year > 0 {
-		result.Year = 0
-	}
-	if item.Overview != "" {
-		result.Overview = ""
-	}
-	if item.ReleaseDate != "" {
-		result.ReleaseDate = ""
-	}
-	if len(item.Genres) > 0 {
-		result.Genres = nil
-	}
-	if len(item.Studios) > 0 {
-		result.Studios = nil
-	}
-	if item.Author != "" {
-		result.People = nil
+	if imagesLocked || isProtected("logo_path") ||
+		(item.LogoPath != "" && !ebookArtworkOwnedByRemoteProvider(item.LogoPath)) {
+		result.LogoPath = ""
 	}
 }
 
-func ebookPosterOwnedByRemoteProvider(path string) bool {
-	path = strings.TrimSpace(path)
+func ebookArtworkOwnedByRemoteProvider(path string) bool {
+	path = strings.ToLower(strings.TrimSpace(path))
 	return isRemoteHTTPImage(path) || strings.HasPrefix(path, ebookMetadataImageProviderID+"/ebooks/")
 }
 

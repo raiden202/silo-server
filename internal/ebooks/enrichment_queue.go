@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -39,29 +38,92 @@ const (
 var ErrEnrichmentLeaseLost = errors.New("ebook enrichment lease lost")
 
 type EnrichmentJob struct {
-	ContentID     string
-	Attempts      int
-	LastAttemptAt time.Time
+	ContentID       string
+	Token           string
+	Attempts        int
+	LastAttemptAt   time.Time
+	ProtectedFields []string
 }
 
 type EnrichmentQueue struct {
 	pool *pgxpool.Pool
-
-	claimsMu sync.Mutex
-	claims   map[string]EnrichmentJob
 }
 
 func NewEnrichmentQueue(pool *pgxpool.Pool) *EnrichmentQueue {
 	return &EnrichmentQueue{pool: pool}
 }
 
+const ebookProtectedFieldsSQL = `
+	ARRAY_REMOVE(ARRAY[
+		CASE WHEN lower(trim(mi.status)) = 'pending' AND trim(COALESCE(mi.title, '')) <> '' THEN 'title' END,
+		CASE WHEN lower(trim(mi.status)) = 'pending' AND COALESCE(mi.year, 0) > 0 THEN 'year' END,
+		CASE WHEN lower(trim(mi.status)) = 'pending' AND trim(COALESCE(mi.overview, '')) <> '' THEN 'overview' END,
+		CASE WHEN lower(trim(mi.status)) = 'pending' AND trim(COALESCE(mi.tagline, '')) <> '' THEN 'tagline' END,
+		CASE WHEN lower(trim(mi.status)) = 'pending' AND trim(COALESCE(mi.content_rating, '')) <> '' THEN 'content_rating' END,
+		CASE WHEN lower(trim(mi.status)) = 'pending' AND COALESCE(mi.runtime, 0) > 0 THEN 'runtime' END,
+		CASE WHEN lower(trim(mi.status)) = 'pending' AND trim(COALESCE(mi.release_date::text, '')) <> '' THEN 'release_date' END,
+		CASE WHEN lower(trim(mi.status)) = 'pending' AND cardinality(COALESCE(mi.genres, '{}'::text[])) > 0 THEN 'genres' END,
+		CASE WHEN lower(trim(mi.status)) = 'pending' AND cardinality(COALESCE(mi.studios, '{}'::text[])) > 0 THEN 'studios' END,
+		CASE WHEN lower(trim(mi.status)) = 'pending' AND EXISTS (
+			SELECT 1 FROM item_people ip WHERE ip.content_id = mi.content_id AND ip.kind = 7
+		) THEN 'authors' END,
+		CASE WHEN trim(COALESCE(mi.poster_path, '')) <> ''
+			AND lower(trim(mi.poster_path)) NOT LIKE 'http://%'
+			AND lower(trim(mi.poster_path)) NOT LIKE 'https://%'
+			AND lower(trim(mi.poster_path)) NOT LIKE 'ebook-metadata/ebooks/%'
+			THEN 'poster_path' END,
+		CASE WHEN trim(COALESCE(mi.backdrop_path, '')) <> ''
+			AND lower(trim(mi.backdrop_path)) NOT LIKE 'http://%'
+			AND lower(trim(mi.backdrop_path)) NOT LIKE 'https://%'
+			AND lower(trim(mi.backdrop_path)) NOT LIKE 'ebook-metadata/ebooks/%'
+			THEN 'backdrop_path' END,
+		CASE WHEN trim(COALESCE(mi.logo_path, '')) <> ''
+			AND lower(trim(mi.logo_path)) NOT LIKE 'http://%'
+			AND lower(trim(mi.logo_path)) NOT LIKE 'https://%'
+			AND lower(trim(mi.logo_path)) NOT LIKE 'ebook-metadata/ebooks/%'
+			THEN 'logo_path' END
+	]::text[], NULL)
+`
+
+const mergeEbookProtectedFieldsSQL = `
+	ARRAY(
+		SELECT DISTINCT field
+		FROM unnest(
+			ebook_enrichment_state.protected_fields ||
+			ARRAY(
+				SELECT candidate
+				FROM unnest(EXCLUDED.protected_fields) AS candidate
+				WHERE candidate IN ('poster_path', 'backdrop_path', 'logo_path')
+			)
+		) AS field
+		ORDER BY field
+	)
+`
+
 var enqueueEnrichmentJobQuery = `
 	INSERT INTO ebook_enrichment_state (
-		content_id, status, priority, next_attempt_at, updated_at
+		content_id, status, priority, next_attempt_at, protected_fields, updated_at
 	)
-	VALUES ($1, 'pending', $2, now(), now())
+	SELECT mi.content_id, 'pending', $2, now(), ` + ebookProtectedFieldsSQL + `, now()
+	FROM media_items mi
+	WHERE mi.content_id = $1
+	  AND mi.type = 'ebook'
+	  AND ` + catalog.MangaChapterExclusionWhere("mi") + `
 	ON CONFLICT (content_id) DO UPDATE SET
-		priority = GREATEST(ebook_enrichment_state.priority, EXCLUDED.priority),
+		status = CASE
+			WHEN ebook_enrichment_state.status = 'running' THEN ebook_enrichment_state.status
+			ELSE 'pending'
+		END,
+		priority = CASE
+			WHEN ebook_enrichment_state.status = 'running' THEN ebook_enrichment_state.priority
+			ELSE GREATEST(ebook_enrichment_state.priority, EXCLUDED.priority)
+		END,
+		next_attempt_at = CASE
+			WHEN ebook_enrichment_state.status = 'running' THEN ebook_enrichment_state.next_attempt_at
+			ELSE now()
+		END,
+		requeue_requested = ebook_enrichment_state.requeue_requested OR ebook_enrichment_state.status = 'running',
+		protected_fields = ` + mergeEbookProtectedFieldsSQL + `,
 		updated_at = now()
 `
 
@@ -78,14 +140,54 @@ func (q *EnrichmentQueue) Enqueue(ctx context.Context, contentID string, priorit
 
 var materializeEnrichmentJobsQuery = `
 	INSERT INTO ebook_enrichment_state (
-		content_id, status, priority, next_attempt_at, updated_at
+		content_id, status, priority, next_attempt_at, completed_at, protected_fields, updated_at
 	)
-	SELECT mi.content_id, 'pending', 100, now(), now()
+	SELECT
+		mi.content_id,
+		'pending',
+		CASE WHEN mi.last_refreshed IS NULL THEN 100 ELSE 0 END,
+		CASE
+			WHEN mi.last_refreshed IS NULL THEN now()
+			ELSE GREATEST(mi.last_refreshed + interval '90 days', now())
+		END,
+		mi.last_refreshed,
+		` + ebookProtectedFieldsSQL + `,
+		now()
 	FROM media_items mi
 	WHERE mi.type = 'ebook'
 	  AND ` + catalog.MangaChapterExclusionWhere("mi") + `
-	  AND mi.last_refreshed IS NULL
-	ON CONFLICT (content_id) DO NOTHING
+	ON CONFLICT (content_id) DO UPDATE SET
+		status = CASE
+			WHEN ebook_enrichment_state.status = 'running' THEN ebook_enrichment_state.status
+			WHEN ebook_enrichment_state.status = 'discarded' THEN 'pending'
+			ELSE ebook_enrichment_state.status
+		END,
+		priority = CASE
+			WHEN ebook_enrichment_state.status = 'running' THEN ebook_enrichment_state.priority
+			WHEN ebook_enrichment_state.status = 'discarded' THEN EXCLUDED.priority
+			WHEN EXCLUDED.completed_at IS NULL AND ebook_enrichment_state.completed_at IS NOT NULL THEN 100
+			ELSE ebook_enrichment_state.priority
+		END,
+		next_attempt_at = CASE
+			WHEN ebook_enrichment_state.status = 'running' THEN ebook_enrichment_state.next_attempt_at
+			WHEN ebook_enrichment_state.status = 'discarded' THEN EXCLUDED.next_attempt_at
+			WHEN EXCLUDED.completed_at IS NULL AND ebook_enrichment_state.completed_at IS NOT NULL THEN now()
+			ELSE ebook_enrichment_state.next_attempt_at
+		END,
+		completed_at = CASE
+			WHEN ebook_enrichment_state.status = 'running' THEN ebook_enrichment_state.completed_at
+			WHEN ebook_enrichment_state.status = 'discarded' THEN EXCLUDED.completed_at
+			WHEN EXCLUDED.completed_at IS NULL AND ebook_enrichment_state.completed_at IS NOT NULL THEN NULL
+			ELSE ebook_enrichment_state.completed_at
+		END,
+		outcome = CASE
+			WHEN ebook_enrichment_state.status = 'discarded'
+				OR (EXCLUDED.completed_at IS NULL AND ebook_enrichment_state.completed_at IS NOT NULL)
+			THEN NULL
+			ELSE ebook_enrichment_state.outcome
+		END,
+		protected_fields = ` + mergeEbookProtectedFieldsSQL + `,
+		updated_at = now()
 `
 
 func (q *EnrichmentQueue) MaterializeCandidates(ctx context.Context) error {
@@ -102,19 +204,24 @@ var claimEnrichmentJobsQuery = `
 		FROM ebook_enrichment_state
 		WHERE next_attempt_at <= now()
 		  AND (status = 'pending' OR (status = 'running' AND lease_until < now()))
-		ORDER BY priority DESC, next_attempt_at, updated_at
+		ORDER BY
+			(priority + FLOOR(EXTRACT(EPOCH FROM (now() - next_attempt_at)) / 3600)::integer) DESC,
+			priority DESC,
+			next_attempt_at,
+			updated_at
 		FOR UPDATE SKIP LOCKED
 		LIMIT $1
 	)
 	UPDATE ebook_enrichment_state state
 	SET status = 'running',
 		lease_until = now() + $2::interval,
+		claim_token = gen_random_uuid()::text,
 		last_attempt_at = now(),
 		attempts = attempts + 1,
 		updated_at = now()
 	FROM candidates
 	WHERE state.content_id = candidates.content_id
-	RETURNING state.content_id, state.attempts, state.last_attempt_at
+	RETURNING state.content_id, state.claim_token, state.attempts, state.last_attempt_at, state.protected_fields
 `
 
 func (q *EnrichmentQueue) ClaimBatch(ctx context.Context, limit int, leaseDuration time.Duration) ([]EnrichmentJob, error) {
@@ -137,11 +244,10 @@ func (q *EnrichmentQueue) ClaimBatch(ctx context.Context, limit int, leaseDurati
 	jobs := make([]EnrichmentJob, 0, limit)
 	for rows.Next() {
 		var job EnrichmentJob
-		if err := rows.Scan(&job.ContentID, &job.Attempts, &job.LastAttemptAt); err != nil {
+		if err := rows.Scan(&job.ContentID, &job.Token, &job.Attempts, &job.LastAttemptAt, &job.ProtectedFields); err != nil {
 			return nil, err
 		}
 		jobs = append(jobs, job)
-		q.rememberClaim(job)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -153,36 +259,25 @@ var completeEnrichmentJobQuery = `
 	UPDATE ebook_enrichment_state
 	SET status = 'pending',
 		lease_until = NULL,
+		claim_token = NULL,
 		completed_at = now(),
-		next_attempt_at = now() + $3::interval,
+		next_attempt_at = CASE
+			WHEN requeue_requested THEN now()
+			ELSE now() + $3::interval
+		END,
 		outcome = $2,
 		attempts = 0,
-		priority = GREATEST(priority, 0),
+		priority = CASE WHEN requeue_requested THEN 100 ELSE 0 END,
+		requeue_requested = false,
 		last_error_class = NULL,
 		last_error = NULL,
 		updated_at = now()
 	WHERE content_id = $1
 	  AND status = 'running'
-	  AND last_attempt_at = $4
+	  AND claim_token = $4
 `
 
 func (q *EnrichmentQueue) Complete(
-	ctx context.Context,
-	contentID string,
-	outcome EnrichmentOutcome,
-	refreshAfter time.Duration,
-) error {
-	if q == nil || q.pool == nil {
-		return errors.New("ebook enrichment queue is not configured")
-	}
-	job, ok := q.claimedJob(contentID)
-	if !ok {
-		return ErrEnrichmentLeaseLost
-	}
-	return q.CompleteClaim(ctx, job, outcome, refreshAfter)
-}
-
-func (q *EnrichmentQueue) CompleteClaim(
 	ctx context.Context,
 	job EnrichmentJob,
 	outcome EnrichmentOutcome,
@@ -190,6 +285,9 @@ func (q *EnrichmentQueue) CompleteClaim(
 ) error {
 	if q == nil || q.pool == nil {
 		return errors.New("ebook enrichment queue is not configured")
+	}
+	if job.ContentID == "" || job.Token == "" {
+		return ErrEnrichmentLeaseLost
 	}
 	if refreshAfter <= 0 {
 		refreshAfter = enrichmentRefreshHorizon(outcome)
@@ -204,16 +302,14 @@ func (q *EnrichmentQueue) CompleteClaim(
 		job.ContentID,
 		string(outcome),
 		postgresInterval(refreshAfter),
-		job.LastAttemptAt,
+		job.Token,
 	)
 	if err != nil {
 		return err
 	}
 	if tag.RowsAffected() == 0 {
-		q.forgetClaim(job)
 		return ErrEnrichmentLeaseLost
 	}
-	q.forgetClaim(job)
 	return nil
 }
 
@@ -221,34 +317,23 @@ var failEnrichmentJobQuery = `
 	UPDATE ebook_enrichment_state
 	SET status = 'pending',
 		lease_until = NULL,
-		next_attempt_at = now() + $4::interval,
+		claim_token = NULL,
+		next_attempt_at = CASE
+			WHEN requeue_requested THEN now()
+			ELSE now() + $4::interval
+		END,
+		priority = CASE WHEN requeue_requested THEN 100 ELSE priority END,
+		requeue_requested = false,
 		outcome = 'failed',
 		last_error_class = $2,
 		last_error = $3,
 		updated_at = now()
 	WHERE content_id = $1
 	  AND status = 'running'
-	  AND last_attempt_at = $5
+	  AND claim_token = $5
 `
 
 func (q *EnrichmentQueue) Fail(
-	ctx context.Context,
-	contentID string,
-	errorClass EnrichmentErrorClass,
-	message string,
-	retryAfter time.Duration,
-) error {
-	if q == nil || q.pool == nil {
-		return errors.New("ebook enrichment queue is not configured")
-	}
-	job, ok := q.claimedJob(contentID)
-	if !ok {
-		return ErrEnrichmentLeaseLost
-	}
-	return q.FailClaim(ctx, job, errorClass, message, retryAfter)
-}
-
-func (q *EnrichmentQueue) FailClaim(
 	ctx context.Context,
 	job EnrichmentJob,
 	errorClass EnrichmentErrorClass,
@@ -258,6 +343,9 @@ func (q *EnrichmentQueue) FailClaim(
 	if q == nil || q.pool == nil {
 		return errors.New("ebook enrichment queue is not configured")
 	}
+	if job.ContentID == "" || job.Token == "" {
+		return ErrEnrichmentLeaseLost
+	}
 	delay := enrichmentRetryDelay(errorClass, job.Attempts, retryAfter)
 	tag, err := q.pool.Exec(
 		ctx,
@@ -266,16 +354,14 @@ func (q *EnrichmentQueue) FailClaim(
 		string(errorClass),
 		message,
 		postgresInterval(delay),
-		job.LastAttemptAt,
+		job.Token,
 	)
 	if err != nil {
 		return err
 	}
 	if tag.RowsAffected() == 0 {
-		q.forgetClaim(job)
 		return ErrEnrichmentLeaseLost
 	}
-	q.forgetClaim(job)
 	return nil
 }
 
@@ -283,62 +369,67 @@ var releaseEnrichmentJobQuery = `
 	UPDATE ebook_enrichment_state
 	SET status = 'pending',
 		lease_until = NULL,
+		claim_token = NULL,
 		attempts = GREATEST(attempts - 1, 0),
+		next_attempt_at = CASE WHEN requeue_requested THEN now() ELSE next_attempt_at END,
+		priority = CASE WHEN requeue_requested THEN 100 ELSE priority END,
+		requeue_requested = false,
 		updated_at = now()
 	WHERE content_id = $1
 	  AND status = 'running'
-	  AND last_attempt_at = $2
+	  AND claim_token = $2
 `
 
-func (q *EnrichmentQueue) Release(ctx context.Context, contentID string) error {
+func (q *EnrichmentQueue) Release(ctx context.Context, job EnrichmentJob) error {
 	if q == nil || q.pool == nil {
 		return errors.New("ebook enrichment queue is not configured")
 	}
-	job, ok := q.claimedJob(contentID)
-	if !ok {
+	if job.ContentID == "" || job.Token == "" {
 		return ErrEnrichmentLeaseLost
 	}
-	return q.ReleaseClaim(ctx, job)
-}
-
-func (q *EnrichmentQueue) ReleaseClaim(ctx context.Context, job EnrichmentJob) error {
-	if q == nil || q.pool == nil {
-		return errors.New("ebook enrichment queue is not configured")
-	}
-	tag, err := q.pool.Exec(ctx, releaseEnrichmentJobQuery, job.ContentID, job.LastAttemptAt)
+	tag, err := q.pool.Exec(ctx, releaseEnrichmentJobQuery, job.ContentID, job.Token)
 	if err != nil {
 		return err
 	}
-	q.forgetClaim(job)
 	if tag.RowsAffected() == 0 {
 		return ErrEnrichmentLeaseLost
 	}
 	return nil
 }
 
-func (q *EnrichmentQueue) rememberClaim(job EnrichmentJob) {
-	q.claimsMu.Lock()
-	defer q.claimsMu.Unlock()
-	if q.claims == nil {
-		q.claims = make(map[string]EnrichmentJob)
-	}
-	q.claims[job.ContentID] = job
-}
+var discardEnrichmentJobQuery = `
+	UPDATE ebook_enrichment_state
+	SET status = 'discarded',
+		lease_until = NULL,
+		claim_token = NULL,
+		completed_at = now(),
+		outcome = 'discarded',
+		attempts = 0,
+		priority = 0,
+		requeue_requested = false,
+		last_error_class = NULL,
+		last_error = NULL,
+		updated_at = now()
+	WHERE content_id = $1
+	  AND status = 'running'
+	  AND claim_token = $2
+`
 
-func (q *EnrichmentQueue) claimedJob(contentID string) (EnrichmentJob, bool) {
-	q.claimsMu.Lock()
-	defer q.claimsMu.Unlock()
-	job, ok := q.claims[contentID]
-	return job, ok
-}
-
-func (q *EnrichmentQueue) forgetClaim(job EnrichmentJob) {
-	q.claimsMu.Lock()
-	defer q.claimsMu.Unlock()
-	current, ok := q.claims[job.ContentID]
-	if ok && current.LastAttemptAt.Equal(job.LastAttemptAt) {
-		delete(q.claims, job.ContentID)
+func (q *EnrichmentQueue) Discard(ctx context.Context, job EnrichmentJob) error {
+	if q == nil || q.pool == nil {
+		return errors.New("ebook enrichment queue is not configured")
 	}
+	if job.ContentID == "" || job.Token == "" {
+		return ErrEnrichmentLeaseLost
+	}
+	tag, err := q.pool.Exec(ctx, discardEnrichmentJobQuery, job.ContentID, job.Token)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrEnrichmentLeaseLost
+	}
+	return nil
 }
 
 func enrichmentRefreshHorizon(outcome EnrichmentOutcome) time.Duration {
