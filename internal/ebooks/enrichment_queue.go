@@ -177,13 +177,9 @@ var reconcileMissingEnrichmentJobsQuery = `
 		WHERE membership.media_folder_id = $1
 		  AND (
 			$4::timestamptz IS NULL
-			OR membership.first_seen_at < $4
-			OR (
-				membership.first_seen_at = $4
-				AND membership.content_id > $5
-			)
+			OR (membership.first_seen_at, membership.content_id) < ($4, $5)
 		  )
-		ORDER BY membership.first_seen_at DESC, membership.content_id
+		ORDER BY membership.first_seen_at DESC, membership.content_id DESC
 		LIMIT $3
 	),
 	candidates AS MATERIALIZED (
@@ -210,13 +206,13 @@ var reconcileMissingEnrichmentJobsQuery = `
 			(
 				SELECT first_seen_at
 				FROM membership_candidates
-				ORDER BY first_seen_at, content_id DESC
+				ORDER BY first_seen_at, content_id
 				LIMIT 1
 			) AS last_first_seen_at,
 			(
 				SELECT content_id
 				FROM membership_candidates
-				ORDER BY first_seen_at, content_id DESC
+				ORDER BY first_seen_at, content_id
 				LIMIT 1
 		) AS last_content_id
 		FROM membership_candidates
@@ -457,15 +453,15 @@ var (
 )
 
 const hasReadyEnrichmentJobsQueryTemplate = `
-	SELECT EXISTS (
-		SELECT 1
+	SELECT COALESCE((
+		SELECT true
 		FROM ebook_enrichment_state
 		WHERE next_attempt_at <= now()
 		  AND (status = 'pending' OR (status = 'running' AND lease_until < now()))
 		  AND {{lane_predicate}}
 		ORDER BY next_attempt_at, updated_at, priority DESC
 		LIMIT 1
-	)
+	), false)
 `
 
 var (

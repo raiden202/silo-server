@@ -19,7 +19,7 @@ func TestEbookEnrichmentReconcileCursorPersistsAcrossRestartsAndUsesCoveringInde
 		"after_content_id text",
 		"CHECK ((after_first_seen_at IS NULL) = (after_content_id IS NULL))",
 		"CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_item_libraries_folder_enrichment_cursor",
-		"ON public.media_item_libraries (media_folder_id, first_seen_at DESC, content_id)",
+		"ON public.media_item_libraries (media_folder_id, first_seen_at DESC, content_id DESC)",
 		"DROP INDEX CONCURRENTLY IF EXISTS idx_item_libraries_folder_enrichment_cursor",
 		"DROP TABLE IF EXISTS ebook_enrichment_reconcile_cursors",
 	} {

@@ -30,7 +30,7 @@ $$;
 -- +goose StatementEnd
 
 CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_item_libraries_folder_enrichment_cursor
-    ON public.media_item_libraries (media_folder_id, first_seen_at DESC, content_id);
+    ON public.media_item_libraries (media_folder_id, first_seen_at DESC, content_id DESC);
 
 -- +goose Down
 DROP INDEX CONCURRENTLY IF EXISTS idx_item_libraries_folder_enrichment_cursor;

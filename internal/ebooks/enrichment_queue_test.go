@@ -135,7 +135,7 @@ func TestEnrichmentQueueReadyCountUsesTheSameLiteralLaneAsClaims(t *testing.T) {
 	}
 }
 
-func TestEnrichmentQueueHasReadyUsesBoundedExistenceQueries(t *testing.T) {
+func TestEnrichmentQueueHasReadyUsesBoundedOrderedScalarQueries(t *testing.T) {
 	for _, tt := range []struct {
 		name      string
 		query     string
@@ -147,16 +147,21 @@ func TestEnrichmentQueueHasReadyUsesBoundedExistenceQueries(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			query := strings.Join(strings.Fields(tt.query), " ")
 			for _, fragment := range []string{
-				"SELECT EXISTS",
+				"SELECT COALESCE((",
+				"SELECT true",
 				"next_attempt_at <= now()",
 				"status = 'pending' OR (status = 'running' AND lease_until < now())",
 				tt.predicate,
 				"ORDER BY next_attempt_at, updated_at, priority DESC",
 				"LIMIT 1",
+				"), false)",
 			} {
 				if !strings.Contains(query, fragment) {
 					t.Fatalf("has-ready query missing %q:\n%s", fragment, tt.query)
 				}
+			}
+			if strings.Contains(query, "EXISTS") {
+				t.Fatalf("has-ready query uses EXISTS, which lets PostgreSQL discard ordering:\n%s", tt.query)
 			}
 			if strings.Contains(query, "COUNT(") {
 				t.Fatalf("has-ready query performs an exact count:\n%s", tt.query)
@@ -171,9 +176,8 @@ func TestEnrichmentQueueReconcileMissingIsBoundedAndLaneSafe(t *testing.T) {
 		"membership_candidates AS MATERIALIZED",
 		"WHERE membership.media_folder_id = $1",
 		"$4::timestamptz IS NULL",
-		"membership.first_seen_at < $4",
-		"membership.content_id > $5",
-		"ORDER BY membership.first_seen_at DESC, membership.content_id",
+		"(membership.first_seen_at, membership.content_id) < ($4, $5)",
+		"ORDER BY membership.first_seen_at DESC, membership.content_id DESC",
 		"LIMIT $3",
 		"FROM membership_candidates candidate",
 		"mi.type = 'ebook'",
