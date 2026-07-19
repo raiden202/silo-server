@@ -4,13 +4,20 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/ebooks"
 	"github.com/Silo-Server/silo-server/internal/taskmanager"
 )
 
-const ebookMetadataExecutionBudget = 4 * time.Minute
+const (
+	ebookMetadataExecutionBudget = 4 * time.Minute
+	ebookBackfillMaxClaimsEnv    = "SILO_EBOOK_BACKFILL_MAX_CLAIMS"
+	ebookBackfillBatchDelayEnv   = "SILO_EBOOK_BACKFILL_BATCH_DELAY"
+)
 
 type ebookMetadataEnricher interface {
 	Run(ctx context.Context, scope ebooks.EnrichmentScope) (ebooks.EnrichmentRunResult, error)
@@ -25,6 +32,9 @@ type ebookMetadataTask struct {
 	triggers    []taskmanager.TriggerConfig
 	budget      time.Duration
 	now         func() time.Time
+	maxClaims   int
+	batchDelay  time.Duration
+	sleep       func(context.Context, time.Duration) error
 	errorPrefix string
 }
 
@@ -61,6 +71,9 @@ func NewBackfillEbookMetadataTask(enricher ebookMetadataEnricher) *BackfillEbook
 		description: "Manually enriches the legacy ebook backlog without competing with scheduled metadata sync",
 		budget:      ebookMetadataExecutionBudget,
 		now:         time.Now,
+		maxClaims:   parseEbookBackfillMaxClaims(os.Getenv(ebookBackfillMaxClaimsEnv)),
+		batchDelay:  parseEbookBackfillBatchDelay(os.Getenv(ebookBackfillBatchDelayEnv)),
+		sleep:       sleepEbookBackfill,
 		errorPrefix: "ebook metadata backfill",
 	}}
 }
@@ -108,11 +121,66 @@ func (t *ebookMetadataTask) Execute(ctx context.Context, progress taskmanager.Pr
 		if batch.Claimed == 0 {
 			return nil
 		}
+		if t.maxClaims > 0 && total.Claimed >= t.maxClaims {
+			deferEbookEnrichmentRemaining(&total)
+			reportEbookEnrichmentPause(progress, total, fmt.Sprintf(
+				"Paused after reaching manual backfill claim cap of %d; remaining work will retry later.",
+				t.maxClaims,
+			))
+			return nil
+		}
 		if t.now().Sub(started) >= t.budget {
-			total.Deferred += total.Remaining
+			deferEbookEnrichmentRemaining(&total)
 			reportEbookEnrichmentProgress(progress, total, false)
 			return nil
 		}
+		if t.batchDelay > 0 && ebookEnrichmentBatchMadeProgress(batch) {
+			if t.batchDelay >= t.budget-t.now().Sub(started) {
+				deferEbookEnrichmentRemaining(&total)
+				reportEbookEnrichmentPause(progress, total,
+					"Paused before the next batch because its delay would exceed the ebook metadata execution budget; remaining work will retry later.")
+				return nil
+			}
+			if err := t.sleep(ctx, t.batchDelay); err != nil {
+				return err
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if t.now().Sub(started) >= t.budget {
+				deferEbookEnrichmentRemaining(&total)
+				reportEbookEnrichmentPause(progress, total,
+					"Paused after reaching the ebook metadata execution budget; remaining work will retry later.")
+				return nil
+			}
+		}
+	}
+}
+
+func parseEbookBackfillMaxClaims(raw string) int {
+	value, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || value <= 0 {
+		return 0
+	}
+	return value
+}
+
+func parseEbookBackfillBatchDelay(raw string) time.Duration {
+	value, err := time.ParseDuration(strings.TrimSpace(raw))
+	if err != nil || value <= 0 {
+		return 0
+	}
+	return value
+}
+
+func sleepEbookBackfill(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
 	}
 }
 
@@ -121,6 +189,14 @@ func ebookEnrichmentBatchMadeNoProgress(batch ebooks.EnrichmentRunResult) bool {
 		batch.Enriched == 0 &&
 		batch.NoMatch == 0 &&
 		batch.Failed+batch.Deferred >= batch.Claimed
+}
+
+func ebookEnrichmentBatchMadeProgress(batch ebooks.EnrichmentRunResult) bool {
+	return batch.Enriched > 0 || batch.NoMatch > 0
+}
+
+func deferEbookEnrichmentRemaining(result *ebooks.EnrichmentRunResult) {
+	result.Deferred += result.Remaining
 }
 
 func addEbookEnrichmentResult(total *ebooks.EnrichmentRunResult, batch ebooks.EnrichmentRunResult) {
@@ -168,6 +244,29 @@ func reportEbookEnrichmentCircuitBreak(
 	progress.Report(percent, fmt.Sprintf(
 		"Paused after a full batch made no progress; remaining work will retry later. Claimed %d, failed %d, deferred %d, remaining %d",
 		result.Claimed,
+		result.Failed,
+		result.Deferred,
+		result.Remaining,
+	))
+}
+
+func reportEbookEnrichmentPause(
+	progress taskmanager.ProgressReporter,
+	result ebooks.EnrichmentRunResult,
+	message string,
+) {
+	data, _ := json.Marshal(result)
+	progress.SetResultData(data)
+	percent := ebookEnrichmentPercent(result)
+	if percent >= 100 {
+		percent = 99
+	}
+	progress.Report(percent, fmt.Sprintf(
+		"%s Claimed %d, enriched %d, no match %d, failed %d, deferred %d, remaining %d",
+		message,
+		result.Claimed,
+		result.Enriched,
+		result.NoMatch,
 		result.Failed,
 		result.Deferred,
 		result.Remaining,
