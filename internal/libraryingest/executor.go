@@ -320,21 +320,21 @@ func (e *Executor) ingest(ctx context.Context, folder *models.MediaFolder, mode 
 		}),
 	})
 	for _, scopePath := range matchScopes {
-		matchStarted := time.Now()
-		matched, err := e.matcher.ProcessAllByFolderAndPathPrefix(scanCtx, folder.ID, scopePath, runStartedAt)
-		result.MatchDuration += time.Since(matchStarted)
-		result.MatchedFiles += matched
-		reportProgress(scanCtx, ProgressUpdate{
-			Phase:        "matching",
-			Message:      "Matching unmatched items",
-			CurrentScope: scopePath,
-			MatchedFiles: result.MatchedFiles,
-		})
-		if err != nil {
-			return result, fmt.Errorf("match scope %q: %w", scopePath, err)
-		}
-
 		if !usesDedicatedEnrichment(folder.Type) {
+			matchStarted := time.Now()
+			matched, err := e.matcher.ProcessAllByFolderAndPathPrefix(scanCtx, folder.ID, scopePath, runStartedAt)
+			result.MatchDuration += time.Since(matchStarted)
+			result.MatchedFiles += matched
+			reportProgress(scanCtx, ProgressUpdate{
+				Phase:        "matching",
+				Message:      "Matching unmatched items",
+				CurrentScope: scopePath,
+				MatchedFiles: result.MatchedFiles,
+			})
+			if err != nil {
+				return result, fmt.Errorf("match scope %q: %w", scopePath, err)
+			}
+
 			retryStarted := time.Now()
 			retried, stillUnmatched, err := e.matcher.RetryUnmatchedItemsByFolderAndPathPrefix(scanCtx, folder.ID, scopePath)
 			result.RetryDuration += time.Since(retryStarted)

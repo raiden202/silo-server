@@ -120,14 +120,16 @@ func (s *finalizeRecordingScanner) FinalizeVariantsByPathPrefix(context.Context,
 	return nil
 }
 
-func TestIngestFolderSkipsSynchronousRetryForDedicatedEnrichment(t *testing.T) {
+func TestIngestFolderSkipsGenericMatchingForDedicatedEnrichment(t *testing.T) {
 	tests := []struct {
-		name          string
-		folderType    string
-		expectedRetry int64
+		name               string
+		folderType         string
+		expectedProcessAll int64
+		expectedRetry      int64
 	}{
-		{name: "ebooks", folderType: "ebooks", expectedRetry: 0},
-		{name: "movies", folderType: "movies", expectedRetry: 1},
+		{name: "ebooks", folderType: "ebooks", expectedProcessAll: 0, expectedRetry: 0},
+		{name: "movies", folderType: "movies", expectedProcessAll: 1, expectedRetry: 1},
+		{name: "series", folderType: "series", expectedProcessAll: 1, expectedRetry: 1},
 	}
 
 	for _, tt := range tests {
@@ -144,8 +146,8 @@ func TestIngestFolderSkipsSynchronousRetryForDedicatedEnrichment(t *testing.T) {
 			if _, err := exec.IngestFolder(context.Background(), folder); err != nil {
 				t.Fatalf("ingest folder: %v", err)
 			}
-			if got := matcher.processAllCalls.Load(); got != 1 {
-				t.Fatalf("ProcessAllByFolderAndPathPrefix calls = %d, want 1", got)
+			if got := matcher.processAllCalls.Load(); got != tt.expectedProcessAll {
+				t.Fatalf("ProcessAllByFolderAndPathPrefix calls = %d, want %d", got, tt.expectedProcessAll)
 			}
 			if got := matcher.retryCalls.Load(); got != tt.expectedRetry {
 				t.Fatalf("RetryUnmatchedItemsByFolderAndPathPrefix calls = %d, want %d", got, tt.expectedRetry)

@@ -17,6 +17,7 @@ const (
 	maxEnrichmentRetry     = 24 * time.Hour
 	transientRetryBase     = 5 * time.Minute
 	skippedRetryHorizon    = 15 * time.Minute
+	claimCandidateWindow   = 64
 )
 
 type EnrichmentOutcome string
@@ -154,22 +155,54 @@ func (q *EnrichmentQueue) Enqueue(ctx context.Context, contentID string, priorit
 	return err
 }
 
+// Each indexed window is fixed-size; only their deduplicated union pays for
+// aging/ranking, while the oldest-due window guarantees eventual promotion.
 var claimEnrichmentJobsQuery = `
-	WITH candidates AS (
-		SELECT content_id
+	WITH high_priority_candidates AS MATERIALIZED (
+		SELECT content_id, priority, next_attempt_at, updated_at
 		FROM ebook_enrichment_state
 		WHERE next_attempt_at <= now()
 		  AND (status = 'pending' OR (status = 'running' AND lease_until < now()))
-		  AND (
-			($3 = 'incremental' AND priority >= 0)
-			OR ($3 = 'legacy' AND priority < 0)
-		  )
-		ORDER BY
-			(priority + FLOOR(EXTRACT(EPOCH FROM (now() - next_attempt_at)) / 3600)::integer) DESC,
-			priority DESC,
+		  AND (priority < 0) = ($3 = 'legacy')
+		ORDER BY priority DESC, next_attempt_at, updated_at
+		LIMIT $4
+	),
+	oldest_due_candidates AS MATERIALIZED (
+		SELECT content_id, priority, next_attempt_at, updated_at
+		FROM ebook_enrichment_state
+		WHERE next_attempt_at <= now()
+		  AND (status = 'pending' OR (status = 'running' AND lease_until < now()))
+		  AND (priority < 0) = ($3 = 'legacy')
+		ORDER BY next_attempt_at, updated_at, priority DESC
+		LIMIT $4
+	),
+	candidate_pool AS MATERIALIZED (
+		SELECT * FROM high_priority_candidates
+		UNION
+		SELECT * FROM oldest_due_candidates
+	),
+	ranked_candidates AS MATERIALIZED (
+		SELECT
+			content_id,
+			priority,
 			next_attempt_at,
-			updated_at
-		FOR UPDATE SKIP LOCKED
+			updated_at,
+			(priority + FLOOR(EXTRACT(EPOCH FROM (now() - next_attempt_at)) / 3600)::integer) AS effective_priority
+		FROM candidate_pool
+	),
+	candidates AS (
+		SELECT state.content_id
+		FROM ranked_candidates ranked
+		JOIN ebook_enrichment_state state ON state.content_id = ranked.content_id
+		WHERE state.next_attempt_at <= now()
+		  AND (state.status = 'pending' OR (state.status = 'running' AND state.lease_until < now()))
+		  AND (state.priority < 0) = ($3 = 'legacy')
+		ORDER BY
+			ranked.effective_priority DESC,
+			ranked.priority DESC,
+			ranked.next_attempt_at,
+			ranked.updated_at
+		FOR UPDATE OF state SKIP LOCKED
 		LIMIT $1
 	)
 	UPDATE ebook_enrichment_state state
@@ -203,7 +236,14 @@ func (q *EnrichmentQueue) ClaimBatch(
 		leaseDuration = defaultEnrichmentLease
 	}
 
-	rows, err := q.pool.Query(ctx, claimEnrichmentJobsQuery, limit, postgresInterval(leaseDuration), string(scope))
+	rows, err := q.pool.Query(
+		ctx,
+		claimEnrichmentJobsQuery,
+		limit,
+		postgresInterval(leaseDuration),
+		string(scope),
+		claimCandidateWindow,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -228,10 +268,7 @@ var countReadyEnrichmentJobsQuery = `
 	FROM ebook_enrichment_state
 	WHERE next_attempt_at <= now()
 	  AND (status = 'pending' OR (status = 'running' AND lease_until < now()))
-	  AND (
-		($1 = 'incremental' AND priority >= 0)
-		OR ($1 = 'legacy' AND priority < 0)
-	  )
+	  AND (priority < 0) = ($1 = 'legacy')
 `
 
 func (q *EnrichmentQueue) ReadyCount(ctx context.Context, scope EnrichmentScope) (int, error) {

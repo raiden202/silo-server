@@ -150,15 +150,31 @@ BEGIN
     ) THEN
         DROP INDEX public.ebook_enrichment_state_claim_idx;
     END IF;
+    IF EXISTS (
+        SELECT 1
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        JOIN pg_index i ON i.indexrelid = c.oid
+        WHERE n.nspname = 'public'
+          AND c.relname = 'ebook_enrichment_state_priority_claim_idx'
+          AND NOT i.indisvalid
+    ) THEN
+        DROP INDEX public.ebook_enrichment_state_priority_claim_idx;
+    END IF;
 END;
 $$;
 -- +goose StatementEnd
 
 CREATE INDEX CONCURRENTLY IF NOT EXISTS ebook_enrichment_state_claim_idx
-    ON public.ebook_enrichment_state (priority, next_attempt_at, updated_at)
+    ON public.ebook_enrichment_state ((priority < 0), next_attempt_at, updated_at, priority DESC)
+    WHERE status IN ('pending', 'running');
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS ebook_enrichment_state_priority_claim_idx
+    ON public.ebook_enrichment_state ((priority < 0), priority DESC, next_attempt_at, updated_at)
     WHERE status IN ('pending', 'running');
 
 -- +goose Down
+DROP INDEX CONCURRENTLY IF EXISTS ebook_enrichment_state_priority_claim_idx;
 DROP INDEX CONCURRENTLY IF EXISTS ebook_enrichment_state_claim_idx;
 
 -- +goose StatementBegin

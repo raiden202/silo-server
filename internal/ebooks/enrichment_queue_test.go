@@ -18,12 +18,21 @@ func TestEnrichmentQueueClaimQueryUsesAtomicLeasedClaims(t *testing.T) {
 	query := strings.Join(strings.Fields(claimEnrichmentJobsQuery), " ")
 
 	for _, fragment := range []string{
-		"WITH candidates AS",
-		"FOR UPDATE SKIP LOCKED",
+		"WITH high_priority_candidates AS MATERIALIZED",
+		"oldest_due_candidates AS MATERIALIZED",
+		"candidate_pool AS",
+		"UNION",
+		"ranked_candidates AS",
+		"FROM ranked_candidates ranked",
+		"JOIN ebook_enrichment_state state",
+		"FOR UPDATE OF state SKIP LOCKED",
 		"status = 'pending' OR (status = 'running' AND lease_until < now())",
 		"next_attempt_at <= now()",
-		"$3 = 'incremental' AND priority >= 0",
-		"$3 = 'legacy' AND priority < 0",
+		"(priority < 0) = ($3 = 'legacy')",
+		"(state.priority < 0) = ($3 = 'legacy')",
+		"ORDER BY priority DESC, next_attempt_at, updated_at",
+		"ORDER BY next_attempt_at, updated_at, priority DESC",
+		"LIMIT $4",
 		"priority + FLOOR(EXTRACT(EPOCH FROM (now() - next_attempt_at)) / 3600)::integer",
 		"SET status = 'running'",
 		"lease_until = now() + $2::interval",
@@ -36,6 +45,20 @@ func TestEnrichmentQueueClaimQueryUsesAtomicLeasedClaims(t *testing.T) {
 			t.Fatalf("claim query missing %q:\n%s", fragment, claimEnrichmentJobsQuery)
 		}
 	}
+	if got := strings.Count(query, "LIMIT $4"); got != 2 {
+		t.Fatalf("claim query has %d bounded candidate windows, want 2:\n%s", got, claimEnrichmentJobsQuery)
+	}
+	if got := strings.Count(query, "FLOOR(EXTRACT(EPOCH"); got != 1 {
+		t.Fatalf("aging expression count = %d, want exactly one bounded computation:\n%s", got, claimEnrichmentJobsQuery)
+	}
+	agingAt := strings.Index(query, "FLOOR(EXTRACT(EPOCH")
+	poolAt := strings.Index(query, "candidate_pool AS")
+	if agingAt < poolAt {
+		t.Fatalf("aging is computed before the bounded candidate pool:\n%s", claimEnrichmentJobsQuery)
+	}
+	if claimCandidateWindow <= 0 || claimCandidateWindow > 256 {
+		t.Fatalf("claim candidate window = %d, want a fixed sane bound", claimCandidateWindow)
+	}
 }
 
 func TestEnrichmentQueueReadyCountUsesTheSameScopeAsClaims(t *testing.T) {
@@ -44,8 +67,7 @@ func TestEnrichmentQueueReadyCountUsesTheSameScopeAsClaims(t *testing.T) {
 		"SELECT COUNT(*)",
 		"next_attempt_at <= now()",
 		"status = 'pending' OR (status = 'running' AND lease_until < now())",
-		"$1 = 'incremental' AND priority >= 0",
-		"$1 = 'legacy' AND priority < 0",
+		"(priority < 0) = ($1 = 'legacy')",
 	} {
 		if !strings.Contains(query, fragment) {
 			t.Fatalf("ready-count query missing %q:\n%s", fragment, countReadyEnrichmentJobsQuery)
@@ -142,8 +164,13 @@ func TestEnrichmentQueueMigrationIsCrashSafeAndSeedsAllLegacyEbooks(t *testing.T
 		"ON CONFLICT (content_id) DO NOTHING",
 		"NOT i.indisvalid",
 		"DROP INDEX public.ebook_enrichment_state_claim_idx",
+		"DROP INDEX public.ebook_enrichment_state_priority_claim_idx",
 		"CREATE INDEX CONCURRENTLY IF NOT EXISTS ebook_enrichment_state_claim_idx",
+		"CREATE INDEX CONCURRENTLY IF NOT EXISTS ebook_enrichment_state_priority_claim_idx",
+		"((priority < 0), next_attempt_at, updated_at, priority DESC)",
+		"((priority < 0), priority DESC, next_attempt_at, updated_at)",
 		"DROP INDEX CONCURRENTLY IF EXISTS ebook_enrichment_state_claim_idx",
+		"DROP INDEX CONCURRENTLY IF EXISTS ebook_enrichment_state_priority_claim_idx",
 	} {
 		if !strings.Contains(migration, fragment) {
 			t.Fatalf("legacy backlog migration missing %q:\n%s", fragment, body)
