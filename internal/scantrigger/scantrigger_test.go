@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Silo-Server/silo-server/internal/catalog"
@@ -109,26 +110,31 @@ func TestResolverRejectsMissingSubtreeAtLibraryRoot(t *testing.T) {
 	}
 }
 
-func TestResolverResolvesVanishedFileToParentSubtree(t *testing.T) {
+func TestResolverResolvesVanishedMediaFileToParentSubtree(t *testing.T) {
 	root := t.TempDir()
-	movieDir := filepath.Join(root, "Movie (2026)")
-	if err := os.Mkdir(movieDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	vanished := filepath.Join(movieDir, "Movie (2026).mkv")
 	repo := &fakeFolderRepo{folders: []*models.MediaFolder{{
 		ID:      20,
-		Name:    "Movies",
+		Name:    "Media",
 		Enabled: true,
 		Paths:   []string{root},
 	}}}
 
-	target, err := NewResolver(repo).ResolveVanishedPath(context.Background(), vanished, "autoscan")
-	if err != nil {
-		t.Fatalf("ResolveVanishedPath returned error: %v", err)
-	}
-	if target.Folder == nil || target.Folder.ID != 20 || target.Mode != ModeSubtree || target.Path != movieDir {
-		t.Fatalf("unexpected target: %#v", target)
+	for _, name := range []string{"Movie.mkv", "Book.epub", "Audiobook.m4b"} {
+		t.Run(name, func(t *testing.T) {
+			mediaDir := filepath.Join(root, strings.TrimSuffix(name, filepath.Ext(name)))
+			if err := os.Mkdir(mediaDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			vanished := filepath.Join(mediaDir, name)
+
+			target, err := NewResolver(repo).ResolveVanishedPath(context.Background(), vanished, "autoscan")
+			if err != nil {
+				t.Fatalf("ResolveVanishedPath returned error: %v", err)
+			}
+			if target.Folder == nil || target.Folder.ID != 20 || target.Mode != ModeSubtree || target.Path != mediaDir {
+				t.Fatalf("unexpected target: %#v", target)
+			}
+		})
 	}
 }
 
@@ -280,6 +286,33 @@ func TestResolverClassifiesVideoFile(t *testing.T) {
 	}
 	if target.Folder == nil || target.Folder.ID != 9 || target.Mode != ModeFile || target.Path != filepath.Clean(filePath) {
 		t.Fatalf("unexpected target: %#v", target)
+	}
+}
+
+func TestResolverClassifiesAudioAndEbookFiles(t *testing.T) {
+	root := t.TempDir()
+	repo := &fakeFolderRepo{folders: []*models.MediaFolder{{
+		ID:      25,
+		Name:    "Media",
+		Enabled: true,
+		Paths:   []string{root},
+	}}}
+
+	for _, name := range []string{"Book.epub", "Book.fb2.zip", "Audiobook.m4b"} {
+		t.Run(name, func(t *testing.T) {
+			filePath := filepath.Join(root, name)
+			if err := os.WriteFile(filePath, []byte("test"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			target, err := NewResolver(repo).Resolve(context.Background(), Request{Path: filePath})
+			if err != nil {
+				t.Fatalf("Resolve returned error: %v", err)
+			}
+			if target.Mode != ModeFile || target.Path != filepath.Clean(filePath) {
+				t.Fatalf("unexpected target: %#v", target)
+			}
+		})
 	}
 }
 

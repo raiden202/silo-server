@@ -143,7 +143,7 @@ func normalizeTrigger(trigger string) string {
 
 // ResolveVanishedPath resolves a change for a path that no longer exists on
 // disk (a file deleted by an upgrade/replacement, or a removed directory) to a
-// reconciling scan target. Paths with a supported video extension map to a
+// reconciling scan target. Paths with a supported media extension map to a
 // subtree scan of their parent directory; other paths map to a subtree scan of
 // the path itself. The scoped scan marks the vanished files missing so stale
 // versions stop being offered for playback.
@@ -177,7 +177,7 @@ func (r *Resolver) ResolveVanishedPath(ctx context.Context, path, trigger string
 	trigger = normalizeTrigger(trigger)
 
 	scope := cleanPath
-	if scanner.SupportsVideoFile(cleanPath) {
+	if supportsMediaFile(cleanPath) {
 		scope = filepath.Dir(cleanPath)
 	}
 	if filepath.Clean(scope) == filepath.Clean(matchedRoot) {
@@ -353,10 +353,16 @@ func ClassifyPath(targetPath, matchedRoot string) (string, error) {
 	if !info.Mode().IsRegular() {
 		return "", &RequestError{Status: http.StatusBadRequest, Code: "bad_request", Message: "Path must be a file or directory"}
 	}
-	if !scanner.SupportsVideoFile(targetPath) {
+	if !supportsMediaFile(targetPath) {
 		return "", &RequestError{Status: http.StatusBadRequest, Code: "bad_request", Message: "Unsupported media file extension"}
 	}
 	return ModeFile, nil
+}
+
+func supportsMediaFile(path string) bool {
+	return scanner.SupportsVideoFile(path) ||
+		scanner.SupportsAudioFile(path) ||
+		scanner.SupportsEbookFile(path)
 }
 
 func PathWithinRoot(targetPath, rootPath string) bool {
