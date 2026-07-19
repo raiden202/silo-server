@@ -383,7 +383,11 @@ func (e *Enricher) runQueueBatch(
 					}
 					recordTransitionError(item.ContentID, transitionErr)
 					if transitionErr == nil {
-						atomic.AddInt64(&failed, 1)
+						if errorClass == EnrichmentErrorRateLimited {
+							atomic.AddInt64(&deferred, 1)
+						} else {
+							atomic.AddInt64(&failed, 1)
+						}
 					}
 					continue
 				}

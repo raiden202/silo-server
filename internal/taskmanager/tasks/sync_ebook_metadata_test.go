@@ -112,6 +112,81 @@ func TestEbookMetadataTaskDrainsBatchesAndReportsHonestProgress(t *testing.T) {
 	}
 }
 
+func TestEbookMetadataTaskStopsAfterOneAllFailedBatch(t *testing.T) {
+	enricher := &fakeEbookMetadataEnricher{results: []ebooks.EnrichmentRunResult{
+		{Claimed: 4, Failed: 4, Remaining: 100},
+		{Claimed: 4, Enriched: 4, Remaining: 96},
+	}}
+	progress := &ebookMetadataProgressReporter{}
+
+	if err := NewBackfillEbookMetadataTask(enricher).Execute(context.Background(), progress); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	assertNoProgressCircuitBreak(t, enricher, progress, ebooks.EnrichmentRunResult{
+		Claimed: 4, Failed: 4, Remaining: 100,
+	})
+}
+
+func TestEbookMetadataTaskStopsAfterOneAllDeferredBatch(t *testing.T) {
+	enricher := &fakeEbookMetadataEnricher{results: []ebooks.EnrichmentRunResult{
+		{Claimed: 4, Deferred: 4, Remaining: 0},
+		{Claimed: 4, Enriched: 4, Remaining: 0},
+	}}
+	progress := &ebookMetadataProgressReporter{}
+
+	if err := NewBackfillEbookMetadataTask(enricher).Execute(context.Background(), progress); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	assertNoProgressCircuitBreak(t, enricher, progress, ebooks.EnrichmentRunResult{
+		Claimed: 4, Deferred: 4, Remaining: 0,
+	})
+}
+
+func TestEbookMetadataTaskContinuesAfterMixedBatchWithProgress(t *testing.T) {
+	enricher := &fakeEbookMetadataEnricher{results: []ebooks.EnrichmentRunResult{
+		{Claimed: 4, Enriched: 1, Failed: 2, Deferred: 1, Remaining: 2},
+		{Claimed: 2, NoMatch: 2, Remaining: 0},
+	}}
+	progress := &ebookMetadataProgressReporter{}
+
+	if err := NewBackfillEbookMetadataTask(enricher).Execute(context.Background(), progress); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if len(enricher.scopes) != 2 {
+		t.Fatalf("Run calls = %d, want 2 when a mixed batch made progress", len(enricher.scopes))
+	}
+}
+
+func assertNoProgressCircuitBreak(
+	t *testing.T,
+	enricher *fakeEbookMetadataEnricher,
+	progress *ebookMetadataProgressReporter,
+	want ebooks.EnrichmentRunResult,
+) {
+	t.Helper()
+	if len(enricher.scopes) != 1 {
+		t.Fatalf("Run calls = %d, want exactly 1", len(enricher.scopes))
+	}
+	if len(progress.results) == 0 {
+		t.Fatal("no result JSON reported")
+	}
+	var result ebooks.EnrichmentRunResult
+	if err := json.Unmarshal(progress.results[len(progress.results)-1], &result); err != nil {
+		t.Fatalf("result JSON error: %v", err)
+	}
+	if result != want {
+		t.Fatalf("result JSON = %+v, want %+v", result, want)
+	}
+	if got := progress.percents[len(progress.percents)-1]; got >= 100 {
+		t.Fatalf("circuit-break progress = %.1f, must not report completion", got)
+	}
+	message := progress.messages[len(progress.messages)-1]
+	if !strings.Contains(strings.ToLower(message), "no progress") ||
+		!strings.Contains(strings.ToLower(message), "retry later") {
+		t.Fatalf("circuit-break progress message = %q", message)
+	}
+}
+
 func TestEbookMetadataBackfillUsesLegacyScope(t *testing.T) {
 	enricher := &fakeEbookMetadataEnricher{results: []ebooks.EnrichmentRunResult{{Remaining: 0}}}
 	task := NewBackfillEbookMetadataTask(enricher)

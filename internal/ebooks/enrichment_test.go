@@ -13,6 +13,10 @@ import (
 
 	"github.com/Silo-Server/silo-server/internal/metadata"
 	"github.com/Silo-Server/silo-server/internal/models"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/durationpb"
 )
 
 func TestEbookContentType(t *testing.T) {
@@ -257,6 +261,44 @@ func TestEnricherRunTransitionsClaimedJobsByOutcome(t *testing.T) {
 		if job.Token != contentID+"-token" {
 			t.Fatalf("transition for %q used token %q", contentID, job.Token)
 		}
+	}
+}
+
+func TestEnricherRunCountsRateLimitedFailureAsDeferred(t *testing.T) {
+	const retryAfter = 45 * time.Minute
+	limited, err := status.New(codes.ResourceExhausted, "provider quota exhausted").WithDetails(
+		&errdetails.RetryInfo{RetryDelay: durationpb.New(retryAfter)},
+	)
+	if err != nil {
+		t.Fatalf("attach retry info: %v", err)
+	}
+	queue := &fakeEnrichmentQueue{
+		jobs: []EnrichmentJob{{ContentID: "rate-limited", Token: "token", Attempts: 1}},
+	}
+	e := &Enricher{
+		queue:     queue,
+		batchSize: 1,
+		workers:   1,
+		loadClaimedItemsFn: func(context.Context, []EnrichmentJob) ([]enrichmentItemRow, error) {
+			return []enrichmentItemRow{{ContentID: "rate-limited"}}, nil
+		},
+		enrichClaimedItemFn: func(context.Context, enrichmentItemRow) (EnrichmentOutcome, error) {
+			return "", limited.Err()
+		},
+	}
+
+	result, runErr := e.Run(context.Background(), EnrichmentScopeIncremental)
+	if runErr != nil {
+		t.Fatalf("Run() error = %v", runErr)
+	}
+	if result.Failed != 0 || result.Deferred != 1 {
+		t.Fatalf("Run() result = %+v, want one deferred and no failures", result)
+	}
+	if got := queue.failed["rate-limited"]; got != EnrichmentErrorRateLimited {
+		t.Fatalf("failure class = %q, want rate_limited", got)
+	}
+	if got := queue.retryAfter["rate-limited"]; got != retryAfter {
+		t.Fatalf("retry after = %s, want %s", got, retryAfter)
 	}
 }
 
@@ -1089,6 +1131,7 @@ type fakeEnrichmentQueue struct {
 	remaining                 int
 	completed                 map[string]EnrichmentOutcome
 	failed                    map[string]EnrichmentErrorClass
+	retryAfter                map[string]time.Duration
 	released                  []string
 	discarded                 []string
 	transitionedJobs          map[string]EnrichmentJob
@@ -1130,13 +1173,17 @@ func (f *fakeEnrichmentQueue) Complete(_ context.Context, job EnrichmentJob, out
 	return f.completeErr
 }
 
-func (f *fakeEnrichmentQueue) Fail(_ context.Context, job EnrichmentJob, errorClass EnrichmentErrorClass, _ string, _ time.Duration) error {
+func (f *fakeEnrichmentQueue) Fail(_ context.Context, job EnrichmentJob, errorClass EnrichmentErrorClass, _ string, retryAfter time.Duration) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.failed == nil {
 		f.failed = make(map[string]EnrichmentErrorClass)
 	}
+	if f.retryAfter == nil {
+		f.retryAfter = make(map[string]time.Duration)
+	}
 	f.failed[job.ContentID] = errorClass
+	f.retryAfter[job.ContentID] = retryAfter
 	f.recordTransition(job)
 	return f.failErr
 }

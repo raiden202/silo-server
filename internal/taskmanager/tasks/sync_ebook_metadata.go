@@ -97,6 +97,10 @@ func (t *ebookMetadataTask) Execute(ctx context.Context, progress taskmanager.Pr
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		if ebookEnrichmentBatchMadeNoProgress(batch) {
+			reportEbookEnrichmentCircuitBreak(progress, total)
+			return nil
+		}
 		if batch.Remaining == 0 {
 			reportEbookEnrichmentProgress(progress, total, true)
 			return nil
@@ -110,6 +114,13 @@ func (t *ebookMetadataTask) Execute(ctx context.Context, progress taskmanager.Pr
 			return nil
 		}
 	}
+}
+
+func ebookEnrichmentBatchMadeNoProgress(batch ebooks.EnrichmentRunResult) bool {
+	return batch.Claimed > 0 &&
+		batch.Enriched == 0 &&
+		batch.NoMatch == 0 &&
+		batch.Failed+batch.Deferred >= batch.Claimed
 }
 
 func addEbookEnrichmentResult(total *ebooks.EnrichmentRunResult, batch ebooks.EnrichmentRunResult) {
@@ -138,6 +149,25 @@ func reportEbookEnrichmentProgress(
 		result.Claimed,
 		result.Enriched,
 		result.NoMatch,
+		result.Failed,
+		result.Deferred,
+		result.Remaining,
+	))
+}
+
+func reportEbookEnrichmentCircuitBreak(
+	progress taskmanager.ProgressReporter,
+	result ebooks.EnrichmentRunResult,
+) {
+	data, _ := json.Marshal(result)
+	progress.SetResultData(data)
+	percent := ebookEnrichmentPercent(result)
+	if percent >= 100 {
+		percent = 99
+	}
+	progress.Report(percent, fmt.Sprintf(
+		"Paused after a full batch made no progress; remaining work will retry later. Claimed %d, failed %d, deferred %d, remaining %d",
+		result.Claimed,
 		result.Failed,
 		result.Deferred,
 		result.Remaining,
