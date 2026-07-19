@@ -564,7 +564,14 @@ func (s *Scanner) enqueueEbookEnrichment(ctx context.Context, contentID string) 
 	if s == nil || s.ebookEnrichmentQueue == nil || strings.TrimSpace(contentID) == "" {
 		return nil
 	}
-	return s.ebookEnrichmentQueue.Enqueue(ctx, contentID, ebookEnrichmentPriority)
+	if err := s.ebookEnrichmentQueue.Enqueue(ctx, contentID, ebookEnrichmentPriority); err != nil {
+		slog.WarnContext(ctx, "ebook scan: metadata enrichment enqueue failed",
+			"component", "scanner",
+			"content_id", contentID,
+			"error", err,
+		)
+	}
+	return nil
 }
 
 func (s *Scanner) autoLinkLiteraryWork(ctx context.Context, contentID string) {

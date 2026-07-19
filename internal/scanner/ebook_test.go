@@ -43,14 +43,14 @@ func TestScannerEbookEnrichmentHookEnqueuesHighPriorityWork(t *testing.T) {
 	}
 }
 
-func TestScannerEbookEnrichmentHookPropagatesQueueFailure(t *testing.T) {
+func TestScannerEbookEnrichmentHookDoesNotFailScanOnQueueFailure(t *testing.T) {
 	queueErr := errors.New("queue unavailable")
 	s := &Scanner{}
 	s.SetEbookEnrichmentQueue(&fakeEbookEnrichmentQueue{err: queueErr})
 
 	err := s.enqueueEbookEnrichment(context.Background(), "ebook-1")
-	if !errors.Is(err, queueErr) {
-		t.Fatalf("enqueueEbookEnrichment() error = %v, want queue failure", err)
+	if err != nil {
+		t.Fatalf("enqueueEbookEnrichment() error = %v, want nil", err)
 	}
 }
 
