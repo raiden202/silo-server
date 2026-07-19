@@ -25,6 +25,13 @@ func TestEbookContentType(t *testing.T) {
 	}
 }
 
+func TestNewEnricherPreservesNilProviderIDRepository(t *testing.T) {
+	e := NewEnricher(nil, nil, nil, nil, nil, nil)
+	if e.providerIDs != nil {
+		t.Fatal("providerIDs is a non-nil typed interface for a nil repository")
+	}
+}
+
 func TestFilterEbookPeopleKeepsAuthorsOnly(t *testing.T) {
 	people := []models.ItemPerson{
 		{Person: models.Person{Name: "Author One"}, Kind: models.PersonKindAuthor, SortOrder: 7},
@@ -625,6 +632,9 @@ func TestCollectEbookMetadataAccumulatesProviderErrors(t *testing.T) {
 	if accumulator.Overview != "found" {
 		t.Fatalf("accumulator overview = %q, want metadata from the working provider", accumulator.Overview)
 	}
+	if !accumulator.HasMetadata {
+		t.Fatal("accumulator HasMetadata = false after a provider returned metadata")
+	}
 	if ids["openlibrary"] != "OL1M" {
 		t.Fatalf("accumulated IDs = %v, want search-result openlibrary ID", ids)
 	}
@@ -935,6 +945,60 @@ func TestBuildEbookMetadataRequestCarriesAccumulatedISBN(t *testing.T) {
 	}
 	if got := req.ProviderIDs["openlibrary"]; got != "OL1M" {
 		t.Fatalf("request openlibrary = %q, want OL1M", got)
+	}
+}
+
+type fakeEbookProviderIDRepository struct {
+	rows  map[string][]*models.MediaItemProviderID
+	err   error
+	calls [][]string
+}
+
+func (f *fakeEbookProviderIDRepository) GetByContentIDs(
+	_ context.Context,
+	contentIDs []string,
+) (map[string][]*models.MediaItemProviderID, error) {
+	f.calls = append(f.calls, append([]string(nil), contentIDs...))
+	return f.rows, f.err
+}
+
+func (f *fakeEbookProviderIDRepository) ReplaceByContentID(context.Context, string, map[string]string) error {
+	return nil
+}
+
+func (f *fakeEbookProviderIDRepository) FindContentIDByProviderIDs(
+	context.Context,
+	map[string]string,
+	string,
+	string,
+) (string, error) {
+	return "", nil
+}
+
+func TestEnricherLoadsProviderIDsInOneBatchAndSurfacesErrors(t *testing.T) {
+	repo := &fakeEbookProviderIDRepository{
+		rows: map[string][]*models.MediaItemProviderID{
+			"ebook-1": {
+				{ContentID: "ebook-1", ItemType: "ebook", Provider: "isbn", ProviderID: "9781982173456"},
+			},
+		},
+	}
+	e := &Enricher{providerIDs: repo}
+	items := []enrichmentItemRow{{ContentID: "ebook-1"}, {ContentID: "ebook-2"}}
+
+	if err := e.loadProviderIDs(context.Background(), []string{"ebook-1", "ebook-2"}, items); err != nil {
+		t.Fatalf("loadProviderIDs() error = %v", err)
+	}
+	if len(repo.calls) != 1 || strings.Join(repo.calls[0], ",") != "ebook-1,ebook-2" {
+		t.Fatalf("GetByContentIDs() calls = %#v, want one batch", repo.calls)
+	}
+	if got := items[0].ProviderIDs["isbn"]; got != "9781982173456" {
+		t.Fatalf("items[0].ProviderIDs[isbn] = %q", got)
+	}
+
+	repo.err = errors.New("provider IDs unavailable")
+	if err := e.loadProviderIDs(context.Background(), []string{"ebook-1"}, items[:1]); err == nil {
+		t.Fatal("loadProviderIDs() error = nil, want repository error")
 	}
 }
 

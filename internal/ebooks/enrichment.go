@@ -119,6 +119,17 @@ type EnrichmentRunResult struct {
 	HasMore   bool `json:"-"`
 }
 
+type ebookProviderIDRepository interface {
+	GetByContentIDs(ctx context.Context, contentIDs []string) (map[string][]*models.MediaItemProviderID, error)
+	ReplaceByContentID(ctx context.Context, contentID string, providerIDs map[string]string) error
+	FindContentIDByProviderIDs(
+		ctx context.Context,
+		providerIDs map[string]string,
+		itemType string,
+		excludeContentID string,
+	) (string, error)
+}
+
 // Enricher drives the ebook metadata enrichment sweep.
 type Enricher struct {
 	pool           *pgxpool.Pool
@@ -126,7 +137,7 @@ type Enricher struct {
 	resolver       *metadata.PluginResolverAdapter
 	itemRepo       *catalog.ItemRepository
 	personRepo     *catalog.PersonRepository
-	providerIDs    *catalog.ProviderIDRepository
+	providerIDs    ebookProviderIDRepository
 	imageCacher    metadata.ImageCacher
 	imageCacheJobs metadata.ImageCacheJobEnqueuer
 	workLinker     literaryWorkLinker
@@ -151,13 +162,17 @@ func NewEnricher(
 	personRepo *catalog.PersonRepository,
 	providerIDs *catalog.ProviderIDRepository,
 ) *Enricher {
+	var providerIDStore ebookProviderIDRepository
+	if providerIDs != nil {
+		providerIDStore = providerIDs
+	}
 	return &Enricher{
 		pool:        pool,
 		chainRepo:   chainRepo,
 		resolver:    resolver,
 		itemRepo:    itemRepo,
 		personRepo:  personRepo,
-		providerIDs: providerIDs,
+		providerIDs: providerIDStore,
 		batchSize:   defaultEnrichBatchSize,
 		workers:     ebookEnrichWorkers(),
 		queue:       NewEnrichmentQueue(pool),
@@ -649,16 +664,36 @@ func (e *Enricher) loadClaimedItems(ctx context.Context, jobs []EnrichmentJob) (
 		return nil, fmt.Errorf("iterating ebook enrichment rows: %w", err)
 	}
 
-	if e.providerIDs != nil {
-		for i := range items {
-			pids, err := e.providerIDs.GetByContentID(ctx, items[i].ContentID)
-			if err == nil {
-				items[i].ProviderIDs = providerIDMapFromRows(pids)
-			}
-		}
+	if err := e.loadProviderIDs(ctx, contentIDs, items); err != nil {
+		return nil, err
 	}
 
 	return items, nil
+}
+
+func (e *Enricher) loadProviderIDs(
+	ctx context.Context,
+	contentIDs []string,
+	items []enrichmentItemRow,
+) error {
+	if e == nil || e.providerIDs == nil || len(contentIDs) == 0 {
+		return nil
+	}
+	rowsByContentID, err := e.providerIDs.GetByContentIDs(ctx, contentIDs)
+	if err != nil {
+		return fmt.Errorf("loading ebook provider IDs: %w", err)
+	}
+	for i := range items {
+		items[i].ProviderIDs = providerIDMapFromRows(rowsByContentID[items[i].ContentID])
+		_, hasISBN := items[i].ProviderIDs["isbn"]
+		slog.DebugContext(ctx, "ebook enrichment: loaded provider identifiers",
+			"component", "ebooks",
+			"content_id", items[i].ContentID,
+			"identifier_count", len(items[i].ProviderIDs),
+			"has_isbn", hasISBN,
+		)
+	}
+	return nil
 }
 
 func (e *Enricher) enrichItem(ctx context.Context, item enrichmentItemRow) error {
@@ -951,6 +986,7 @@ func collectEbookMetadata(ctx context.Context, item enrichmentItemRow, providers
 		if result == nil || !result.HasMetadata {
 			continue
 		}
+		accumulator.HasMetadata = true
 		mergeEnrichmentProviderIDs(accumulator, result)
 		metadata.MergeMetadata(result, accumulator, nil, metadata.MergeFillEmpty)
 
