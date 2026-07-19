@@ -1455,7 +1455,7 @@ func TestCollectEbookRootScansExcludesUnmountedRootFromReconciliation(t *testing
 	}
 }
 
-func TestCollectEbookRootScansTreatsNonDirectoryRootAsFailed(t *testing.T) {
+func TestCollectEbookRootScansTreatsSingleFileRootAsNonReconciling(t *testing.T) {
 	dir := t.TempDir()
 	fileRoot := filepath.Join(dir, "book.epub")
 	if err := os.WriteFile(fileRoot, []byte("x"), 0o644); err != nil {
@@ -1466,8 +1466,8 @@ func TestCollectEbookRootScansTreatsNonDirectoryRootAsFailed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("collectEbookRootScans: %v", err)
 	}
-	if len(scans) != 1 || !scans[0].failed() {
-		t.Fatalf("scans = %+v, want one failed scan for a non-directory root", scans)
+	if len(scans) != 1 || scans[0].failed() || !scans[0].fileOnly {
+		t.Fatalf("scans = %+v, want one healthy file-only scan", scans)
 	}
 	// The file itself is still indexed; only reconciliation is withheld.
 	if len(scans[0].files) != 1 {

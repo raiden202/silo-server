@@ -53,6 +53,7 @@ func (s *Scanner) ScanEbookFolder(ctx context.Context, folder *models.MediaFolde
 type ebookRootScan struct {
 	root         string
 	files        []string
+	fileOnly     bool  // explicit single-file scan; index it but never reconcile a subtree
 	rootErr      error // root stat failed, or the root is not a directory
 	walkFailures int   // entries within the subtree the walk could not read or resolve
 }
@@ -88,7 +89,11 @@ func collectEbookRootScans(ctx context.Context, folderID int, roots []string) ([
 			// Unmounted/missing/permission-broken root: failed, not empty.
 			scan.rootErr = fmt.Errorf("stat root: %w", statErr)
 		case !info.IsDir():
-			scan.rootErr = fmt.Errorf("root is not a directory after symlink resolution")
+			if info.Mode().IsRegular() && SupportsEbookFile(cleanRoot) {
+				scan.fileOnly = true
+			} else {
+				scan.rootErr = fmt.Errorf("root is not a directory after symlink resolution")
+			}
 		}
 		if statErr == nil {
 			if err := walkLogicalTree(ctx, cleanRoot, cleanRoot, walkModeEbook, visitedPhysicalDirs, &scan.files, &scan.walkFailures); err != nil {
@@ -115,7 +120,7 @@ func splitEbookReconcileRoots(scans []ebookRootScan) (reconcileRoots []string, s
 	reconcileRoots = make([]string, 0, len(scans))
 	for i := range scans {
 		scan := &scans[i]
-		if scan.failed() {
+		if scan.failed() || scan.fileOnly {
 			continue
 		}
 		if len(scan.files) > 0 {
@@ -370,7 +375,14 @@ func (s *Scanner) reconcileEbookScan(ctx context.Context, folder *models.MediaFo
 	}
 	reconcileRoots, _ := splitEbookReconcileRoots(scans)
 	if len(reconcileRoots) == 0 {
-		if len(scans) > 0 {
+		allFailed := len(scans) > 0
+		for i := range scans {
+			if !scans[i].failed() {
+				allFailed = false
+				break
+			}
+		}
+		if allFailed {
 			slog.WarnContext(ctx, "ebook scan: every root walk failed; skipping missing-file reconciliation", "component", "scanner",
 				"folder_id", folder.ID,
 			)
