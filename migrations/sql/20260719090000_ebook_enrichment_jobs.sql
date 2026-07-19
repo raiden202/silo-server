@@ -135,7 +135,7 @@ WHERE mi.type = 'ebook'
 ON CONFLICT (content_id) DO NOTHING;
 
 -- A crashed CREATE INDEX CONCURRENTLY can leave an INVALID index which blocks
--- an IF NOT EXISTS retry. Match the repository's crash-safe index pattern.
+-- an IF NOT EXISTS retry. Clean each lane-specific index before rebuilding it.
 -- +goose StatementBegin
 DO $$
 BEGIN
@@ -145,10 +145,10 @@ BEGIN
         JOIN pg_namespace n ON n.oid = c.relnamespace
         JOIN pg_index i ON i.indexrelid = c.oid
         WHERE n.nspname = 'public'
-          AND c.relname = 'ebook_enrichment_state_claim_idx'
+          AND c.relname = 'ebook_enrichment_incremental_due_idx'
           AND NOT i.indisvalid
     ) THEN
-        DROP INDEX public.ebook_enrichment_state_claim_idx;
+        DROP INDEX public.ebook_enrichment_incremental_due_idx;
     END IF;
     IF EXISTS (
         SELECT 1
@@ -156,26 +156,58 @@ BEGIN
         JOIN pg_namespace n ON n.oid = c.relnamespace
         JOIN pg_index i ON i.indexrelid = c.oid
         WHERE n.nspname = 'public'
-          AND c.relname = 'ebook_enrichment_state_priority_claim_idx'
+          AND c.relname = 'ebook_enrichment_incremental_priority_idx'
           AND NOT i.indisvalid
     ) THEN
-        DROP INDEX public.ebook_enrichment_state_priority_claim_idx;
+        DROP INDEX public.ebook_enrichment_incremental_priority_idx;
+    END IF;
+    IF EXISTS (
+        SELECT 1
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        JOIN pg_index i ON i.indexrelid = c.oid
+        WHERE n.nspname = 'public'
+          AND c.relname = 'ebook_enrichment_legacy_due_idx'
+          AND NOT i.indisvalid
+    ) THEN
+        DROP INDEX public.ebook_enrichment_legacy_due_idx;
+    END IF;
+    IF EXISTS (
+        SELECT 1
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        JOIN pg_index i ON i.indexrelid = c.oid
+        WHERE n.nspname = 'public'
+          AND c.relname = 'ebook_enrichment_legacy_priority_idx'
+          AND NOT i.indisvalid
+    ) THEN
+        DROP INDEX public.ebook_enrichment_legacy_priority_idx;
     END IF;
 END;
 $$;
 -- +goose StatementEnd
 
-CREATE INDEX CONCURRENTLY IF NOT EXISTS ebook_enrichment_state_claim_idx
-    ON public.ebook_enrichment_state ((priority < 0), next_attempt_at, updated_at, priority DESC)
-    WHERE status IN ('pending', 'running');
+CREATE INDEX CONCURRENTLY IF NOT EXISTS ebook_enrichment_incremental_due_idx
+    ON public.ebook_enrichment_state (next_attempt_at, updated_at, priority DESC)
+    WHERE status IN ('pending', 'running') AND priority >= 0;
 
-CREATE INDEX CONCURRENTLY IF NOT EXISTS ebook_enrichment_state_priority_claim_idx
-    ON public.ebook_enrichment_state ((priority < 0), priority DESC, next_attempt_at, updated_at)
-    WHERE status IN ('pending', 'running');
+CREATE INDEX CONCURRENTLY IF NOT EXISTS ebook_enrichment_incremental_priority_idx
+    ON public.ebook_enrichment_state (priority DESC, next_attempt_at, updated_at)
+    WHERE status IN ('pending', 'running') AND priority >= 0;
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS ebook_enrichment_legacy_due_idx
+    ON public.ebook_enrichment_state (next_attempt_at, updated_at, priority DESC)
+    WHERE status IN ('pending', 'running') AND priority < 0;
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS ebook_enrichment_legacy_priority_idx
+    ON public.ebook_enrichment_state (priority DESC, next_attempt_at, updated_at)
+    WHERE status IN ('pending', 'running') AND priority < 0;
 
 -- +goose Down
-DROP INDEX CONCURRENTLY IF EXISTS ebook_enrichment_state_priority_claim_idx;
-DROP INDEX CONCURRENTLY IF EXISTS ebook_enrichment_state_claim_idx;
+DROP INDEX CONCURRENTLY IF EXISTS ebook_enrichment_legacy_priority_idx;
+DROP INDEX CONCURRENTLY IF EXISTS ebook_enrichment_legacy_due_idx;
+DROP INDEX CONCURRENTLY IF EXISTS ebook_enrichment_incremental_priority_idx;
+DROP INDEX CONCURRENTLY IF EXISTS ebook_enrichment_incremental_due_idx;
 
 -- +goose StatementBegin
 DO $$

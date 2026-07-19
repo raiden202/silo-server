@@ -157,24 +157,24 @@ func (q *EnrichmentQueue) Enqueue(ctx context.Context, contentID string, priorit
 
 // Each indexed window is fixed-size; only their deduplicated union pays for
 // aging/ranking, while the oldest-due window guarantees eventual promotion.
-var claimEnrichmentJobsQuery = `
+const claimEnrichmentJobsQueryTemplate = `
 	WITH high_priority_candidates AS MATERIALIZED (
 		SELECT content_id, priority, next_attempt_at, updated_at
 		FROM ebook_enrichment_state
 		WHERE next_attempt_at <= now()
 		  AND (status = 'pending' OR (status = 'running' AND lease_until < now()))
-		  AND (priority < 0) = ($3 = 'legacy')
+		  AND {{lane_predicate}}
 		ORDER BY priority DESC, next_attempt_at, updated_at
-		LIMIT $4
+		LIMIT $3
 	),
 	oldest_due_candidates AS MATERIALIZED (
 		SELECT content_id, priority, next_attempt_at, updated_at
 		FROM ebook_enrichment_state
 		WHERE next_attempt_at <= now()
 		  AND (status = 'pending' OR (status = 'running' AND lease_until < now()))
-		  AND (priority < 0) = ($3 = 'legacy')
+		  AND {{lane_predicate}}
 		ORDER BY next_attempt_at, updated_at, priority DESC
-		LIMIT $4
+		LIMIT $3
 	),
 	candidate_pool AS MATERIALIZED (
 		SELECT * FROM high_priority_candidates
@@ -196,7 +196,7 @@ var claimEnrichmentJobsQuery = `
 		JOIN ebook_enrichment_state state ON state.content_id = ranked.content_id
 		WHERE state.next_attempt_at <= now()
 		  AND (state.status = 'pending' OR (state.status = 'running' AND state.lease_until < now()))
-		  AND (state.priority < 0) = ($3 = 'legacy')
+		  AND {{state_lane_predicate}}
 		ORDER BY
 			ranked.effective_priority DESC,
 			ranked.priority DESC,
@@ -217,6 +217,23 @@ var claimEnrichmentJobsQuery = `
 	RETURNING state.content_id, state.claim_token, state.attempts, state.last_attempt_at, state.protected_fields
 `
 
+var (
+	claimIncrementalEnrichmentJobsQuery = buildClaimEnrichmentJobsQuery("priority >= 0", "state.priority >= 0")
+	claimLegacyEnrichmentJobsQuery      = buildClaimEnrichmentJobsQuery("priority < 0", "state.priority < 0")
+)
+
+func buildClaimEnrichmentJobsQuery(lanePredicate, stateLanePredicate string) string {
+	query := strings.ReplaceAll(claimEnrichmentJobsQueryTemplate, "{{lane_predicate}}", lanePredicate)
+	return strings.ReplaceAll(query, "{{state_lane_predicate}}", stateLanePredicate)
+}
+
+func claimEnrichmentJobsQueryForScope(scope EnrichmentScope) string {
+	if scope == EnrichmentScopeLegacy {
+		return claimLegacyEnrichmentJobsQuery
+	}
+	return claimIncrementalEnrichmentJobsQuery
+}
+
 func (q *EnrichmentQueue) ClaimBatch(
 	ctx context.Context,
 	scope EnrichmentScope,
@@ -236,12 +253,12 @@ func (q *EnrichmentQueue) ClaimBatch(
 		leaseDuration = defaultEnrichmentLease
 	}
 
+	query := claimEnrichmentJobsQueryForScope(scope)
 	rows, err := q.pool.Query(
 		ctx,
-		claimEnrichmentJobsQuery,
+		query,
 		limit,
 		postgresInterval(leaseDuration),
-		string(scope),
 		claimCandidateWindow,
 	)
 	if err != nil {
@@ -263,13 +280,33 @@ func (q *EnrichmentQueue) ClaimBatch(
 	return jobs, nil
 }
 
-var countReadyEnrichmentJobsQuery = `
+const countReadyEnrichmentJobsQueryTemplate = `
 	SELECT COUNT(*)
 	FROM ebook_enrichment_state
 	WHERE next_attempt_at <= now()
 	  AND (status = 'pending' OR (status = 'running' AND lease_until < now()))
-	  AND (priority < 0) = ($1 = 'legacy')
+	  AND {{lane_predicate}}
 `
+
+var (
+	countReadyIncrementalEnrichmentJobsQuery = strings.ReplaceAll(
+		countReadyEnrichmentJobsQueryTemplate,
+		"{{lane_predicate}}",
+		"priority >= 0",
+	)
+	countReadyLegacyEnrichmentJobsQuery = strings.ReplaceAll(
+		countReadyEnrichmentJobsQueryTemplate,
+		"{{lane_predicate}}",
+		"priority < 0",
+	)
+)
+
+func countReadyEnrichmentJobsQueryForScope(scope EnrichmentScope) string {
+	if scope == EnrichmentScopeLegacy {
+		return countReadyLegacyEnrichmentJobsQuery
+	}
+	return countReadyIncrementalEnrichmentJobsQuery
+}
 
 func (q *EnrichmentQueue) ReadyCount(ctx context.Context, scope EnrichmentScope) (int, error) {
 	if q == nil || q.pool == nil {
@@ -279,7 +316,7 @@ func (q *EnrichmentQueue) ReadyCount(ctx context.Context, scope EnrichmentScope)
 		return 0, err
 	}
 	var count int
-	if err := q.pool.QueryRow(ctx, countReadyEnrichmentJobsQuery, string(scope)).Scan(&count); err != nil {
+	if err := q.pool.QueryRow(ctx, countReadyEnrichmentJobsQueryForScope(scope)).Scan(&count); err != nil {
 		return 0, err
 	}
 	return count, nil

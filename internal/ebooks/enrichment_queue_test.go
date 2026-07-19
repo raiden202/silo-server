@@ -15,63 +15,123 @@ import (
 )
 
 func TestEnrichmentQueueClaimQueryUsesAtomicLeasedClaims(t *testing.T) {
-	query := strings.Join(strings.Fields(claimEnrichmentJobsQuery), " ")
-
-	for _, fragment := range []string{
-		"WITH high_priority_candidates AS MATERIALIZED",
-		"oldest_due_candidates AS MATERIALIZED",
-		"candidate_pool AS",
-		"UNION",
-		"ranked_candidates AS",
-		"FROM ranked_candidates ranked",
-		"JOIN ebook_enrichment_state state",
-		"FOR UPDATE OF state SKIP LOCKED",
-		"status = 'pending' OR (status = 'running' AND lease_until < now())",
-		"next_attempt_at <= now()",
-		"(priority < 0) = ($3 = 'legacy')",
-		"(state.priority < 0) = ($3 = 'legacy')",
-		"ORDER BY priority DESC, next_attempt_at, updated_at",
-		"ORDER BY next_attempt_at, updated_at, priority DESC",
-		"LIMIT $4",
-		"priority + FLOOR(EXTRACT(EPOCH FROM (now() - next_attempt_at)) / 3600)::integer",
-		"SET status = 'running'",
-		"lease_until = now() + $2::interval",
-		"claim_token = gen_random_uuid()::text",
-		"attempts = attempts + 1",
-		"RETURNING state.content_id, state.claim_token, state.attempts",
-		"state.protected_fields",
-	} {
-		if !strings.Contains(query, fragment) {
-			t.Fatalf("claim query missing %q:\n%s", fragment, claimEnrichmentJobsQuery)
-		}
+	tests := []struct {
+		name           string
+		query          string
+		lanePredicate  string
+		statePredicate string
+		rejected       string
+	}{
+		{
+			name:           "incremental",
+			query:          claimIncrementalEnrichmentJobsQuery,
+			lanePredicate:  "priority >= 0",
+			statePredicate: "state.priority >= 0",
+			rejected:       "priority < 0",
+		},
+		{
+			name:           "legacy",
+			query:          claimLegacyEnrichmentJobsQuery,
+			lanePredicate:  "priority < 0",
+			statePredicate: "state.priority < 0",
+			rejected:       "priority >= 0",
+		},
 	}
-	if got := strings.Count(query, "LIMIT $4"); got != 2 {
-		t.Fatalf("claim query has %d bounded candidate windows, want 2:\n%s", got, claimEnrichmentJobsQuery)
-	}
-	if got := strings.Count(query, "FLOOR(EXTRACT(EPOCH"); got != 1 {
-		t.Fatalf("aging expression count = %d, want exactly one bounded computation:\n%s", got, claimEnrichmentJobsQuery)
-	}
-	agingAt := strings.Index(query, "FLOOR(EXTRACT(EPOCH")
-	poolAt := strings.Index(query, "candidate_pool AS")
-	if agingAt < poolAt {
-		t.Fatalf("aging is computed before the bounded candidate pool:\n%s", claimEnrichmentJobsQuery)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			query := strings.Join(strings.Fields(tt.query), " ")
+			for _, fragment := range []string{
+				"WITH high_priority_candidates AS MATERIALIZED",
+				"oldest_due_candidates AS MATERIALIZED",
+				"candidate_pool AS",
+				"UNION",
+				"ranked_candidates AS",
+				"FROM ranked_candidates ranked",
+				"JOIN ebook_enrichment_state state",
+				"FOR UPDATE OF state SKIP LOCKED",
+				"status = 'pending' OR (status = 'running' AND lease_until < now())",
+				"next_attempt_at <= now()",
+				tt.lanePredicate,
+				tt.statePredicate,
+				"ORDER BY priority DESC, next_attempt_at, updated_at",
+				"ORDER BY next_attempt_at, updated_at, priority DESC",
+				"LIMIT $3",
+				"priority + FLOOR(EXTRACT(EPOCH FROM (now() - next_attempt_at)) / 3600)::integer",
+				"SET status = 'running'",
+				"lease_until = now() + $2::interval",
+				"claim_token = gen_random_uuid()::text",
+				"attempts = attempts + 1",
+				"RETURNING state.content_id, state.claim_token, state.attempts",
+				"state.protected_fields",
+			} {
+				if !strings.Contains(query, fragment) {
+					t.Fatalf("claim query missing %q:\n%s", fragment, tt.query)
+				}
+			}
+			if strings.Contains(query, tt.rejected) {
+				t.Fatalf("claim query crosses lanes with %q:\n%s", tt.rejected, tt.query)
+			}
+			if strings.Contains(query, "$3 = 'legacy'") {
+				t.Fatalf("claim query uses a parameterized lane predicate:\n%s", tt.query)
+			}
+			if got := strings.Count(query, "LIMIT $3"); got != 2 {
+				t.Fatalf("claim query has %d bounded candidate windows, want 2:\n%s", got, tt.query)
+			}
+			if got := strings.Count(query, "FLOOR(EXTRACT(EPOCH"); got != 1 {
+				t.Fatalf("aging expression count = %d, want exactly one bounded computation:\n%s", got, tt.query)
+			}
+			agingAt := strings.Index(query, "FLOOR(EXTRACT(EPOCH")
+			poolAt := strings.Index(query, "candidate_pool AS")
+			if agingAt < poolAt {
+				t.Fatalf("aging is computed before the bounded candidate pool:\n%s", tt.query)
+			}
+		})
 	}
 	if claimCandidateWindow <= 0 || claimCandidateWindow > 256 {
 		t.Fatalf("claim candidate window = %d, want a fixed sane bound", claimCandidateWindow)
 	}
 }
 
-func TestEnrichmentQueueReadyCountUsesTheSameScopeAsClaims(t *testing.T) {
-	query := strings.Join(strings.Fields(countReadyEnrichmentJobsQuery), " ")
-	for _, fragment := range []string{
-		"SELECT COUNT(*)",
-		"next_attempt_at <= now()",
-		"status = 'pending' OR (status = 'running' AND lease_until < now())",
-		"(priority < 0) = ($1 = 'legacy')",
+func TestEnrichmentQueueSelectsLiteralLaneQueries(t *testing.T) {
+	if got := claimEnrichmentJobsQueryForScope(EnrichmentScopeIncremental); got != claimIncrementalEnrichmentJobsQuery {
+		t.Fatal("incremental scope did not select incremental claim SQL")
+	}
+	if got := claimEnrichmentJobsQueryForScope(EnrichmentScopeLegacy); got != claimLegacyEnrichmentJobsQuery {
+		t.Fatal("legacy scope did not select legacy claim SQL")
+	}
+	if got := countReadyEnrichmentJobsQueryForScope(EnrichmentScopeIncremental); got != countReadyIncrementalEnrichmentJobsQuery {
+		t.Fatal("incremental scope did not select incremental count SQL")
+	}
+	if got := countReadyEnrichmentJobsQueryForScope(EnrichmentScopeLegacy); got != countReadyLegacyEnrichmentJobsQuery {
+		t.Fatal("legacy scope did not select legacy count SQL")
+	}
+}
+
+func TestEnrichmentQueueReadyCountUsesTheSameLiteralLaneAsClaims(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		query     string
+		predicate string
+	}{
+		{name: "incremental", query: countReadyIncrementalEnrichmentJobsQuery, predicate: "priority >= 0"},
+		{name: "legacy", query: countReadyLegacyEnrichmentJobsQuery, predicate: "priority < 0"},
 	} {
-		if !strings.Contains(query, fragment) {
-			t.Fatalf("ready-count query missing %q:\n%s", fragment, countReadyEnrichmentJobsQuery)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			query := strings.Join(strings.Fields(tt.query), " ")
+			for _, fragment := range []string{
+				"SELECT COUNT(*)",
+				"next_attempt_at <= now()",
+				"status = 'pending' OR (status = 'running' AND lease_until < now())",
+				tt.predicate,
+			} {
+				if !strings.Contains(query, fragment) {
+					t.Fatalf("ready-count query missing %q:\n%s", fragment, tt.query)
+				}
+			}
+			if strings.Contains(query, "$1 = 'legacy'") {
+				t.Fatalf("ready-count query uses a parameterized lane predicate:\n%s", tt.query)
+			}
+		})
 	}
 }
 
@@ -163,14 +223,20 @@ func TestEnrichmentQueueMigrationIsCrashSafeAndSeedsAllLegacyEbooks(t *testing.T
 		"manga_chapters",
 		"ON CONFLICT (content_id) DO NOTHING",
 		"NOT i.indisvalid",
-		"DROP INDEX public.ebook_enrichment_state_claim_idx",
-		"DROP INDEX public.ebook_enrichment_state_priority_claim_idx",
-		"CREATE INDEX CONCURRENTLY IF NOT EXISTS ebook_enrichment_state_claim_idx",
-		"CREATE INDEX CONCURRENTLY IF NOT EXISTS ebook_enrichment_state_priority_claim_idx",
-		"((priority < 0), next_attempt_at, updated_at, priority DESC)",
-		"((priority < 0), priority DESC, next_attempt_at, updated_at)",
-		"DROP INDEX CONCURRENTLY IF EXISTS ebook_enrichment_state_claim_idx",
-		"DROP INDEX CONCURRENTLY IF EXISTS ebook_enrichment_state_priority_claim_idx",
+		"DROP INDEX public.ebook_enrichment_incremental_due_idx",
+		"DROP INDEX public.ebook_enrichment_incremental_priority_idx",
+		"DROP INDEX public.ebook_enrichment_legacy_due_idx",
+		"DROP INDEX public.ebook_enrichment_legacy_priority_idx",
+		"CREATE INDEX CONCURRENTLY IF NOT EXISTS ebook_enrichment_incremental_due_idx",
+		"CREATE INDEX CONCURRENTLY IF NOT EXISTS ebook_enrichment_incremental_priority_idx",
+		"CREATE INDEX CONCURRENTLY IF NOT EXISTS ebook_enrichment_legacy_due_idx",
+		"CREATE INDEX CONCURRENTLY IF NOT EXISTS ebook_enrichment_legacy_priority_idx",
+		"WHERE status IN ('pending', 'running') AND priority >= 0",
+		"WHERE status IN ('pending', 'running') AND priority < 0",
+		"DROP INDEX CONCURRENTLY IF EXISTS ebook_enrichment_incremental_due_idx",
+		"DROP INDEX CONCURRENTLY IF EXISTS ebook_enrichment_incremental_priority_idx",
+		"DROP INDEX CONCURRENTLY IF EXISTS ebook_enrichment_legacy_due_idx",
+		"DROP INDEX CONCURRENTLY IF EXISTS ebook_enrichment_legacy_priority_idx",
 	} {
 		if !strings.Contains(migration, fragment) {
 			t.Fatalf("legacy backlog migration missing %q:\n%s", fragment, body)
