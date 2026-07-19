@@ -19,15 +19,24 @@ import (
 const ebookCoverTestThumbhash = "thumb"
 
 type fakeEbookEnrichmentQueue struct {
-	contentID string
-	priority  int
-	err       error
+	contentID      string
+	priority       int
+	err            error
+	reconcileCalls int
+	reconcileLimit int
+	reconcileErr   error
 }
 
 func (f *fakeEbookEnrichmentQueue) Enqueue(_ context.Context, contentID string, priority int) error {
 	f.contentID = contentID
 	f.priority = priority
 	return f.err
+}
+
+func (f *fakeEbookEnrichmentQueue) ReconcileMissing(_ context.Context, _ int, _ int, limit int) (int, error) {
+	f.reconcileCalls++
+	f.reconcileLimit = limit
+	return 0, f.reconcileErr
 }
 
 func TestScannerEbookEnrichmentHookEnqueuesHighPriorityWork(t *testing.T) {
@@ -51,6 +60,29 @@ func TestScannerEbookEnrichmentHookDoesNotFailScanOnQueueFailure(t *testing.T) {
 	err := s.enqueueEbookEnrichment(context.Background(), "ebook-1")
 	if err != nil {
 		t.Fatalf("enqueueEbookEnrichment() error = %v, want nil", err)
+	}
+}
+
+func TestScannerEbookEnrichmentReconciliationIsBoundedAndNonFatal(t *testing.T) {
+	queue := &fakeEbookEnrichmentQueue{reconcileErr: errors.New("queue unavailable")}
+	s := &Scanner{}
+	s.SetEbookEnrichmentQueue(queue)
+
+	if err := s.reconcileEbookScan(
+		context.Background(),
+		&models.MediaFolder{ID: 17},
+		nil,
+		nil,
+		true,
+	); err != nil {
+		t.Fatalf("reconcileEbookScan() error = %v", err)
+	}
+
+	if queue.reconcileCalls != 1 {
+		t.Fatalf("reconcile calls = %d, want 1", queue.reconcileCalls)
+	}
+	if queue.reconcileLimit <= 0 || queue.reconcileLimit > 1000 {
+		t.Fatalf("reconcile limit = %d, want bounded positive limit", queue.reconcileLimit)
 	}
 }
 

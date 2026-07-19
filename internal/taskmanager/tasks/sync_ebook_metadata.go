@@ -3,6 +3,7 @@ package tasks
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -20,7 +21,8 @@ const (
 )
 
 type ebookMetadataEnricher interface {
-	Run(ctx context.Context, scope ebooks.EnrichmentScope) (ebooks.EnrichmentRunResult, error)
+	ReadyCount(ctx context.Context, scope ebooks.EnrichmentScope) (int, error)
+	RunLimited(ctx context.Context, scope ebooks.EnrichmentScope, maxClaims int) (ebooks.EnrichmentRunResult, error)
 }
 
 type ebookMetadataTask struct {
@@ -36,6 +38,7 @@ type ebookMetadataTask struct {
 	batchDelay  time.Duration
 	sleep       func(context.Context, time.Duration) error
 	errorPrefix string
+	configErr   error
 }
 
 // SyncEbookMetadataTask drains new and recurring ebook metadata work.
@@ -63,6 +66,8 @@ func NewSyncEbookMetadataTask(enricher ebookMetadataEnricher) *SyncEbookMetadata
 }
 
 func NewBackfillEbookMetadataTask(enricher ebookMetadataEnricher) *BackfillEbookMetadataTask {
+	maxClaims, maxClaimsErr := parseEbookBackfillMaxClaims(os.Getenv(ebookBackfillMaxClaimsEnv))
+	batchDelay, batchDelayErr := parseEbookBackfillBatchDelay(os.Getenv(ebookBackfillBatchDelayEnv))
 	return &BackfillEbookMetadataTask{ebookMetadataTask: &ebookMetadataTask{
 		enricher:    enricher,
 		scope:       ebooks.EnrichmentScopeLegacy,
@@ -71,10 +76,11 @@ func NewBackfillEbookMetadataTask(enricher ebookMetadataEnricher) *BackfillEbook
 		description: "Manually enriches the legacy ebook backlog without competing with scheduled metadata sync",
 		budget:      ebookMetadataExecutionBudget,
 		now:         time.Now,
-		maxClaims:   parseEbookBackfillMaxClaims(os.Getenv(ebookBackfillMaxClaimsEnv)),
-		batchDelay:  parseEbookBackfillBatchDelay(os.Getenv(ebookBackfillBatchDelayEnv)),
+		maxClaims:   maxClaims,
+		batchDelay:  batchDelay,
 		sleep:       sleepEbookBackfill,
 		errorPrefix: "ebook metadata backfill",
+		configErr:   errors.Join(maxClaimsErr, batchDelayErr),
 	}}
 }
 
@@ -91,20 +97,40 @@ func (t *ebookMetadataTask) DefaultTriggers() []taskmanager.TriggerConfig {
 }
 
 func (t *ebookMetadataTask) Execute(ctx context.Context, progress taskmanager.ProgressReporter) error {
+	if t.configErr != nil {
+		return fmt.Errorf("invalid ebook backfill configuration: %w", t.configErr)
+	}
 	progress.Report(0, fmt.Sprintf("%s started", t.name))
 	started := t.now()
-	total := ebooks.EnrichmentRunResult{}
+	initialReady, err := t.enricher.ReadyCount(ctx, t.scope)
+	if err != nil {
+		return fmt.Errorf("%s: count initial work: %w", t.errorPrefix, err)
+	}
+	total := ebooks.EnrichmentRunResult{Remaining: initialReady}
 
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 
-		batch, err := t.enricher.Run(ctx, t.scope)
+		claimLimit := 0
+		if t.maxClaims > 0 {
+			claimLimit = t.maxClaims - total.Claimed
+			if claimLimit <= 0 {
+				reportEbookEnrichmentPause(progress, total, fmt.Sprintf(
+					"Paused after reaching manual backfill claim cap of %d; remaining work will retry later.",
+					t.maxClaims,
+				))
+				return nil
+			}
+		}
+		batch, err := t.enricher.RunLimited(ctx, t.scope, claimLimit)
 		if err != nil {
 			return fmt.Errorf("%s: %w", t.errorPrefix, err)
 		}
 		addEbookEnrichmentResult(&total, batch)
+		total.Remaining = max(total.Remaining-batch.Claimed, 0)
+		total.HasMore = batch.HasMore
 		reportEbookEnrichmentProgress(progress, total, false)
 
 		if err := ctx.Err(); err != nil {
@@ -114,7 +140,7 @@ func (t *ebookMetadataTask) Execute(ctx context.Context, progress taskmanager.Pr
 			reportEbookEnrichmentCircuitBreak(progress, total)
 			return nil
 		}
-		if batch.Remaining == 0 {
+		if !batch.HasMore {
 			reportEbookEnrichmentProgress(progress, total, true)
 			return nil
 		}
@@ -122,7 +148,6 @@ func (t *ebookMetadataTask) Execute(ctx context.Context, progress taskmanager.Pr
 			return nil
 		}
 		if t.maxClaims > 0 && total.Claimed >= t.maxClaims {
-			deferEbookEnrichmentRemaining(&total)
 			reportEbookEnrichmentPause(progress, total, fmt.Sprintf(
 				"Paused after reaching manual backfill claim cap of %d; remaining work will retry later.",
 				t.maxClaims,
@@ -130,13 +155,11 @@ func (t *ebookMetadataTask) Execute(ctx context.Context, progress taskmanager.Pr
 			return nil
 		}
 		if t.now().Sub(started) >= t.budget {
-			deferEbookEnrichmentRemaining(&total)
 			reportEbookEnrichmentProgress(progress, total, false)
 			return nil
 		}
 		if t.batchDelay > 0 && ebookEnrichmentBatchMadeProgress(batch) {
 			if t.batchDelay >= t.budget-t.now().Sub(started) {
-				deferEbookEnrichmentRemaining(&total)
 				reportEbookEnrichmentPause(progress, total,
 					"Paused before the next batch because its delay would exceed the ebook metadata execution budget; remaining work will retry later.")
 				return nil
@@ -148,7 +171,6 @@ func (t *ebookMetadataTask) Execute(ctx context.Context, progress taskmanager.Pr
 				return err
 			}
 			if t.now().Sub(started) >= t.budget {
-				deferEbookEnrichmentRemaining(&total)
 				reportEbookEnrichmentPause(progress, total,
 					"Paused after reaching the ebook metadata execution budget; remaining work will retry later.")
 				return nil
@@ -157,20 +179,28 @@ func (t *ebookMetadataTask) Execute(ctx context.Context, progress taskmanager.Pr
 	}
 }
 
-func parseEbookBackfillMaxClaims(raw string) int {
-	value, err := strconv.Atoi(strings.TrimSpace(raw))
-	if err != nil || value <= 0 {
-		return 0
+func parseEbookBackfillMaxClaims(raw string) (int, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, nil
 	}
-	return value
+	value, err := strconv.Atoi(raw)
+	if err != nil || value <= 0 {
+		return 0, fmt.Errorf("%s must be a positive integer, got %q", ebookBackfillMaxClaimsEnv, raw)
+	}
+	return value, nil
 }
 
-func parseEbookBackfillBatchDelay(raw string) time.Duration {
-	value, err := time.ParseDuration(strings.TrimSpace(raw))
-	if err != nil || value <= 0 {
-		return 0
+func parseEbookBackfillBatchDelay(raw string) (time.Duration, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, nil
 	}
-	return value
+	value, err := time.ParseDuration(raw)
+	if err != nil || value <= 0 {
+		return 0, fmt.Errorf("%s must be a positive Go duration, got %q", ebookBackfillBatchDelayEnv, raw)
+	}
+	return value, nil
 }
 
 func sleepEbookBackfill(ctx context.Context, delay time.Duration) error {
@@ -195,17 +225,12 @@ func ebookEnrichmentBatchMadeProgress(batch ebooks.EnrichmentRunResult) bool {
 	return batch.Enriched > 0 || batch.NoMatch > 0
 }
 
-func deferEbookEnrichmentRemaining(result *ebooks.EnrichmentRunResult) {
-	result.Deferred += result.Remaining
-}
-
 func addEbookEnrichmentResult(total *ebooks.EnrichmentRunResult, batch ebooks.EnrichmentRunResult) {
 	total.Claimed += batch.Claimed
 	total.Enriched += batch.Enriched
 	total.NoMatch += batch.NoMatch
 	total.Failed += batch.Failed
 	total.Deferred += batch.Deferred
-	total.Remaining = batch.Remaining
 }
 
 func reportEbookEnrichmentProgress(
@@ -275,6 +300,9 @@ func reportEbookEnrichmentPause(
 
 func ebookEnrichmentPercent(result ebooks.EnrichmentRunResult) float64 {
 	if result.Remaining == 0 {
+		if result.HasMore {
+			return 99
+		}
 		return 100
 	}
 	total := result.Claimed + result.Remaining

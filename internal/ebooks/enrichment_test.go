@@ -1129,6 +1129,9 @@ type fakeEnrichmentQueue struct {
 	leaseDuration             time.Duration
 	claimScope                EnrichmentScope
 	remaining                 int
+	hasReady                  bool
+	readyCountCalls           int
+	hasReadyCalls             int
 	completed                 map[string]EnrichmentOutcome
 	failed                    map[string]EnrichmentErrorClass
 	retryAfter                map[string]time.Duration
@@ -1156,7 +1159,15 @@ func (f *fakeEnrichmentQueue) ClaimBatch(_ context.Context, scope EnrichmentScop
 func (f *fakeEnrichmentQueue) ReadyCount(_ context.Context, _ EnrichmentScope) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.readyCountCalls++
 	return f.remaining, nil
+}
+
+func (f *fakeEnrichmentQueue) HasReady(_ context.Context, _ EnrichmentScope) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.hasReadyCalls++
+	return f.hasReady, nil
 }
 
 func (f *fakeEnrichmentQueue) Complete(_ context.Context, job EnrichmentJob, outcome EnrichmentOutcome, _ time.Duration) error {
@@ -1211,6 +1222,31 @@ func (f *fakeEnrichmentQueue) CheckClaim(_ context.Context, job EnrichmentJob) e
 	f.claimCheckCalls++
 	f.recordTransition(job)
 	return f.claimCheckErr
+}
+
+func TestEnricherRunLimitedEnforcesClaimLimitBelowWorkerCount(t *testing.T) {
+	queue := &fakeEnrichmentQueue{}
+	e := &Enricher{
+		queue:     queue,
+		batchSize: 50,
+		workers:   50,
+		enrichClaimedItemFn: func(context.Context, enrichmentItemRow) (EnrichmentOutcome, error) {
+			return EnrichmentOutcomeSuccess, nil
+		},
+	}
+
+	if _, err := e.RunLimited(context.Background(), EnrichmentScopeLegacy, 3); err != nil {
+		t.Fatalf("RunLimited() error = %v", err)
+	}
+	if queue.claimLimit != 3 {
+		t.Fatalf("claim limit = %d, want hard caller cap 3", queue.claimLimit)
+	}
+	if queue.readyCountCalls != 0 {
+		t.Fatalf("per-batch exact ready counts = %d, want 0", queue.readyCountCalls)
+	}
+	if queue.hasReadyCalls != 1 {
+		t.Fatalf("bounded has-ready checks = %d, want 1", queue.hasReadyCalls)
+	}
 }
 
 func (f *fakeEnrichmentQueue) recordTransition(job EnrichmentJob) {

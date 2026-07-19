@@ -155,6 +155,44 @@ func (q *EnrichmentQueue) Enqueue(ctx context.Context, contentID string, priorit
 	return err
 }
 
+var reconcileMissingEnrichmentJobsQuery = `
+	WITH candidates AS MATERIALIZED (
+		SELECT mi.content_id, ` + ebookProtectedFieldsSQL + ` AS protected_fields
+		FROM media_item_libraries mil
+		JOIN media_items mi ON mi.content_id = mil.content_id
+		LEFT JOIN ebook_enrichment_state state ON state.content_id = mi.content_id
+		WHERE mil.media_folder_id = $1
+		  AND mi.type = 'ebook'
+		  AND ` + catalog.MangaChapterExclusionWhere("mi") + `
+		  AND state.content_id IS NULL
+		ORDER BY mi.content_id
+		LIMIT $3
+	)
+	INSERT INTO ebook_enrichment_state (
+		content_id, status, priority, next_attempt_at, protected_fields, updated_at
+	)
+	SELECT candidates.content_id, 'pending', $2, now(), candidates.protected_fields, now()
+	FROM candidates
+	ON CONFLICT (content_id) DO NOTHING
+`
+
+func (q *EnrichmentQueue) ReconcileMissing(ctx context.Context, folderID, priority, limit int) (int, error) {
+	if q == nil || q.pool == nil {
+		return 0, errors.New("ebook enrichment queue is not configured")
+	}
+	if folderID <= 0 {
+		return 0, errors.New("ebook enrichment folder id is required")
+	}
+	if limit <= 0 {
+		return 0, nil
+	}
+	tag, err := q.pool.Exec(ctx, reconcileMissingEnrichmentJobsQuery, folderID, priority, limit)
+	if err != nil {
+		return 0, err
+	}
+	return int(tag.RowsAffected()), nil
+}
+
 // Each indexed window is fixed-size; only their deduplicated union pays for
 // aging/ranking, while the oldest-due window guarantees eventual promotion.
 const claimEnrichmentJobsQueryTemplate = `
@@ -300,6 +338,50 @@ var (
 		"priority < 0",
 	)
 )
+
+const hasReadyEnrichmentJobsQueryTemplate = `
+	SELECT EXISTS (
+		SELECT 1
+		FROM ebook_enrichment_state
+		WHERE next_attempt_at <= now()
+		  AND (status = 'pending' OR (status = 'running' AND lease_until < now()))
+		  AND {{lane_predicate}}
+	)
+`
+
+var (
+	hasReadyIncrementalEnrichmentJobsQuery = strings.ReplaceAll(
+		hasReadyEnrichmentJobsQueryTemplate,
+		"{{lane_predicate}}",
+		"priority >= 0",
+	)
+	hasReadyLegacyEnrichmentJobsQuery = strings.ReplaceAll(
+		hasReadyEnrichmentJobsQueryTemplate,
+		"{{lane_predicate}}",
+		"priority < 0",
+	)
+)
+
+func hasReadyEnrichmentJobsQueryForScope(scope EnrichmentScope) string {
+	if scope == EnrichmentScopeLegacy {
+		return hasReadyLegacyEnrichmentJobsQuery
+	}
+	return hasReadyIncrementalEnrichmentJobsQuery
+}
+
+func (q *EnrichmentQueue) HasReady(ctx context.Context, scope EnrichmentScope) (bool, error) {
+	if q == nil || q.pool == nil {
+		return false, errors.New("ebook enrichment queue is not configured")
+	}
+	if err := scope.validate(); err != nil {
+		return false, err
+	}
+	var ready bool
+	if err := q.pool.QueryRow(ctx, hasReadyEnrichmentJobsQueryForScope(scope)).Scan(&ready); err != nil {
+		return false, err
+	}
+	return ready, nil
+}
 
 func countReadyEnrichmentJobsQueryForScope(scope EnrichmentScope) string {
 	if scope == EnrichmentScopeLegacy {

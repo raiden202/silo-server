@@ -135,6 +135,50 @@ func TestEnrichmentQueueReadyCountUsesTheSameLiteralLaneAsClaims(t *testing.T) {
 	}
 }
 
+func TestEnrichmentQueueHasReadyUsesBoundedExistenceQueries(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		query     string
+		predicate string
+	}{
+		{name: "incremental", query: hasReadyIncrementalEnrichmentJobsQuery, predicate: "priority >= 0"},
+		{name: "legacy", query: hasReadyLegacyEnrichmentJobsQuery, predicate: "priority < 0"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			query := strings.Join(strings.Fields(tt.query), " ")
+			for _, fragment := range []string{
+				"SELECT EXISTS",
+				"next_attempt_at <= now()",
+				"status = 'pending' OR (status = 'running' AND lease_until < now())",
+				tt.predicate,
+			} {
+				if !strings.Contains(query, fragment) {
+					t.Fatalf("has-ready query missing %q:\n%s", fragment, tt.query)
+				}
+			}
+			if strings.Contains(query, "COUNT(") {
+				t.Fatalf("has-ready query performs an exact count:\n%s", tt.query)
+			}
+		})
+	}
+}
+
+func TestEnrichmentQueueReconcileMissingIsBoundedAndLaneSafe(t *testing.T) {
+	query := strings.Join(strings.Fields(reconcileMissingEnrichmentJobsQuery), " ")
+	for _, fragment := range []string{
+		"WHERE mil.media_folder_id = $1",
+		"mi.type = 'ebook'",
+		"state.content_id IS NULL",
+		"LIMIT $3",
+		"SELECT candidates.content_id, 'pending', $2",
+		"ON CONFLICT (content_id) DO NOTHING",
+	} {
+		if !strings.Contains(query, fragment) {
+			t.Fatalf("reconcile query missing %q:\n%s", fragment, reconcileMissingEnrichmentJobsQuery)
+		}
+	}
+}
+
 func TestEnrichmentScopeValidation(t *testing.T) {
 	for _, scope := range []EnrichmentScope{EnrichmentScopeIncremental, EnrichmentScopeLegacy} {
 		if err := scope.validate(); err != nil {

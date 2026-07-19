@@ -365,6 +365,9 @@ func (s *Scanner) emptyCleanupDecision(
 // reconcileEbookScan applies the post-walk safety policy and then performs
 // missing-file reconciliation for the roots that walked cleanly.
 func (s *Scanner) reconcileEbookScan(ctx context.Context, folder *models.MediaFolder, scans []ebookRootScan, seenPaths map[string]bool, fullScan bool) error {
+	if folder != nil {
+		defer s.reconcileMissingEbookEnrichment(ctx, folder.ID)
+	}
 	reconcileRoots, _ := splitEbookReconcileRoots(scans)
 	if len(reconcileRoots) == 0 {
 		if len(scans) > 0 {
@@ -559,6 +562,7 @@ func (s *Scanner) reconcileEbookFile(ctx context.Context, folder *models.MediaFo
 }
 
 const ebookEnrichmentPriority = 100
+const ebookEnrichmentReconcileLimit = 500
 
 func (s *Scanner) enqueueEbookEnrichment(ctx context.Context, contentID string) error {
 	if s == nil || s.ebookEnrichmentQueue == nil || strings.TrimSpace(contentID) == "" {
@@ -572,6 +576,34 @@ func (s *Scanner) enqueueEbookEnrichment(ctx context.Context, contentID string) 
 		)
 	}
 	return nil
+}
+
+func (s *Scanner) reconcileMissingEbookEnrichment(ctx context.Context, folderID int) {
+	if s == nil || s.ebookEnrichmentQueue == nil || folderID <= 0 {
+		return
+	}
+	reconciled, err := s.ebookEnrichmentQueue.ReconcileMissing(
+		ctx,
+		folderID,
+		ebookEnrichmentPriority,
+		ebookEnrichmentReconcileLimit,
+	)
+	if err != nil {
+		slog.WarnContext(ctx, "ebook scan: metadata enrichment reconciliation failed",
+			"component", "scanner",
+			"folder_id", folderID,
+			"limit", ebookEnrichmentReconcileLimit,
+			"error", err,
+		)
+		return
+	}
+	if reconciled > 0 {
+		slog.InfoContext(ctx, "ebook scan: repaired missing metadata enrichment jobs",
+			"component", "scanner",
+			"folder_id", folderID,
+			"reconciled", reconciled,
+		)
+	}
 }
 
 func (s *Scanner) autoLinkLiteraryWork(ctx context.Context, contentID string) {

@@ -101,6 +101,7 @@ type enrichmentItemRow struct {
 type enrichmentQueue interface {
 	ClaimBatch(ctx context.Context, scope EnrichmentScope, limit int, leaseDuration time.Duration) ([]EnrichmentJob, error)
 	ReadyCount(ctx context.Context, scope EnrichmentScope) (int, error)
+	HasReady(ctx context.Context, scope EnrichmentScope) (bool, error)
 	CheckClaim(ctx context.Context, job EnrichmentJob) error
 	Complete(ctx context.Context, job EnrichmentJob, outcome EnrichmentOutcome, refreshAfter time.Duration) error
 	Fail(ctx context.Context, job EnrichmentJob, errorClass EnrichmentErrorClass, message string, retryAfter time.Duration) error
@@ -109,12 +110,13 @@ type enrichmentQueue interface {
 }
 
 type EnrichmentRunResult struct {
-	Claimed   int `json:"claimed"`
-	Enriched  int `json:"enriched"`
-	NoMatch   int `json:"no_match"`
-	Failed    int `json:"failed"`
-	Deferred  int `json:"deferred"`
-	Remaining int `json:"remaining"`
+	Claimed   int  `json:"claimed"`
+	Enriched  int  `json:"enriched"`
+	NoMatch   int  `json:"no_match"`
+	Failed    int  `json:"failed"`
+	Deferred  int  `json:"deferred"`
+	Remaining int  `json:"remaining"`
+	HasMore   bool `json:"-"`
 }
 
 // Enricher drives the ebook metadata enrichment sweep.
@@ -184,6 +186,27 @@ func (e *Enricher) SetLiteraryWorkLinker(linker literaryWorkLinker) {
 }
 
 func (e *Enricher) Run(ctx context.Context, scope EnrichmentScope) (EnrichmentRunResult, error) {
+	return e.RunLimited(ctx, scope, 0)
+}
+
+func (e *Enricher) ReadyCount(ctx context.Context, scope EnrichmentScope) (int, error) {
+	if e == nil {
+		return 0, nil
+	}
+	if err := scope.validate(); err != nil {
+		return 0, err
+	}
+	queue := e.queue
+	if queue == nil && e.pool != nil {
+		queue = NewEnrichmentQueue(e.pool)
+	}
+	if queue == nil {
+		return 0, nil
+	}
+	return queue.ReadyCount(ctx, scope)
+}
+
+func (e *Enricher) RunLimited(ctx context.Context, scope EnrichmentScope, maxClaims int) (EnrichmentRunResult, error) {
 	if e == nil {
 		return EnrichmentRunResult{}, nil
 	}
@@ -198,16 +221,16 @@ func (e *Enricher) Run(ctx context.Context, scope EnrichmentScope) (EnrichmentRu
 	if queue == nil || (e.chainRepo == nil && e.enrichClaimedItemFn == nil) {
 		return EnrichmentRunResult{}, nil
 	}
-	jobs, err := queue.ClaimBatch(ctx, scope, e.claimLimit(), defaultEnrichmentLease)
+	jobs, err := queue.ClaimBatch(ctx, scope, e.claimLimit(maxClaims), defaultEnrichmentLease)
 	if err != nil {
 		return EnrichmentRunResult{}, fmt.Errorf("ebook enrichment: claim batch: %w", err)
 	}
 	if len(jobs) == 0 {
-		remaining, countErr := queue.ReadyCount(ctx, scope)
-		if countErr != nil {
-			return EnrichmentRunResult{}, fmt.Errorf("ebook enrichment: count remaining: %w", countErr)
+		hasMore, readyErr := queue.HasReady(ctx, scope)
+		if readyErr != nil {
+			return EnrichmentRunResult{}, fmt.Errorf("ebook enrichment: check remaining: %w", readyErr)
 		}
-		return EnrichmentRunResult{Remaining: remaining}, nil
+		return EnrichmentRunResult{HasMore: hasMore}, nil
 	}
 
 	loadItems := e.loadClaimedItems
@@ -231,10 +254,10 @@ func (e *Enricher) Run(ctx context.Context, scope EnrichmentScope) (EnrichmentRu
 		enrichItem = e.enrichClaimedItemFn
 	}
 	result, runErr := e.runQueueBatch(ctx, queue, jobs, items, enrichItem)
-	remaining, countErr := queue.ReadyCount(ctx, scope)
-	result.Remaining = remaining
-	if countErr != nil {
-		runErr = errors.Join(runErr, fmt.Errorf("ebook enrichment: count remaining: %w", countErr))
+	hasMore, readyErr := queue.HasReady(ctx, scope)
+	result.HasMore = hasMore
+	if readyErr != nil {
+		runErr = errors.Join(runErr, fmt.Errorf("ebook enrichment: check remaining: %w", readyErr))
 	}
 
 	slog.InfoContext(ctx, "ebook enrichment: sweep complete", "component", "ebooks",
@@ -243,12 +266,12 @@ func (e *Enricher) Run(ctx context.Context, scope EnrichmentScope) (EnrichmentRu
 		"no_match", result.NoMatch,
 		"failed", result.Failed,
 		"deferred", result.Deferred,
-		"remaining", result.Remaining,
+		"has_more", result.HasMore,
 	)
 	return result, runErr
 }
 
-func (e *Enricher) claimLimit() int {
+func (e *Enricher) claimLimit(maxClaims int) int {
 	batchSize := e.batchSize
 	if batchSize <= 0 {
 		batchSize = defaultEnrichBatchSize
@@ -257,7 +280,11 @@ func (e *Enricher) claimLimit() int {
 	if workers <= 0 {
 		workers = 1
 	}
-	return min(batchSize, workers)
+	limit := min(batchSize, workers)
+	if maxClaims > 0 {
+		limit = min(limit, maxClaims)
+	}
+	return limit
 }
 
 func (e *Enricher) runQueueBatch(

@@ -13,14 +13,30 @@ import (
 )
 
 type fakeEbookMetadataEnricher struct {
-	results []ebooks.EnrichmentRunResult
-	err     error
-	scopes  []ebooks.EnrichmentScope
-	onRun   func(int)
+	results         []ebooks.EnrichmentRunResult
+	err             error
+	countErr        error
+	scopes          []ebooks.EnrichmentScope
+	limits          []int
+	readyCountCalls int
+	initialReady    int
+	onRun           func(int)
 }
 
-func (f *fakeEbookMetadataEnricher) Run(_ context.Context, scope ebooks.EnrichmentScope) (ebooks.EnrichmentRunResult, error) {
+func (f *fakeEbookMetadataEnricher) ReadyCount(_ context.Context, _ ebooks.EnrichmentScope) (int, error) {
+	f.readyCountCalls++
+	if f.countErr != nil {
+		return 0, f.countErr
+	}
+	if f.initialReady > 0 || len(f.results) == 0 {
+		return f.initialReady, nil
+	}
+	return f.results[0].Claimed + f.results[0].Remaining, nil
+}
+
+func (f *fakeEbookMetadataEnricher) RunLimited(_ context.Context, scope ebooks.EnrichmentScope, limit int) (ebooks.EnrichmentRunResult, error) {
 	f.scopes = append(f.scopes, scope)
+	f.limits = append(f.limits, limit)
 	call := len(f.scopes)
 	if f.onRun != nil {
 		f.onRun(call)
@@ -31,7 +47,9 @@ func (f *fakeEbookMetadataEnricher) Run(_ context.Context, scope ebooks.Enrichme
 	if call > len(f.results) {
 		return ebooks.EnrichmentRunResult{}, nil
 	}
-	return f.results[call-1], nil
+	result := f.results[call-1]
+	result.HasMore = result.Remaining > 0
+	return result, nil
 }
 
 type ebookMetadataProgressReporter struct {
@@ -91,6 +109,9 @@ func TestEbookMetadataTaskDrainsBatchesAndReportsHonestProgress(t *testing.T) {
 	if len(enricher.scopes) != 2 {
 		t.Fatalf("Run calls = %d, want 2", len(enricher.scopes))
 	}
+	if enricher.readyCountCalls != 1 {
+		t.Fatalf("initial exact ready counts = %d, want 1", enricher.readyCountCalls)
+	}
 	for _, scope := range enricher.scopes {
 		if scope != ebooks.EnrichmentScopeIncremental {
 			t.Fatalf("sync scope = %q, want incremental", scope)
@@ -109,6 +130,24 @@ func TestEbookMetadataTaskDrainsBatchesAndReportsHonestProgress(t *testing.T) {
 	}
 	if got := progress.percents[len(progress.percents)-1]; got != 100 {
 		t.Fatalf("final progress = %.1f, want 100", got)
+	}
+}
+
+func TestEbookMetadataTaskDoesNotReportCompleteWhileBoundedCheckFindsMoreWork(t *testing.T) {
+	enricher := &fakeEbookMetadataEnricher{
+		initialReady: 1,
+		results: []ebooks.EnrichmentRunResult{
+			{Claimed: 1, Enriched: 1, Remaining: 1},
+			{Claimed: 1, Enriched: 1},
+		},
+	}
+	progress := &ebookMetadataProgressReporter{}
+
+	if err := NewSyncEbookMetadataTask(enricher).Execute(context.Background(), progress); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if got := progress.percents[1]; got >= 100 {
+		t.Fatalf("first batch progress = %.1f, must stay below 100 while HasMore is true", got)
 	}
 }
 
@@ -166,7 +205,6 @@ func TestEbookMetadataTaskContinuesAfterMixedBatchWithProgress(t *testing.T) {
 
 func TestEbookMetadataBackfillStopsAtClaimCap(t *testing.T) {
 	t.Setenv("SILO_EBOOK_BACKFILL_MAX_CLAIMS", "4")
-	t.Setenv("SILO_EBOOK_BACKFILL_BATCH_DELAY", "0")
 	enricher := &fakeEbookMetadataEnricher{results: []ebooks.EnrichmentRunResult{
 		{Claimed: 2, Enriched: 2, Remaining: 10},
 		{Claimed: 2, Enriched: 2, Remaining: 8},
@@ -184,7 +222,7 @@ func TestEbookMetadataBackfillStopsAtClaimCap(t *testing.T) {
 	if err := json.Unmarshal(progress.results[len(progress.results)-1], &result); err != nil {
 		t.Fatalf("result JSON error: %v", err)
 	}
-	want := ebooks.EnrichmentRunResult{Claimed: 4, Enriched: 4, Deferred: 8, Remaining: 8}
+	want := ebooks.EnrichmentRunResult{Claimed: 4, Enriched: 4, Remaining: 8}
 	if result != want {
 		t.Fatalf("result JSON = %+v, want %+v", result, want)
 	}
@@ -194,6 +232,21 @@ func TestEbookMetadataBackfillStopsAtClaimCap(t *testing.T) {
 	message := strings.ToLower(progress.messages[len(progress.messages)-1])
 	if !strings.Contains(message, "claim cap") || !strings.Contains(message, "retry later") {
 		t.Fatalf("claim-cap progress message = %q", message)
+	}
+}
+
+func TestEbookMetadataBackfillPassesRemainingClaimAllowanceToEnricher(t *testing.T) {
+	t.Setenv("SILO_EBOOK_BACKFILL_MAX_CLAIMS", "3")
+	enricher := &fakeEbookMetadataEnricher{results: []ebooks.EnrichmentRunResult{
+		{Claimed: 2, Enriched: 2, Remaining: 8},
+		{Claimed: 1, Enriched: 1, Remaining: 7},
+	}}
+
+	if err := NewBackfillEbookMetadataTask(enricher).Execute(context.Background(), &ebookMetadataProgressReporter{}); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if got := enricher.limits; len(got) != 2 || got[0] != 3 || got[1] != 1 {
+		t.Fatalf("claim limits = %v, want [3 1]", got)
 	}
 }
 
@@ -275,30 +328,50 @@ func TestEbookMetadataBackfillDoesNotDelayPastExecutionBudget(t *testing.T) {
 	}
 }
 
-func TestEbookMetadataBackfillInvalidEnvironmentFallsBackToDisabledControls(t *testing.T) {
+func TestEbookMetadataBackfillInvalidNonemptyEnvironmentFailsClosed(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		max      string
-		delay    string
-		wantMax  int
-		wantWait time.Duration
+		name  string
+		max   string
+		delay string
 	}{
-		{name: "empty", max: "", delay: ""},
 		{name: "malformed", max: "many", delay: "later"},
 		{name: "negative", max: "-5", delay: "-1s"},
 		{name: "zero", max: "0", delay: "0"},
-		{name: "trimmed valid", max: " 20 ", delay: " 1s ", wantMax: 20, wantWait: time.Second},
+		{name: "invalid max only", max: "many", delay: "1s"},
+		{name: "invalid delay only", max: "20", delay: "later"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("SILO_EBOOK_BACKFILL_MAX_CLAIMS", tc.max)
 			t.Setenv("SILO_EBOOK_BACKFILL_BATCH_DELAY", tc.delay)
-			task := NewBackfillEbookMetadataTask(&fakeEbookMetadataEnricher{})
-			if task.maxClaims != tc.wantMax || task.batchDelay != tc.wantWait {
-				t.Fatalf("controls = (%d, %s), want (%d, %s)",
-					task.maxClaims, task.batchDelay, tc.wantMax, tc.wantWait)
+			enricher := &fakeEbookMetadataEnricher{}
+			err := NewBackfillEbookMetadataTask(enricher).Execute(context.Background(), &ebookMetadataProgressReporter{})
+			if err == nil || !strings.Contains(err.Error(), "invalid ebook backfill configuration") {
+				t.Fatalf("Execute() error = %v, want clear invalid configuration error", err)
+			}
+			if len(enricher.scopes) != 0 || enricher.readyCountCalls != 0 {
+				t.Fatalf("invalid configuration reached queue: runs=%d counts=%d", len(enricher.scopes), enricher.readyCountCalls)
 			}
 		})
 	}
+}
+
+func TestEbookMetadataBackfillUnsetAndValidEnvironment(t *testing.T) {
+	t.Run("unset", func(t *testing.T) {
+		t.Setenv("SILO_EBOOK_BACKFILL_MAX_CLAIMS", "")
+		t.Setenv("SILO_EBOOK_BACKFILL_BATCH_DELAY", "")
+		task := NewBackfillEbookMetadataTask(&fakeEbookMetadataEnricher{})
+		if task.configErr != nil || task.maxClaims != 0 || task.batchDelay != 0 {
+			t.Fatalf("unset controls = (%d, %s, %v)", task.maxClaims, task.batchDelay, task.configErr)
+		}
+	})
+	t.Run("valid", func(t *testing.T) {
+		t.Setenv("SILO_EBOOK_BACKFILL_MAX_CLAIMS", " 20 ")
+		t.Setenv("SILO_EBOOK_BACKFILL_BATCH_DELAY", " 1s ")
+		task := NewBackfillEbookMetadataTask(&fakeEbookMetadataEnricher{})
+		if task.configErr != nil || task.maxClaims != 20 || task.batchDelay != time.Second {
+			t.Fatalf("valid controls = (%d, %s, %v)", task.maxClaims, task.batchDelay, task.configErr)
+		}
+	})
 }
 
 func TestEbookMetadataSyncIgnoresBackfillCanaryEnvironment(t *testing.T) {
@@ -391,8 +464,8 @@ func TestEbookMetadataTaskTreatsBudgetAsCleanDeferredCompletion(t *testing.T) {
 	if err := json.Unmarshal(progress.results[len(progress.results)-1], &result); err != nil {
 		t.Fatalf("result JSON error: %v", err)
 	}
-	if result.Remaining != 5 || result.Deferred != 5 {
-		t.Fatalf("budget result = %+v, want remaining=5 deferred=5", result)
+	if result.Remaining != 5 || result.Deferred != 0 {
+		t.Fatalf("budget result = %+v, want remaining=5 without double-counting it as deferred", result)
 	}
 	if got := progress.percents[len(progress.percents)-1]; got >= 100 {
 		t.Fatalf("budget-limited progress = %.1f, must remain below 100", got)
