@@ -22,6 +22,8 @@ func TestEnrichmentQueueClaimQueryUsesAtomicLeasedClaims(t *testing.T) {
 		"FOR UPDATE SKIP LOCKED",
 		"status = 'pending' OR (status = 'running' AND lease_until < now())",
 		"next_attempt_at <= now()",
+		"$3 = 'incremental' AND priority >= 0",
+		"$3 = 'legacy' AND priority < 0",
 		"priority + FLOOR(EXTRACT(EPOCH FROM (now() - next_attempt_at)) / 3600)::integer",
 		"SET status = 'running'",
 		"lease_until = now() + $2::interval",
@@ -33,6 +35,32 @@ func TestEnrichmentQueueClaimQueryUsesAtomicLeasedClaims(t *testing.T) {
 		if !strings.Contains(query, fragment) {
 			t.Fatalf("claim query missing %q:\n%s", fragment, claimEnrichmentJobsQuery)
 		}
+	}
+}
+
+func TestEnrichmentQueueReadyCountUsesTheSameScopeAsClaims(t *testing.T) {
+	query := strings.Join(strings.Fields(countReadyEnrichmentJobsQuery), " ")
+	for _, fragment := range []string{
+		"SELECT COUNT(*)",
+		"next_attempt_at <= now()",
+		"status = 'pending' OR (status = 'running' AND lease_until < now())",
+		"$1 = 'incremental' AND priority >= 0",
+		"$1 = 'legacy' AND priority < 0",
+	} {
+		if !strings.Contains(query, fragment) {
+			t.Fatalf("ready-count query missing %q:\n%s", fragment, countReadyEnrichmentJobsQuery)
+		}
+	}
+}
+
+func TestEnrichmentScopeValidation(t *testing.T) {
+	for _, scope := range []EnrichmentScope{EnrichmentScopeIncremental, EnrichmentScopeLegacy} {
+		if err := scope.validate(); err != nil {
+			t.Fatalf("validate(%q) error = %v", scope, err)
+		}
+	}
+	if err := EnrichmentScope("everything").validate(); err == nil {
+		t.Fatal("unknown enrichment scope was accepted")
 	}
 }
 

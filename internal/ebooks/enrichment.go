@@ -99,12 +99,22 @@ type enrichmentItemRow struct {
 }
 
 type enrichmentQueue interface {
-	ClaimBatch(ctx context.Context, limit int, leaseDuration time.Duration) ([]EnrichmentJob, error)
+	ClaimBatch(ctx context.Context, scope EnrichmentScope, limit int, leaseDuration time.Duration) ([]EnrichmentJob, error)
+	ReadyCount(ctx context.Context, scope EnrichmentScope) (int, error)
 	CheckClaim(ctx context.Context, job EnrichmentJob) error
 	Complete(ctx context.Context, job EnrichmentJob, outcome EnrichmentOutcome, refreshAfter time.Duration) error
 	Fail(ctx context.Context, job EnrichmentJob, errorClass EnrichmentErrorClass, message string, retryAfter time.Duration) error
 	Release(ctx context.Context, job EnrichmentJob) error
 	Discard(ctx context.Context, job EnrichmentJob) error
+}
+
+type EnrichmentRunResult struct {
+	Claimed   int `json:"claimed"`
+	Enriched  int `json:"enriched"`
+	NoMatch   int `json:"no_match"`
+	Failed    int `json:"failed"`
+	Deferred  int `json:"deferred"`
+	Remaining int `json:"remaining"`
 }
 
 // Enricher drives the ebook metadata enrichment sweep.
@@ -173,9 +183,12 @@ func (e *Enricher) SetLiteraryWorkLinker(linker literaryWorkLinker) {
 	e.workLinker = linker
 }
 
-func (e *Enricher) Run(ctx context.Context) (int, error) {
+func (e *Enricher) Run(ctx context.Context, scope EnrichmentScope) (EnrichmentRunResult, error) {
 	if e == nil {
-		return 0, nil
+		return EnrichmentRunResult{}, nil
+	}
+	if err := scope.validate(); err != nil {
+		return EnrichmentRunResult{}, err
 	}
 
 	queue := e.queue
@@ -183,14 +196,18 @@ func (e *Enricher) Run(ctx context.Context) (int, error) {
 		queue = NewEnrichmentQueue(e.pool)
 	}
 	if queue == nil || (e.chainRepo == nil && e.enrichClaimedItemFn == nil) {
-		return 0, nil
+		return EnrichmentRunResult{}, nil
 	}
-	jobs, err := queue.ClaimBatch(ctx, e.claimLimit(), defaultEnrichmentLease)
+	jobs, err := queue.ClaimBatch(ctx, scope, e.claimLimit(), defaultEnrichmentLease)
 	if err != nil {
-		return 0, fmt.Errorf("ebook enrichment: claim batch: %w", err)
+		return EnrichmentRunResult{}, fmt.Errorf("ebook enrichment: claim batch: %w", err)
 	}
 	if len(jobs) == 0 {
-		return 0, nil
+		remaining, countErr := queue.ReadyCount(ctx, scope)
+		if countErr != nil {
+			return EnrichmentRunResult{}, fmt.Errorf("ebook enrichment: count remaining: %w", countErr)
+		}
+		return EnrichmentRunResult{Remaining: remaining}, nil
 	}
 
 	loadItems := e.loadClaimedItems
@@ -200,7 +217,8 @@ func (e *Enricher) Run(ctx context.Context) (int, error) {
 	items, err := loadItems(ctx, jobs)
 	if err != nil {
 		e.releaseJobs(queue, jobs)
-		return 0, fmt.Errorf("ebook enrichment: load claimed items: %w", err)
+		return EnrichmentRunResult{Claimed: len(jobs), Deferred: len(jobs)},
+			fmt.Errorf("ebook enrichment: load claimed items: %w", err)
 	}
 
 	slog.InfoContext(ctx, "ebook enrichment: sweep started", "component", "ebooks",
@@ -212,13 +230,22 @@ func (e *Enricher) Run(ctx context.Context) (int, error) {
 	if e.enrichClaimedItemFn != nil {
 		enrichItem = e.enrichClaimedItemFn
 	}
-	enriched, runErr := e.runQueueBatch(ctx, queue, jobs, items, enrichItem)
+	result, runErr := e.runQueueBatch(ctx, queue, jobs, items, enrichItem)
+	remaining, countErr := queue.ReadyCount(ctx, scope)
+	result.Remaining = remaining
+	if countErr != nil {
+		runErr = errors.Join(runErr, fmt.Errorf("ebook enrichment: count remaining: %w", countErr))
+	}
 
 	slog.InfoContext(ctx, "ebook enrichment: sweep complete", "component", "ebooks",
 		"attempted", len(items),
-		"enriched", enriched,
+		"enriched", result.Enriched,
+		"no_match", result.NoMatch,
+		"failed", result.Failed,
+		"deferred", result.Deferred,
+		"remaining", result.Remaining,
 	)
-	return enriched, runErr
+	return result, runErr
 }
 
 func (e *Enricher) claimLimit() int {
@@ -239,7 +266,8 @@ func (e *Enricher) runQueueBatch(
 	jobs []EnrichmentJob,
 	items []enrichmentItemRow,
 	enrichFn func(context.Context, enrichmentItemRow) (EnrichmentOutcome, error),
-) (int, error) {
+) (EnrichmentRunResult, error) {
+	result := EnrichmentRunResult{Claimed: len(jobs)}
 	claimedJobs := make(map[string]EnrichmentJob, len(jobs))
 	for _, job := range jobs {
 		claimedJobs[job.ContentID] = job
@@ -253,6 +281,8 @@ func (e *Enricher) runQueueBatch(
 		if _, ok := loaded[job.ContentID]; !ok {
 			if err := e.discardJob(queue, job); err != nil && !errors.Is(err, ErrEnrichmentLeaseLost) {
 				transitionErrs = append(transitionErrs, fmt.Errorf("%s: %w", job.ContentID, err))
+			} else if err == nil {
+				result.Deferred++
 			}
 		}
 	}
@@ -265,7 +295,7 @@ func (e *Enricher) runQueueBatch(
 		workers = len(items)
 	}
 	if workers == 0 {
-		return 0, errors.Join(transitionErrs...)
+		return result, errors.Join(transitionErrs...)
 	}
 	itemTimeout := e.itemTimeout
 	if itemTimeout <= 0 || itemTimeout >= defaultEnrichmentLease {
@@ -276,6 +306,9 @@ func (e *Enricher) runQueueBatch(
 	var (
 		wg           sync.WaitGroup
 		enriched     int64
+		noMatch      int64
+		failed       int64
+		deferred     int64
 		transitionMu sync.Mutex
 	)
 	recordTransitionError := func(contentID string, err error) {
@@ -324,6 +357,9 @@ func (e *Enricher) runQueueBatch(
 						0,
 					)
 					recordTransitionError(item.ContentID, transitionErr)
+					if transitionErr == nil {
+						atomic.AddInt64(&failed, 1)
+					}
 					continue
 				}
 				if errors.Is(enrichErr, context.Canceled) {
@@ -346,6 +382,9 @@ func (e *Enricher) runQueueBatch(
 						recordTransitionError(item.ContentID, e.releaseJob(queue, job))
 					}
 					recordTransitionError(item.ContentID, transitionErr)
+					if transitionErr == nil {
+						atomic.AddInt64(&failed, 1)
+					}
 					continue
 				}
 				transitionErr := e.completeJob(queue, ctx, job, outcome)
@@ -360,6 +399,10 @@ func (e *Enricher) runQueueBatch(
 				}
 				if outcome == EnrichmentOutcomeSuccess {
 					atomic.AddInt64(&enriched, 1)
+				} else if outcome == EnrichmentOutcomeNoMatch {
+					atomic.AddInt64(&noMatch, 1)
+				} else {
+					atomic.AddInt64(&deferred, 1)
 				}
 			}
 		}()
@@ -373,7 +416,11 @@ func (e *Enricher) runQueueBatch(
 	if ctx.Err() != nil {
 		transitionErrs = append([]error{ctx.Err()}, transitionErrs...)
 	}
-	return int(enriched), errors.Join(transitionErrs...)
+	result.Enriched += int(enriched)
+	result.NoMatch += int(noMatch)
+	result.Failed += int(failed)
+	result.Deferred += int(deferred)
+	return result, errors.Join(transitionErrs...)
 }
 
 func (e *Enricher) releaseJobs(queue enrichmentQueue, jobs []EnrichmentJob) {

@@ -37,6 +37,22 @@ const (
 
 var ErrEnrichmentLeaseLost = errors.New("ebook enrichment lease lost")
 
+type EnrichmentScope string
+
+const (
+	EnrichmentScopeIncremental EnrichmentScope = "incremental"
+	EnrichmentScopeLegacy      EnrichmentScope = "legacy"
+)
+
+func (s EnrichmentScope) validate() error {
+	switch s {
+	case EnrichmentScopeIncremental, EnrichmentScopeLegacy:
+		return nil
+	default:
+		return fmt.Errorf("unsupported ebook enrichment scope %q", s)
+	}
+}
+
 type EnrichmentJob struct {
 	ContentID       string
 	Token           string
@@ -144,6 +160,10 @@ var claimEnrichmentJobsQuery = `
 		FROM ebook_enrichment_state
 		WHERE next_attempt_at <= now()
 		  AND (status = 'pending' OR (status = 'running' AND lease_until < now()))
+		  AND (
+			($3 = 'incremental' AND priority >= 0)
+			OR ($3 = 'legacy' AND priority < 0)
+		  )
 		ORDER BY
 			(priority + FLOOR(EXTRACT(EPOCH FROM (now() - next_attempt_at)) / 3600)::integer) DESC,
 			priority DESC,
@@ -164,9 +184,17 @@ var claimEnrichmentJobsQuery = `
 	RETURNING state.content_id, state.claim_token, state.attempts, state.last_attempt_at, state.protected_fields
 `
 
-func (q *EnrichmentQueue) ClaimBatch(ctx context.Context, limit int, leaseDuration time.Duration) ([]EnrichmentJob, error) {
+func (q *EnrichmentQueue) ClaimBatch(
+	ctx context.Context,
+	scope EnrichmentScope,
+	limit int,
+	leaseDuration time.Duration,
+) ([]EnrichmentJob, error) {
 	if q == nil || q.pool == nil {
 		return nil, errors.New("ebook enrichment queue is not configured")
+	}
+	if err := scope.validate(); err != nil {
+		return nil, err
 	}
 	if limit <= 0 {
 		return nil, nil
@@ -175,7 +203,7 @@ func (q *EnrichmentQueue) ClaimBatch(ctx context.Context, limit int, leaseDurati
 		leaseDuration = defaultEnrichmentLease
 	}
 
-	rows, err := q.pool.Query(ctx, claimEnrichmentJobsQuery, limit, postgresInterval(leaseDuration))
+	rows, err := q.pool.Query(ctx, claimEnrichmentJobsQuery, limit, postgresInterval(leaseDuration), string(scope))
 	if err != nil {
 		return nil, err
 	}
@@ -193,6 +221,31 @@ func (q *EnrichmentQueue) ClaimBatch(ctx context.Context, limit int, leaseDurati
 		return nil, err
 	}
 	return jobs, nil
+}
+
+var countReadyEnrichmentJobsQuery = `
+	SELECT COUNT(*)
+	FROM ebook_enrichment_state
+	WHERE next_attempt_at <= now()
+	  AND (status = 'pending' OR (status = 'running' AND lease_until < now()))
+	  AND (
+		($1 = 'incremental' AND priority >= 0)
+		OR ($1 = 'legacy' AND priority < 0)
+	  )
+`
+
+func (q *EnrichmentQueue) ReadyCount(ctx context.Context, scope EnrichmentScope) (int, error) {
+	if q == nil || q.pool == nil {
+		return 0, errors.New("ebook enrichment queue is not configured")
+	}
+	if err := scope.validate(); err != nil {
+		return 0, err
+	}
+	var count int
+	if err := q.pool.QueryRow(ctx, countReadyEnrichmentJobsQuery, string(scope)).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 var checkEnrichmentClaimQuery = `

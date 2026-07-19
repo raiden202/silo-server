@@ -227,12 +227,13 @@ func TestEnricherRunTransitionsClaimedJobsByOutcome(t *testing.T) {
 		},
 	}
 
-	enriched, err := e.Run(context.Background())
+	result, err := e.Run(context.Background(), EnrichmentScopeIncremental)
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	if enriched != 1 {
-		t.Fatalf("Run() enriched = %d, want 1", enriched)
+	want := EnrichmentRunResult{Claimed: 4, Enriched: 1, NoMatch: 1, Failed: 1, Deferred: 1}
+	if result != want {
+		t.Fatalf("Run() result = %+v, want %+v", result, want)
 	}
 	if queue.claimCalls != 1 {
 		t.Fatalf("claim calls = %d, want 1", queue.claimCalls)
@@ -281,7 +282,7 @@ func TestEnricherRunReleasesEveryLeaseOnCancellation(t *testing.T) {
 		},
 	}
 
-	_, err := e.Run(ctx)
+	_, err := e.Run(ctx, EnrichmentScopeIncremental)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run() error = %v, want context.Canceled", err)
 	}
@@ -316,7 +317,7 @@ func TestEnricherRunReleasesLeaseWhenCompletionLosesContext(t *testing.T) {
 		},
 	}
 
-	_, err := e.Run(ctx)
+	_, err := e.Run(ctx, EnrichmentScopeIncremental)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run() error = %v, want context.Canceled", err)
 	}
@@ -347,7 +348,7 @@ func TestEnricherRunDiscardsClaimedRowsThatAreNoLongerEligible(t *testing.T) {
 		},
 	}
 
-	if _, err := e.Run(context.Background()); err != nil {
+	if _, err := e.Run(context.Background(), EnrichmentScopeIncremental); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
 	if got := strings.Join(queue.discarded, ","); got != "became-manga" {
@@ -380,7 +381,7 @@ func TestEnricherRunBoundsEachItemBelowTheLease(t *testing.T) {
 	}
 
 	started := time.Now()
-	if _, err := e.Run(context.Background()); err != nil {
+	if _, err := e.Run(context.Background(), EnrichmentScopeIncremental); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
 	if elapsed := time.Since(started); elapsed > time.Second {
@@ -408,7 +409,7 @@ func TestEnricherRunClaimsAtMostOneJobPerWorker(t *testing.T) {
 		},
 	}
 
-	if _, err := e.Run(context.Background()); err != nil {
+	if _, err := e.Run(context.Background(), EnrichmentScopeIncremental); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
 	if queue.claimLimit != 4 {
@@ -437,7 +438,7 @@ func TestEnricherRunInjectsExactClaimOwnershipCheck(t *testing.T) {
 		},
 	}
 
-	if _, err := e.Run(context.Background()); err != nil {
+	if _, err := e.Run(context.Background(), EnrichmentScopeIncremental); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
 	if queue.claimCheckCalls != 1 {
@@ -1084,6 +1085,8 @@ type fakeEnrichmentQueue struct {
 	claimCalls                int
 	claimLimit                int
 	leaseDuration             time.Duration
+	claimScope                EnrichmentScope
+	remaining                 int
 	completed                 map[string]EnrichmentOutcome
 	failed                    map[string]EnrichmentErrorClass
 	released                  []string
@@ -1097,13 +1100,20 @@ type fakeEnrichmentQueue struct {
 	completeErr               error
 }
 
-func (f *fakeEnrichmentQueue) ClaimBatch(_ context.Context, limit int, leaseDuration time.Duration) ([]EnrichmentJob, error) {
+func (f *fakeEnrichmentQueue) ClaimBatch(_ context.Context, scope EnrichmentScope, limit int, leaseDuration time.Duration) ([]EnrichmentJob, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.claimCalls++
 	f.claimLimit = limit
 	f.leaseDuration = leaseDuration
+	f.claimScope = scope
 	return append([]EnrichmentJob(nil), f.jobs...), nil
+}
+
+func (f *fakeEnrichmentQueue) ReadyCount(_ context.Context, _ EnrichmentScope) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.remaining, nil
 }
 
 func (f *fakeEnrichmentQueue) Complete(_ context.Context, job EnrichmentJob, outcome EnrichmentOutcome, _ time.Duration) error {

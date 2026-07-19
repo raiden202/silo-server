@@ -2095,6 +2095,7 @@ func main() {
 		}
 		if ebookEnricher != nil {
 			taskMgr.Register(tasks.NewSyncEbookMetadataTask(ebookEnricher))
+			taskMgr.Register(tasks.NewBackfillEbookMetadataTask(ebookEnricher))
 		}
 		if mangaEnricher != nil {
 			taskMgr.Register(tasks.NewSyncMangaMetadataTask(mangaEnricher))

@@ -155,7 +155,7 @@ $$;
 -- +goose StatementEnd
 
 CREATE INDEX CONCURRENTLY IF NOT EXISTS ebook_enrichment_state_claim_idx
-    ON public.ebook_enrichment_state (next_attempt_at, priority DESC, updated_at)
+    ON public.ebook_enrichment_state (priority, next_attempt_at, updated_at)
     WHERE status IN ('pending', 'running');
 
 -- +goose Down
