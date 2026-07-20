@@ -1984,7 +1984,17 @@ func (s *Scanner) ScanFile(ctx context.Context, filePath string, folder *models.
 			return err
 		}
 		if handled, err := s.reconcileVanishedFileIfNeeded(ctx, folder, cleanFile); handled {
-			return err
+			if err != nil {
+				return err
+			}
+			if info, statErr := os.Stat(scanRoot); statErr == nil && info.IsDir() {
+				if err := s.ScanAudiobookFolder(ctx, scopedFolderPaths(folder, []string{scanRoot}), false); err != nil {
+					return err
+				}
+			} else if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+				return fmt.Errorf("stat audiobook directory %s: %w", scanRoot, statErr)
+			}
+			return s.syncFolderScopedAudioLibraryState(ctx, folder.ID)
 		}
 		if err := s.ScanAudiobookFolder(ctx, scopedFolderPaths(folder, []string{scanRoot}), false); err != nil {
 			return err
@@ -2016,7 +2026,10 @@ func (s *Scanner) ScanFile(ctx context.Context, filePath string, folder *models.
 		return fmt.Errorf("unrecognized video extension: %s", ext)
 	}
 	if handled, err := s.reconcileVanishedFileIfNeeded(ctx, folder, cleanFile); handled {
-		return err
+		if err != nil {
+			return err
+		}
+		return s.syncVanishedVideoQueues(ctx, folder.ID, cleanFile)
 	}
 
 	// Look up only this specific file instead of loading the entire folder.
@@ -2163,6 +2176,20 @@ func (s *Scanner) reconcileVanishedFileIfNeeded(ctx context.Context, folder *mod
 		s.reconcileMissingEbookEnrichment(ctx, folder.ID)
 	}
 	return true, nil
+}
+
+func (s *Scanner) syncVanishedVideoQueues(ctx context.Context, folderID int, filePath string) error {
+	if s.seriesQueueSyncer != nil {
+		if err := s.seriesQueueSyncer.SyncInScope(ctx, folderID, filepath.Dir(filePath)); err != nil {
+			return fmt.Errorf("syncing series match queue after vanished file: %w", err)
+		}
+	}
+	if s.movieQueueSyncer != nil {
+		if err := s.movieQueueSyncer.SyncInScope(ctx, folderID, filepath.Clean(filePath)); err != nil {
+			return fmt.Errorf("syncing movie match queue after vanished file: %w", err)
+		}
+	}
+	return nil
 }
 
 func (s *Scanner) watchFolderContext(ctx context.Context, folderID int) (context.Context, context.CancelFunc) {

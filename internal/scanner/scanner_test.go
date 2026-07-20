@@ -12,6 +12,21 @@ import (
 	"github.com/Silo-Server/silo-server/internal/models"
 )
 
+type recordingQueueSyncer struct {
+	folderID int
+	scope    string
+}
+
+func (s *recordingQueueSyncer) SyncForFolder(context.Context, int) error {
+	return nil
+}
+
+func (s *recordingQueueSyncer) SyncInScope(_ context.Context, folderID int, scopePath string) error {
+	s.folderID = folderID
+	s.scope = scopePath
+	return nil
+}
+
 func TestCollectLogicalFilePaths_PreservesLogicalSymlinkRootPaths(t *testing.T) {
 	t.Parallel()
 
@@ -303,5 +318,22 @@ func TestScanFileMangaLibraryUsesMangaPipeline(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "folder_id=45") {
 		t.Fatalf("error = %q, want manga scanner aggregate failure", err)
+	}
+}
+
+func TestSyncVanishedVideoQueuesUsesParentAndExactFileScopes(t *testing.T) {
+	series := &recordingQueueSyncer{}
+	movie := &recordingQueueSyncer{}
+	filePath := filepath.Join("/media", "Movie", "Movie.mkv")
+	scanner := &Scanner{seriesQueueSyncer: series, movieQueueSyncer: movie}
+
+	if err := scanner.syncVanishedVideoQueues(context.Background(), 17, filePath); err != nil {
+		t.Fatalf("syncVanishedVideoQueues: %v", err)
+	}
+	if series.folderID != 17 || series.scope != filepath.Dir(filePath) {
+		t.Fatalf("series sync = folder %d scope %q", series.folderID, series.scope)
+	}
+	if movie.folderID != 17 || movie.scope != filepath.Clean(filePath) {
+		t.Fatalf("movie sync = folder %d scope %q", movie.folderID, movie.scope)
 	}
 }
