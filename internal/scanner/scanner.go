@@ -451,6 +451,13 @@ func (m walkMode) acceptsExt(ext string) bool {
 	}
 }
 
+func (m walkMode) acceptsPath(path string) bool {
+	if m == walkModeEbook {
+		return SupportsEbookFile(path)
+	}
+	return m.acceptsExt(strings.ToLower(filepath.Ext(path)))
+}
+
 func canonicalWalkPath(path string) (string, error) {
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
@@ -518,7 +525,7 @@ func walkLogicalTree(
 		if mode == walkModeMovie && shouldSkipMovieSupplementalFile(logicalPath) {
 			return nil
 		}
-		if mode.acceptsExt(strings.ToLower(filepath.Ext(logicalPath))) {
+		if mode.acceptsPath(logicalPath) {
 			*filePaths = append(*filePaths, logicalPath)
 		}
 		return nil
@@ -528,7 +535,7 @@ func walkLogicalTree(
 		if mode == walkModeMovie && shouldSkipMovieSupplementalFile(logicalPath) {
 			return nil
 		}
-		if mode.acceptsExt(strings.ToLower(filepath.Ext(logicalPath))) {
+		if mode.acceptsPath(logicalPath) {
 			*filePaths = append(*filePaths, logicalPath)
 		}
 		return nil
@@ -590,7 +597,7 @@ func walkLogicalTree(
 			if mode == walkModeMovie && shouldSkipMovieSupplementalFile(logicalChild) {
 				continue
 			}
-			if mode.acceptsExt(strings.ToLower(filepath.Ext(entry.Name()))) {
+			if mode.acceptsPath(entry.Name()) {
 				*filePaths = append(*filePaths, logicalChild)
 			}
 			continue
@@ -606,7 +613,7 @@ func walkLogicalTree(
 		if mode == walkModeMovie && shouldSkipMovieSupplementalFile(logicalChild) {
 			continue
 		}
-		if mode.acceptsExt(strings.ToLower(filepath.Ext(entry.Name()))) {
+		if mode.acceptsPath(entry.Name()) {
 			*filePaths = append(*filePaths, logicalChild)
 		}
 	}
@@ -1976,14 +1983,29 @@ func (s *Scanner) ScanFile(ctx context.Context, filePath string, folder *models.
 		if err != nil {
 			return err
 		}
+		if handled, err := s.reconcileVanishedFileIfNeeded(ctx, folder, cleanFile); handled {
+			return err
+		}
 		if err := s.ScanAudiobookFolder(ctx, scopedFolderPaths(folder, []string{scanRoot}), false); err != nil {
 			return err
 		}
 		return s.syncFolderScopedAudioLibraryState(ctx, folder.ID)
 	}
+	if librarykind.IsManga(folder.Type) {
+		if !SupportsEbookFile(cleanFile) {
+			return fmt.Errorf("unrecognized manga extension: %s", strings.ToLower(filepath.Ext(cleanFile)))
+		}
+		if handled, err := s.reconcileVanishedFileIfNeeded(ctx, folder, cleanFile); handled {
+			return err
+		}
+		return s.scanMangaPaths(ctx, folder, []string{cleanFile}, false)
+	}
 	if librarykind.IsEbook(folder.Type) {
 		if !SupportsEbookFile(cleanFile) {
 			return fmt.Errorf("unrecognized ebook extension: %s", strings.ToLower(filepath.Ext(cleanFile)))
+		}
+		if handled, err := s.reconcileVanishedFileIfNeeded(ctx, folder, cleanFile); handled {
+			return err
 		}
 		return s.scanEbookPaths(ctx, folder, []string{cleanFile}, false)
 	}
@@ -1992,6 +2014,9 @@ func (s *Scanner) ScanFile(ctx context.Context, filePath string, folder *models.
 	ext := strings.ToLower(filepath.Ext(cleanFile))
 	if !videoExtensions[ext] {
 		return fmt.Errorf("unrecognized video extension: %s", ext)
+	}
+	if handled, err := s.reconcileVanishedFileIfNeeded(ctx, folder, cleanFile); handled {
+		return err
 	}
 
 	// Look up only this specific file instead of loading the entire folder.
@@ -2099,6 +2124,45 @@ func (s *Scanner) ScanFile(ctx context.Context, filePath string, folder *models.
 		)
 	}
 	return nil
+}
+
+func (s *Scanner) reconcileVanishedFileIfNeeded(ctx context.Context, folder *models.MediaFolder, filePath string) (bool, error) {
+	if _, err := os.Stat(filePath); err == nil {
+		return false, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return true, fmt.Errorf("stat media file %s: %w", filePath, err)
+	}
+	if s == nil || s.fileRepo == nil || folder == nil {
+		return true, fmt.Errorf("reconcile vanished file: scanner repositories not configured")
+	}
+
+	file, err := s.fileRepo.GetByPath(ctx, filePath)
+	if errors.Is(err, ErrFileNotFound) {
+		return true, nil
+	}
+	if err != nil {
+		return true, fmt.Errorf("loading vanished media file %s: %w", filePath, err)
+	}
+	if file.MediaFolderID != folder.ID {
+		return true, fmt.Errorf("vanished media file %s belongs to library %d, not %d", filePath, file.MediaFolderID, folder.ID)
+	}
+	if file.MissingSince == nil {
+		if err := s.fileRepo.MarkMissing(ctx, file.ID, time.Now().UTC()); err != nil {
+			return true, fmt.Errorf("marking vanished media file %s missing: %w", filePath, err)
+		}
+	}
+	if _, _, _, err := s.sweepMissingAndReconcile(ctx, folder, false); err != nil {
+		return true, err
+	}
+	if librarykind.IsManga(folder.Type) {
+		if err := s.deleteOrphanedMangaSeries(ctx, folder.ID); err != nil {
+			return true, err
+		}
+	}
+	if librarykind.IsEbook(folder.Type) || librarykind.IsManga(folder.Type) {
+		s.reconcileMissingEbookEnrichment(ctx, folder.ID)
+	}
+	return true, nil
 }
 
 func (s *Scanner) watchFolderContext(ctx context.Context, folderID int) (context.Context, context.CancelFunc) {

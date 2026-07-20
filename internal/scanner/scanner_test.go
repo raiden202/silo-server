@@ -233,6 +233,9 @@ func TestWalkModeEbookAcceptsEbookExtensionsOnly(t *testing.T) {
 			t.Fatalf("walkModeEbook should reject %s", ext)
 		}
 	}
+	if !walkModeEbook.acceptsPath("Book.fb2.zip") {
+		t.Fatal("walkModeEbook should accept .fb2.zip compound extension")
+	}
 }
 
 func TestScanFolderEbookLibraryRoutesToEbookScanner(t *testing.T) {
@@ -282,5 +285,23 @@ func TestScanFileEbookLibraryUsesEbookPipeline(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "folder_id=44") {
 		t.Fatalf("error = %q, want ebook scanner aggregate failure", err)
+	}
+}
+
+func TestScanFileMangaLibraryUsesMangaPipeline(t *testing.T) {
+	filePath := filepath.Join(t.TempDir(), "chapter.cbz")
+	if err := os.WriteFile(filePath, []byte("not a real cbz"), 0o644); err != nil {
+		t.Fatalf("write fake manga: %v", err)
+	}
+
+	err := (&Scanner{}).ScanFile(context.Background(), filePath, &models.MediaFolder{ID: 45, Type: "manga"})
+	if err == nil {
+		t.Fatal("ScanFile returned nil, want manga parse failure")
+	}
+	if strings.Contains(err.Error(), "unrecognized video extension") {
+		t.Fatalf("ScanFile used video extension gate: %v", err)
+	}
+	if !strings.Contains(err.Error(), "folder_id=45") {
+		t.Fatalf("error = %q, want manga scanner aggregate failure", err)
 	}
 }

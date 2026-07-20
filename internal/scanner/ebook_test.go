@@ -1478,6 +1478,21 @@ func TestCollectEbookRootScansTreatsSingleFileRootAsNonReconciling(t *testing.T)
 	}
 }
 
+func TestCollectEbookRootScansIncludesCompoundFB2ZipFile(t *testing.T) {
+	fileRoot := filepath.Join(t.TempDir(), "book.fb2.zip")
+	if err := os.WriteFile(fileRoot, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write ebook: %v", err)
+	}
+
+	scans, err := collectEbookRootScans(context.Background(), 44, []string{fileRoot})
+	if err != nil {
+		t.Fatalf("collectEbookRootScans: %v", err)
+	}
+	if len(scans) != 1 || len(scans[0].files) != 1 || scans[0].files[0] != fileRoot {
+		t.Fatalf("scans = %+v, want compound-extension file indexed", scans)
+	}
+}
+
 func TestCollectEbookRootScansMidWalkSubtreeErrorExcludesRoot(t *testing.T) {
 	if os.Getuid() == 0 {
 		t.Skip("permission-based subtree failure cannot be simulated as root")
