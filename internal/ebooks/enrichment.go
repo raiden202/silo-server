@@ -116,6 +116,7 @@ type EnrichmentRunResult struct {
 	NoMatch   int  `json:"no_match"`
 	Failed    int  `json:"failed"`
 	Deferred  int  `json:"deferred"`
+	Discarded int  `json:"discarded"`
 	Remaining int  `json:"remaining"`
 	HasMore   bool `json:"-"`
 }
@@ -282,6 +283,7 @@ func (e *Enricher) RunLimited(ctx context.Context, scope EnrichmentScope, maxCla
 		"no_match", result.NoMatch,
 		"failed", result.Failed,
 		"deferred", result.Deferred,
+		"discarded", result.Discarded,
 		"has_more", result.HasMore,
 	)
 	return result, runErr
@@ -325,7 +327,7 @@ func (e *Enricher) runQueueBatch(
 			if err := e.discardJob(queue, job); err != nil && !errors.Is(err, ErrEnrichmentLeaseLost) {
 				transitionErrs = append(transitionErrs, fmt.Errorf("%s: %w", job.ContentID, err))
 			} else if err == nil {
-				result.Deferred++
+				result.Discarded++
 			}
 		}
 	}
@@ -403,10 +405,6 @@ func (e *Enricher) runQueueBatch(
 					if transitionErr == nil {
 						atomic.AddInt64(&failed, 1)
 					}
-					continue
-				}
-				if errors.Is(enrichErr, context.Canceled) {
-					recordTransitionError(item.ContentID, e.releaseJob(queue, job))
 					continue
 				}
 				if enrichErr != nil {

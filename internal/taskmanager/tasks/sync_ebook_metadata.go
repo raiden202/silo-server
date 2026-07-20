@@ -231,6 +231,7 @@ func addEbookEnrichmentResult(total *ebooks.EnrichmentRunResult, batch ebooks.En
 	total.NoMatch += batch.NoMatch
 	total.Failed += batch.Failed
 	total.Deferred += batch.Deferred
+	total.Discarded += batch.Discarded
 }
 
 func reportEbookEnrichmentProgress(
@@ -246,12 +247,13 @@ func reportEbookEnrichmentProgress(
 		percent = 100
 	}
 	progress.Report(percent, fmt.Sprintf(
-		"Claimed %d, enriched %d, no match %d, failed %d, deferred %d, remaining %d",
+		"Claimed %d, enriched %d, no match %d, failed %d, deferred %d, discarded %d, remaining %d",
 		result.Claimed,
 		result.Enriched,
 		result.NoMatch,
 		result.Failed,
 		result.Deferred,
+		result.Discarded,
 		result.Remaining,
 	))
 }
@@ -287,13 +289,14 @@ func reportEbookEnrichmentPause(
 		percent = 99
 	}
 	progress.Report(percent, fmt.Sprintf(
-		"%s Claimed %d, enriched %d, no match %d, failed %d, deferred %d, remaining %d",
+		"%s Claimed %d, enriched %d, no match %d, failed %d, deferred %d, discarded %d, remaining %d",
 		message,
 		result.Claimed,
 		result.Enriched,
 		result.NoMatch,
 		result.Failed,
 		result.Deferred,
+		result.Discarded,
 		result.Remaining,
 	))
 }

@@ -402,7 +402,8 @@ func TestEnricherRunDiscardsClaimedRowsThatAreNoLongerEligible(t *testing.T) {
 		},
 	}
 
-	if _, err := e.Run(context.Background(), EnrichmentScopeIncremental); err != nil {
+	result, err := e.Run(context.Background(), EnrichmentScopeIncremental)
+	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
 	if got := strings.Join(queue.discarded, ","); got != "became-manga" {
@@ -413,6 +414,43 @@ func TestEnricherRunDiscardsClaimedRowsThatAreNoLongerEligible(t *testing.T) {
 	}
 	if len(queue.released) != 0 {
 		t.Fatalf("ineligible rows were released back into immediate churn: %v", queue.released)
+	}
+	if result.Discarded != 1 {
+		t.Fatalf("Discarded = %d, want 1", result.Discarded)
+	}
+	if result.Deferred != 1 {
+		t.Fatalf("Deferred = %d, want 1 (the skipped completion only); a discarded row is terminal, not deferred for retry", result.Deferred)
+	}
+}
+
+func TestEnricherRunCountsUpstreamCancellationAsTransientFailure(t *testing.T) {
+	queue := &fakeEnrichmentQueue{
+		jobs: []EnrichmentJob{{ContentID: "cancel-happy", Token: "cancel-token", Attempts: 1}},
+	}
+	e := &Enricher{
+		queue:     queue,
+		batchSize: 1,
+		workers:   1,
+		loadClaimedItemsFn: func(context.Context, []EnrichmentJob) ([]enrichmentItemRow, error) {
+			return []enrichmentItemRow{{ContentID: "cancel-happy"}}, nil
+		},
+		enrichClaimedItemFn: func(context.Context, enrichmentItemRow) (EnrichmentOutcome, error) {
+			return "", context.Canceled
+		},
+	}
+
+	result, err := e.Run(context.Background(), EnrichmentScopeIncremental)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if got := queue.failed["cancel-happy"]; got != EnrichmentErrorTransient {
+		t.Fatalf("failure class = %q, want transient", got)
+	}
+	if result.Failed != 1 {
+		t.Fatalf("Failed = %d, want 1; an uncounted claim blinds the no-progress circuit breaker", result.Failed)
+	}
+	if len(queue.released) != 0 {
+		t.Fatalf("provider-canceled work was released into immediate reclaim churn: %v", queue.released)
 	}
 }
 
