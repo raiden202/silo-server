@@ -337,6 +337,41 @@ func TestParseEbookEPUBMetadataHandlesWindows1251OPF(t *testing.T) {
 	}
 }
 
+func TestParseEbookFileAppliesExternalOPFSidecar(t *testing.T) {
+	dir := t.TempDir()
+	bookPath := filepath.Join(dir, "Dune.cbr")
+	if err := os.WriteFile(bookPath, nil, 0o644); err != nil {
+		t.Fatalf("write book: %v", err)
+	}
+	sidecar := `<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <metadata>
+    <dc:title>Dune</dc:title>
+    <dc:creator>Frank Herbert</dc:creator>
+    <dc:description>A desert planet and a dangerous inheritance.</dc:description>
+    <dc:identifier>9780441172719</dc:identifier>
+    <dc:subject>Science Fiction</dc:subject>
+  </metadata>
+</package>`
+	if err := os.WriteFile(filepath.Join(dir, "Dune.opf"), []byte(sidecar), 0o644); err != nil {
+		t.Fatalf("write sidecar: %v", err)
+	}
+
+	got, err := parseEbookFile(bookPath)
+	if err != nil {
+		t.Fatalf("parseEbookFile: %v", err)
+	}
+	if got.Title != "Dune" || len(got.Authors) != 1 || got.Authors[0] != "Frank Herbert" {
+		t.Fatalf("sidecar identity = title %q authors %v", got.Title, got.Authors)
+	}
+	if got.Description == "" || got.ISBN != "9780441172719" {
+		t.Fatalf("sidecar metadata = description %q ISBN %q", got.Description, got.ISBN)
+	}
+	if got.Format != "cbr" {
+		t.Fatalf("Format = %q, want original file format cbr", got.Format)
+	}
+}
+
 func TestParseEbookEPUBMetadataAllowsXMLVersion11(t *testing.T) {
 	path := writeTestEPUBWithOPFBytes(t, []byte(`<?xml version="1.1" encoding="UTF-8"?>
 <package xmlns:dc="http://purl.org/dc/elements/1.1/"><metadata>

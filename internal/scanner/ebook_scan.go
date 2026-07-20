@@ -489,6 +489,14 @@ func (s *Scanner) reconcileEbookFile(ctx context.Context, folder *models.MediaFo
 	}
 	size := info.Size()
 	modifiedAt := normalizeFileModifiedAt(info.ModTime())
+	if sidecarPath := ebookOPFSidecarPath(filePath); sidecarPath != "" {
+		if sidecarInfo, statErr := os.Stat(sidecarPath); statErr == nil {
+			sidecarModifiedAt := normalizeFileModifiedAt(sidecarInfo.ModTime())
+			if sidecarModifiedAt.After(modifiedAt) {
+				modifiedAt = sidecarModifiedAt
+			}
+		}
+	}
 
 	existingContentID, isUnchanged, skipErr := s.ebookFileShouldSkip(ctx, folder, filePath, size, modifiedAt)
 	if skipErr != nil {
