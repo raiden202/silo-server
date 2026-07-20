@@ -46,7 +46,9 @@ type SyncEbookMetadataTask struct {
 	*ebookMetadataTask
 }
 
-// BackfillEbookMetadataTask drains the legacy ebook backlog only when manually run.
+// BackfillEbookMetadataTask drains the legacy ebook backlog on its own
+// interval, isolated from the scheduled sync lane so backlog work never
+// competes with fresh-item enrichment.
 type BackfillEbookMetadataTask struct {
 	*ebookMetadataTask
 }
@@ -73,7 +75,8 @@ func NewBackfillEbookMetadataTask(enricher ebookMetadataEnricher) *BackfillEbook
 		scope:       ebooks.EnrichmentScopeLegacy,
 		key:         "backfill_ebook_metadata",
 		name:        "Backfill Ebook Metadata",
-		description: "Manually enriches the legacy ebook backlog without competing with scheduled metadata sync",
+		description: "Enriches the legacy ebook backlog without competing with scheduled metadata sync",
+		triggers:    []taskmanager.TriggerConfig{{Type: taskmanager.TriggerTypeInterval, IntervalMs: 15 * 60 * 1000}},
 		budget:      ebookMetadataExecutionBudget,
 		now:         time.Now,
 		maxClaims:   maxClaims,

@@ -90,8 +90,11 @@ func TestEbookMetadataTaskPropertiesAndScopes(t *testing.T) {
 	if len(triggers) != 1 || triggers[0].Type != taskmanager.TriggerTypeInterval || triggers[0].IntervalMs != 5*60*1000 {
 		t.Fatalf("sync DefaultTriggers() = %#v", triggers)
 	}
-	if triggers := backfillTask.DefaultTriggers(); len(triggers) != 0 {
-		t.Fatalf("backfill DefaultTriggers() = %#v, want none", triggers)
+	backfillTriggers := backfillTask.DefaultTriggers()
+	if len(backfillTriggers) != 1 ||
+		backfillTriggers[0].Type != taskmanager.TriggerTypeInterval ||
+		backfillTriggers[0].IntervalMs != 15*60*1000 {
+		t.Fatalf("backfill DefaultTriggers() = %#v, want a 15m interval", backfillTriggers)
 	}
 }
 
