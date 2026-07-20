@@ -117,6 +117,13 @@ func ebookOPFSidecarPath(ebookPath string) string {
 
 func parseEbookOPFSidecar(sidecarPath string) (parsedEbook, error) {
 	var book parsedEbook
+	leafInfo, err := os.Lstat(sidecarPath)
+	if err != nil {
+		return book, fmt.Errorf("stat ebook OPF sidecar %s: %w", sidecarPath, err)
+	}
+	if !leafInfo.Mode().IsRegular() {
+		return book, fmt.Errorf("ebook OPF sidecar is not a regular file: %s", sidecarPath)
+	}
 	file, err := os.Open(sidecarPath)
 	if err != nil {
 		return book, fmt.Errorf("open ebook OPF sidecar %s: %w", sidecarPath, err)
@@ -126,6 +133,13 @@ func parseEbookOPFSidecar(sidecarPath string) (parsedEbook, error) {
 	info, err := file.Stat()
 	if err != nil {
 		return book, fmt.Errorf("stat ebook OPF sidecar %s: %w", sidecarPath, err)
+	}
+	// Close the symlink-swap window: os.Open follows symlinks, so a leaf swapped
+	// to a symlink between the Lstat above and this Open would be followed to its
+	// target. Reject unless the opened handle is the exact file Lstat inspected,
+	// so metadata can never be ingested from outside the library root.
+	if !os.SameFile(leafInfo, info) {
+		return book, fmt.Errorf("ebook OPF sidecar is not a regular file: %s", sidecarPath)
 	}
 	if info.Size() > maxEPUBMetadataEntrySize {
 		return book, fmt.Errorf("ebook OPF sidecar too large: %s", sidecarPath)

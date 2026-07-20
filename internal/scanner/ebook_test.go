@@ -372,6 +372,62 @@ func TestParseEbookFileAppliesExternalOPFSidecar(t *testing.T) {
 	}
 }
 
+func TestParseEbookOPFSidecarRejectsSymlinkedSidecar(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "outside-library.opf")
+	sidecar := `<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <metadata><dc:title>Smuggled</dc:title></metadata>
+</package>`
+	if err := os.WriteFile(target, []byte(sidecar), 0o644); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	link := filepath.Join(dir, "Dune.opf")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	if _, err := parseEbookOPFSidecar(link); err == nil {
+		t.Fatal("parseEbookOPFSidecar accepted a symlinked sidecar; a leaf swapped to a symlink after the Lstat gate would be followed to its target")
+	}
+}
+
+func TestInsertEbookISBNProviderIDReplacesStaleISBN(t *testing.T) {
+	exec := &recordingEbookExecutor{}
+	if err := insertEbookISBNProviderID(context.Background(), exec, "book-1", "9780441172719"); err != nil {
+		t.Fatalf("insertEbookISBNProviderID: %v", err)
+	}
+	if len(exec.queries) != 1 {
+		t.Fatalf("queries = %d, want 1", len(exec.queries))
+	}
+	query := strings.Join(strings.Fields(exec.queries[0]), " ")
+	if !strings.Contains(query, "ON CONFLICT (content_id, provider) DO UPDATE") ||
+		!strings.Contains(query, "provider_id = EXCLUDED.provider_id") {
+		t.Fatalf("ISBN insert does not replace a stale value on rescan:\n%s", query)
+	}
+}
+
+func TestInsertEbookISBNProviderIDToleratesISBNOwnedByAnotherItem(t *testing.T) {
+	exec := &erroringEbookExecutor{err: &pgconn.PgError{Code: "23505"}}
+	if err := insertEbookISBNProviderID(context.Background(), exec, "book-1", "9780441172719"); err != nil {
+		t.Fatalf("unique-violation on the (provider, provider_id) constraint must not fail the scan, got %v", err)
+	}
+
+	boom := errors.New("connection lost")
+	exec = &erroringEbookExecutor{err: boom}
+	if err := insertEbookISBNProviderID(context.Background(), exec, "book-1", "9780441172719"); !errors.Is(err, boom) {
+		t.Fatalf("non-unique-violation error = %v, want %v", err, boom)
+	}
+}
+
+type erroringEbookExecutor struct {
+	err error
+}
+
+func (e *erroringEbookExecutor) Exec(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
+	return pgconn.CommandTag{}, e.err
+}
+
 func TestParseEbookEPUBMetadataAllowsXMLVersion11(t *testing.T) {
 	path := writeTestEPUBWithOPFBytes(t, []byte(`<?xml version="1.1" encoding="UTF-8"?>
 <package xmlns:dc="http://purl.org/dc/elements/1.1/"><metadata>

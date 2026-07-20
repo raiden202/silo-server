@@ -1304,8 +1304,17 @@ func insertEbookISBNProviderID(ctx context.Context, exec ebookSQLExecutor, conte
 	_, err := exec.Exec(ctx, `
 		INSERT INTO media_item_provider_ids (content_id, provider, provider_id, item_type)
 		VALUES ($1, 'isbn', $2, 'ebook')
-		ON CONFLICT DO NOTHING
+		ON CONFLICT (content_id, provider) DO UPDATE SET
+			provider_id = EXCLUDED.provider_id,
+			updated_at = NOW()
+		WHERE media_item_provider_ids.provider_id IS DISTINCT FROM EXCLUDED.provider_id
 	`, contentID, isbn)
+	// A different item may already own this ISBN under the (provider, provider_id)
+	// unique constraint; duplicate copies must not fail the scan.
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+		return nil
+	}
 	return err
 }
 
