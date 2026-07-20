@@ -490,6 +490,38 @@ func TestEnrichmentRetryPolicy(t *testing.T) {
 		}
 	})
 
+	t.Run("rate limits never requeue below the cooldown floor", func(t *testing.T) {
+		// A provider's 1s RetryInfo is request-pacing advice, not a queue
+		// horizon; adopting it verbatim re-claims the same saturated tail.
+		if got := enrichmentRetryDelay(EnrichmentErrorRateLimited, 1, time.Second); got != 15*time.Minute {
+			t.Fatalf("short-hint rate-limited retry = %s, want 15m floor", got)
+		}
+		if got := enrichmentRetryDelay(EnrichmentErrorRateLimited, 1, 0); got != 15*time.Minute {
+			t.Fatalf("no-hint rate-limited retry = %s, want 15m floor", got)
+		}
+		if got := enrichmentRetryDelay(EnrichmentErrorRateLimited, 20, 0); got != 24*time.Hour {
+			t.Fatalf("no-hint high-attempt rate-limited retry = %s, want capped backoff", got)
+		}
+	})
+
+	t.Run("cooldown floor is env tunable with a tolerant fallback", func(t *testing.T) {
+		t.Setenv("SILO_EBOOK_RATE_LIMIT_COOLDOWN", "30m")
+		if got := enrichmentRetryDelay(EnrichmentErrorRateLimited, 1, time.Second); got != 30*time.Minute {
+			t.Fatalf("tuned floor retry = %s, want 30m", got)
+		}
+		if got := enrichmentRetryDelay(EnrichmentErrorRateLimited, 1, 45*time.Minute); got != 45*time.Minute {
+			t.Fatalf("hint above tuned floor = %s, want 45m", got)
+		}
+		t.Setenv("SILO_EBOOK_RATE_LIMIT_COOLDOWN", "banana")
+		if got := enrichmentRetryDelay(EnrichmentErrorRateLimited, 1, time.Second); got != 15*time.Minute {
+			t.Fatalf("invalid floor retry = %s, want 15m default", got)
+		}
+		t.Setenv("SILO_EBOOK_RATE_LIMIT_COOLDOWN", "-5m")
+		if got := enrichmentRetryDelay(EnrichmentErrorRateLimited, 1, time.Second); got != 15*time.Minute {
+			t.Fatalf("non-positive floor retry = %s, want 15m default", got)
+		}
+	})
+
 	t.Run("permanent failures refresh after 30 days", func(t *testing.T) {
 		if got := enrichmentRetryDelay(EnrichmentErrorPermanent, 1, 0); got != 30*24*time.Hour {
 			t.Fatalf("permanent retry = %s, want 30 days", got)

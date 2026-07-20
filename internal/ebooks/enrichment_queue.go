@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -13,12 +14,23 @@ import (
 )
 
 const (
-	defaultEnrichmentLease = 10 * time.Minute
-	maxEnrichmentRetry     = 24 * time.Hour
-	transientRetryBase     = 5 * time.Minute
-	skippedRetryHorizon    = 15 * time.Minute
-	claimCandidateWindow   = maxEnrichWorkers
+	defaultEnrichmentLease   = 10 * time.Minute
+	maxEnrichmentRetry       = 24 * time.Hour
+	transientRetryBase       = 5 * time.Minute
+	skippedRetryHorizon      = 15 * time.Minute
+	claimCandidateWindow     = maxEnrichWorkers
+	defaultRateLimitCooldown = 15 * time.Minute
+	rateLimitCooldownEnv     = "SILO_EBOOK_RATE_LIMIT_COOLDOWN"
 )
+
+func rateLimitCooldownFloor() time.Duration {
+	if v := os.Getenv(rateLimitCooldownEnv); v != "" {
+		if parsed, err := time.ParseDuration(v); err == nil && parsed > 0 {
+			return parsed
+		}
+	}
+	return defaultRateLimitCooldown
+}
 
 type EnrichmentOutcome string
 
@@ -787,6 +799,10 @@ func enrichmentRetryDelay(errorClass EnrichmentErrorClass, attempts int, retryAf
 		if retryAfter <= 0 {
 			retryAfter = transientRetryDelay(attempts)
 		}
+		// A provider's short RetryInfo is request-pacing advice for its own
+		// token bucket, not a queue horizon; requeueing that fast re-claims
+		// the same saturated tail every run.
+		retryAfter = max(retryAfter, rateLimitCooldownFloor())
 		return min(retryAfter, maxEnrichmentRetry)
 	case EnrichmentErrorPermanent:
 		return 30 * 24 * time.Hour
