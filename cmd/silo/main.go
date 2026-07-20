@@ -50,6 +50,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/clientip"
 	"github.com/Silo-Server/silo-server/internal/config"
 	"github.com/Silo-Server/silo-server/internal/database"
+	"github.com/Silo-Server/silo-server/internal/diagnostics"
 	"github.com/Silo-Server/silo-server/internal/downloads"
 	"github.com/Silo-Server/silo-server/internal/ebooks"
 	evt "github.com/Silo-Server/silo-server/internal/events"
@@ -193,6 +194,9 @@ func configureOperationalLogging(
 ) (opslog.Writer, *opslog.Repo, *partman.Manager) {
 	if err := opslog.SeedDefaults(ctx, settingsRepo); err != nil {
 		log.Fatalf("seed opslog defaults: %v", err)
+	}
+	if err := diagnostics.SeedDefaults(ctx, settingsRepo); err != nil {
+		log.Fatalf("seed diagnostics defaults: %v", err)
 	}
 	opsPM := partman.NewManager(pool, "operational_logs", partman.Daily, 3)
 	if err := opsPM.EnsureFuturePartitions(ctx); err != nil {
@@ -1930,6 +1934,15 @@ func main() {
 		}
 		taskMgr.Register(tasks.NewActivityLogCleanupTask(deps.DB, settingsRepo, activityPM))
 		taskMgr.Register(tasks.NewOperationalLogCleanupTask(deps.DB, settingsRepo, opsPM))
+		var diagnosticsStore diagnostics.ObjectStore
+		if deps.S3Private != nil {
+			diagnosticsStore = diagnostics.NewS3ObjectStore(deps.S3Private)
+		}
+		taskMgr.Register(tasks.NewClientDiagnosticsCleanupTask(
+			diagnostics.NewPostgresRepository(deps.DB),
+			settingsRepo,
+			diagnosticsStore,
+		))
 		taskMgr.Register(tasks.NewPolicyDecisionLogCleanupTask(deps.DB, settingsRepo, policyPM))
 		if deps.FileRepo != nil {
 			// Download prepare-to-file pipeline (Phase 3): a durable, leased encode

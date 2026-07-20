@@ -32,6 +32,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/catalogseed"
 	"github.com/Silo-Server/silo-server/internal/clientip"
 	"github.com/Silo-Server/silo-server/internal/config"
+	"github.com/Silo-Server/silo-server/internal/diagnostics"
 	"github.com/Silo-Server/silo-server/internal/downloads"
 	evt "github.com/Silo-Server/silo-server/internal/events"
 	"github.com/Silo-Server/silo-server/internal/historyimport"
@@ -307,6 +308,30 @@ func NewRouter(deps Dependencies) chi.Router {
 	var accessGroupStore *access.GroupStore
 	if deps.DB != nil {
 		accessGroupStore = access.NewGroupStore(deps.DB)
+	}
+	var diagnosticsStore diagnostics.ObjectStore
+	if deps.S3Private != nil {
+		diagnosticsStore = diagnostics.NewS3ObjectStore(deps.S3Private)
+	}
+	var diagnosticsHandler *handlers.DiagnosticsHandler
+	if deps.DB != nil {
+		diagnosticsService := diagnostics.NewService(
+			diagnostics.NewPostgresRepository(deps.DB),
+			settingsRepo,
+			diagnosticsStore,
+			slog.Default(),
+		)
+		if checkPrimaryProfile != nil {
+			diagnosticsService.SetProfileAttributionValidator(diagnostics.ProfileAttributionValidatorFunc(
+				func(ctx context.Context, userID int, profileID string) (bool, error) {
+					_, found, err := checkPrimaryProfile(ctx, userID, profileID)
+					return found, err
+				},
+			))
+		}
+		diagnosticsHandler = handlers.NewDiagnosticsHandler(
+			diagnosticsService,
+		)
 	}
 
 	// Build auth handler and auth middleware if DB and config are available.
@@ -958,6 +983,7 @@ func NewRouter(deps Dependencies) chi.Router {
 		adminHandler.BootstrapSensitiveValues = deps.BootstrapSensitiveValues
 		adminHandler.RestartStatus = restartStatus
 		adminHandler.CatalogSearchStatus = catalogSearchService
+		adminHandler.DiagnosticsStore = diagnosticsStore
 		if settingsRepo != nil {
 			adminHandler.SettingsRepo = settingsRepo
 		}
@@ -1763,6 +1789,22 @@ func NewRouter(deps Dependencies) chi.Router {
 					r.Post("/", apiKeyHandler.HandleCreateAPIKey)
 					r.Get("/", apiKeyHandler.HandleListAPIKeys)
 					r.Delete("/{id}", apiKeyHandler.HandleDeleteAPIKey)
+				})
+			})
+		}
+
+		// Client diagnostics are account-scoped and must work before profile
+		// selection, so this route intentionally uses auth only plus the
+		// generic rate limiter, not viewer/profile middleware.
+		if diagnosticsHandler != nil && authMiddleware != nil {
+			r.Group(func(r chi.Router) {
+				r.Use(authMiddleware.RequireAuth)
+				if deps.RateLimitMW != nil {
+					r.Use(deps.RateLimitMW.Handler)
+				}
+				r.Route("/diagnostics", func(r chi.Router) {
+					r.Get("/status", diagnosticsHandler.HandleStatus)
+					r.Post("/reports", diagnosticsHandler.HandleUpload)
 				})
 			})
 		}
@@ -2882,6 +2924,9 @@ func NewRouter(deps Dependencies) chi.Router {
 								r.Get("/logs/app", adminLogsHandler.HandleListOperationalLogs)
 								r.Get("/logs/audit", adminLogsHandler.HandleListAuditLogs)
 								r.Get("/logs/ws", adminLogsHandler.HandleLogStreamWebSocket)
+							}
+							if diagnosticsHandler != nil {
+								handlers.RegisterAdminDiagnosticsRoutes(r, diagnosticsHandler)
 							}
 							if adminPlaybackControlHandler != nil {
 								r.Post("/sessions/{session_id}/pause", adminPlaybackControlHandler.HandlePauseSession)

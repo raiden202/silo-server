@@ -151,6 +151,24 @@ func (c *Client) GetObject(ctx context.Context, bucket, key string) ([]byte, err
 	return data, nil
 }
 
+// GetObjectStream fetches the object at the given key and returns a streaming
+// body. The caller must close the returned ReadCloser.
+func (c *Client) GetObjectStream(ctx context.Context, bucket, key string) (io.ReadCloser, error) {
+	objectKey := c.prefixedKey(key)
+	out, err := c.s3Client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(objectKey),
+	})
+	if err != nil {
+		if isNotFoundErr(err) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("s3 GetObject %s/%s: %w", bucket, key, err)
+	}
+
+	return out.Body, nil
+}
+
 // PutObject uploads data to the given key, inferring Content-Type from the
 // file extension so that CDNs and browsers serve files with the correct MIME type.
 func (c *Client) PutObject(ctx context.Context, bucket, key string, data []byte) error {
@@ -172,6 +190,31 @@ func (c *Client) PutObject(ctx context.Context, bucket, key string, data []byte)
 	_, err := c.s3Client.PutObject(ctx, input)
 	if err != nil {
 		return fmt.Errorf("s3 PutObject %s/%s: %w", bucket, key, err)
+	}
+
+	return nil
+}
+
+// PutObjectStream uploads a streaming body to the given key. When contentType is
+// empty, it falls back to the same extension-based inference used by PutObject.
+func (c *Client) PutObjectStream(ctx context.Context, bucket, key string, r io.Reader, contentType string) error {
+	objectKey := c.prefixedKey(key)
+
+	input := &s3.PutObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(objectKey),
+		Body:   r,
+	}
+	// Content-Length is intentionally omitted because client-reported sizes are untrusted until streamed.
+	if contentType != "" {
+		input.ContentType = aws.String(contentType)
+	} else if ct := contentTypeFromKey(key); ct != "" {
+		input.ContentType = aws.String(ct)
+	}
+
+	_, err := c.s3Client.PutObject(ctx, input)
+	if err != nil {
+		return fmt.Errorf("s3 PutObject stream %s/%s: %w", bucket, key, err)
 	}
 
 	return nil

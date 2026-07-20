@@ -1,0 +1,216 @@
+package diagnostics
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"strings"
+	"time"
+)
+
+const (
+	ObjectPrefix          = diagnosticObjectPrefix + "/"
+	DefaultReceivingGrace = time.Hour
+)
+
+type CleanupRepository interface {
+	DeleteByID(ctx context.Context, id string) (*Report, error)
+	MarkFailed(ctx context.Context, id string) error
+	RetentionCandidates(ctx context.Context, olderThan time.Time, perUserByteCap int64) ([]Report, error)
+	StaleReceiving(ctx context.Context, grace time.Duration) ([]Report, error)
+	LiveBlobKeys(ctx context.Context, keys []string) (map[string]ReportState, error)
+}
+
+type CleanupOptions struct {
+	Now                 func() time.Time
+	StaleReceivingGrace time.Duration
+	Logger              *slog.Logger
+}
+
+type CleanupResult struct {
+	RetentionReportsDeleted int `json:"retention_reports_deleted"`
+	StaleReportsDeleted     int `json:"stale_reports_deleted"`
+	OrphanObjectsDeleted    int `json:"orphan_objects_deleted"`
+}
+
+func (r CleanupResult) ReportsDeleted() int {
+	return r.RetentionReportsDeleted + r.StaleReportsDeleted
+}
+
+func CleanupOnce(
+	ctx context.Context,
+	repo CleanupRepository,
+	settingsStore SettingsStore,
+	store ObjectStore,
+	logger *slog.Logger,
+) (CleanupResult, error) {
+	settings, err := LoadSettings(ctx, settingsStore)
+	if err != nil {
+		return CleanupResult{}, fmt.Errorf("load diagnostics cleanup settings: %w", err)
+	}
+	return CleanupReports(ctx, repo, store, settings, CleanupOptions{Logger: logger})
+}
+
+func CleanupReports(
+	ctx context.Context,
+	repo CleanupRepository,
+	store ObjectStore,
+	settings Settings,
+	opts CleanupOptions,
+) (CleanupResult, error) {
+	if repo == nil {
+		return CleanupResult{}, nil
+	}
+	now := func() time.Time { return time.Now().UTC() }
+	if opts.Now != nil {
+		now = opts.Now
+	}
+	logger := opts.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	grace := opts.StaleReceivingGrace
+	if grace <= 0 {
+		grace = DefaultReceivingGrace
+	}
+
+	cutoff := time.Time{}
+	if settings.RetentionDays > 0 {
+		cutoff = now().Add(-time.Duration(settings.RetentionDays) * 24 * time.Hour)
+	}
+
+	var result CleanupResult
+	candidates, err := repo.RetentionCandidates(ctx, cutoff, settings.MaxBytesPerUser)
+	if err != nil {
+		return result, fmt.Errorf("load diagnostic retention candidates: %w", err)
+	}
+	for _, report := range candidates {
+		if err := deleteReportObjects(ctx, store, &report, logger); err != nil {
+			return result, fmt.Errorf("delete diagnostic retention blob %s: %w", report.ID, err)
+		}
+		if _, err := repo.DeleteByID(ctx, report.ID); err != nil && !IsReportNotFound(err) {
+			return result, fmt.Errorf("delete diagnostic retention row %s: %w", report.ID, err)
+		}
+		result.RetentionReportsDeleted++
+	}
+
+	stale, err := repo.StaleReceiving(ctx, grace)
+	if err != nil {
+		return result, fmt.Errorf("load stale diagnostic reports: %w", err)
+	}
+	for _, report := range stale {
+		if err := deleteReportObjects(ctx, store, &report, logger); err != nil {
+			return result, fmt.Errorf("delete stale diagnostic blob %s: %w", report.ID, err)
+		}
+		if report.State == StateReceiving {
+			if err := repo.MarkFailed(ctx, report.ID); err != nil && !IsReportNotFound(err) {
+				return result, fmt.Errorf("mark stale diagnostic report failed %s: %w", report.ID, err)
+			}
+		}
+		if _, err := repo.DeleteByID(ctx, report.ID); err != nil && !IsReportNotFound(err) {
+			return result, fmt.Errorf("delete stale diagnostic row %s: %w", report.ID, err)
+		}
+		result.StaleReportsDeleted++
+	}
+
+	if store == nil || strings.TrimSpace(store.Bucket()) == "" {
+		return result, nil
+	}
+	keys, err := store.ListObjects(ctx, ObjectPrefix)
+	if err != nil {
+		return result, fmt.Errorf("list diagnostic objects: %w", err)
+	}
+	if len(keys) == 0 {
+		return result, nil
+	}
+	liveKeys, err := repo.LiveBlobKeys(ctx, keys)
+	if err != nil {
+		return result, fmt.Errorf("load live diagnostic blob keys: %w", err)
+	}
+	for _, key := range keys {
+		if _, ok := liveKeys[key]; ok {
+			continue
+		}
+		if err := deleteObjectIfPresent(ctx, store, store.Bucket(), key); err != nil {
+			return result, fmt.Errorf("delete orphan diagnostic object %s: %w", key, err)
+		}
+		logger.InfoContext(ctx, "diagnostic orphan object deleted",
+			"component", "diagnostics",
+			"key", key,
+		)
+		result.OrphanObjectsDeleted++
+	}
+	return result, nil
+}
+
+func deleteReportObjects(ctx context.Context, store ObjectStore, report *Report, logger *slog.Logger) error {
+	if report == nil {
+		return nil
+	}
+	keys := reportObjectKeys(*report)
+	if store == nil || strings.TrimSpace(store.Bucket()) == "" {
+		if len(keys) == 0 {
+			return nil
+		}
+		logSkippedObjectDeletion(ctx, logger, report.ID, keys)
+		return nil
+	}
+	bucket := stringValue(report.BlobBucket)
+	if bucket == "" {
+		bucket = store.Bucket()
+	}
+	for _, key := range keys {
+		if err := deleteObjectIfPresent(ctx, store, bucket, key); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func logSkippedObjectDeletion(ctx context.Context, logger *slog.Logger, reportID string, keys []string) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.WarnContext(ctx, "diagnostic report blob deletion skipped because storage is unavailable",
+		"component", "diagnostics",
+		"report_id", reportID,
+		"keys", keys,
+	)
+}
+
+func deleteObjectIfPresent(ctx context.Context, store ObjectStore, bucket, key string) error {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return nil
+	}
+	if err := store.DeleteObject(ctx, bucket, key); err != nil && !IsObjectNotFound(err) {
+		return err
+	}
+	return nil
+}
+
+func reportObjectKeys(report Report) []string {
+	keys := make([]string, 0, 2)
+	if key := stringValue(report.BlobKey); key != "" {
+		keys = append(keys, key)
+	}
+	if report.ID != "" && report.UserID > 0 {
+		deterministic := reportObjectKey(report.UserID, report.ID)
+		seen := false
+		for _, key := range keys {
+			if key == deterministic {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			keys = append(keys, deterministic)
+		}
+	}
+	return keys
+}
+
+func IsReportNotFound(err error) bool {
+	return errors.Is(err, ErrNotFound)
+}
