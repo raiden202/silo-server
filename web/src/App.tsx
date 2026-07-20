@@ -47,6 +47,7 @@ import RequestDetail from "@/pages/RequestDetail";
 import AdminDashboard from "@/pages/AdminDashboard";
 import AdminActivity from "@/pages/AdminActivity";
 import AdminLogs from "@/pages/AdminLogs";
+import AdminDiagnostics from "@/pages/AdminDiagnostics";
 import AdminAccessGroups from "@/pages/AdminAccessGroups";
 import AdminUsers from "@/pages/AdminUsers";
 import AdminRequests from "@/pages/AdminRequests";
@@ -412,6 +413,7 @@ function AppRoutes() {
                   <Route index element={<AdminDashboard />} />
                   <Route path="activity" element={<AdminActivity />} />
                   <Route path="logs" element={<AdminLogs />} />
+                  <Route path="diagnostics" element={<AdminDiagnostics />} />
                   <Route path="libraries" element={<AdminLibraries />} />
                   <Route path="maintenance" element={<AdminMaintenance />} />
                   <Route path="collections" element={<AdminCollections />} />
