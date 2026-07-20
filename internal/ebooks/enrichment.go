@@ -31,8 +31,9 @@ import (
 const (
 	ebookMetadataImageProviderID = "ebook-metadata"
 
-	defaultEnrichBatchSize = 50
+	defaultEnrichBatchSize = 5000
 	defaultEnrichWorkers   = 4
+	maxEnrichWorkers       = 5000
 
 	defaultEnrichmentItemTimeout = 2 * time.Minute
 )
@@ -69,8 +70,8 @@ func ebookEnrichWorkers() int {
 			n = parsed
 		}
 	}
-	if n > defaultEnrichBatchSize {
-		n = defaultEnrichBatchSize
+	if n > maxEnrichWorkers {
+		n = maxEnrichWorkers
 	}
 	return n
 }

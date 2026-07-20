@@ -69,9 +69,14 @@ func TestEbookEnrichWorkersFromEnv(t *testing.T) {
 		t.Fatalf("ebookEnrichWorkers() with zero = %d, want default %d", got, defaultEnrichWorkers)
 	}
 
-	t.Setenv("SILO_EBOOK_ENRICH_WORKERS", "999")
-	if got := ebookEnrichWorkers(); got != defaultEnrichBatchSize {
-		t.Fatalf("ebookEnrichWorkers() capped = %d, want %d", got, defaultEnrichBatchSize)
+	t.Setenv("SILO_EBOOK_ENRICH_WORKERS", "5000")
+	if got := ebookEnrichWorkers(); got != 5000 {
+		t.Fatalf("ebookEnrichWorkers() = %d, want 5000", got)
+	}
+
+	t.Setenv("SILO_EBOOK_ENRICH_WORKERS", "9999")
+	if got := ebookEnrichWorkers(); got != maxEnrichWorkers {
+		t.Fatalf("ebookEnrichWorkers() capped = %d, want %d", got, maxEnrichWorkers)
 	}
 }
 
