@@ -87,8 +87,8 @@ func TestEnrichmentQueueClaimQueryUsesAtomicLeasedClaims(t *testing.T) {
 			}
 		})
 	}
-	if claimCandidateWindow <= 0 || claimCandidateWindow > 256 {
-		t.Fatalf("claim candidate window = %d, want a fixed sane bound", claimCandidateWindow)
+	if claimCandidateWindow != maxEnrichWorkers {
+		t.Fatalf("claim candidate window = %d, want worker ceiling %d", claimCandidateWindow, maxEnrichWorkers)
 	}
 }
 

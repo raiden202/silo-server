@@ -17,7 +17,7 @@ const (
 	maxEnrichmentRetry     = 24 * time.Hour
 	transientRetryBase     = 5 * time.Minute
 	skippedRetryHorizon    = 15 * time.Minute
-	claimCandidateWindow   = 64
+	claimCandidateWindow   = maxEnrichWorkers
 )
 
 type EnrichmentOutcome string
