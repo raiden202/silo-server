@@ -1318,6 +1318,43 @@ func TestEnricherRunLimitedEnforcesClaimLimitBelowWorkerCount(t *testing.T) {
 	}
 }
 
+func TestEbookHasCompleteLocalMetadata(t *testing.T) {
+	complete := enrichmentItemRow{
+		Title:      "A Book",
+		Author:     "An Author",
+		Overview:   "A useful description.",
+		PosterPath: "/library/A Book/cover.jpg",
+	}
+	if !ebookHasCompleteLocalMetadata(complete) {
+		t.Fatal("complete embedded metadata was not recognized")
+	}
+	if missing := ebookMissingMetadataFields(complete); len(missing) != 0 {
+		t.Fatalf("complete embedded metadata missing fields = %v", missing)
+	}
+
+	for name, tc := range map[string]struct {
+		field  string
+		mutate func(*enrichmentItemRow)
+	}{
+		"title":       {field: "title", mutate: func(item *enrichmentItemRow) { item.Title = "" }},
+		"author":      {field: "author", mutate: func(item *enrichmentItemRow) { item.Author = "" }},
+		"description": {field: "description", mutate: func(item *enrichmentItemRow) { item.Overview = "" }},
+		"cover":       {field: "cover", mutate: func(item *enrichmentItemRow) { item.PosterPath = "" }},
+	} {
+		t.Run(name, func(t *testing.T) {
+			item := complete
+			tc.mutate(&item)
+			if ebookHasCompleteLocalMetadata(item) {
+				t.Fatalf("metadata missing %s was treated as complete", name)
+			}
+			missing := ebookMissingMetadataFields(item)
+			if len(missing) != 1 || missing[0] != tc.field {
+				t.Fatalf("missing fields = %v, want [%s]", missing, tc.field)
+			}
+		})
+	}
+}
+
 func (f *fakeEnrichmentQueue) recordTransition(job EnrichmentJob) {
 	if f.transitionedJobs == nil {
 		f.transitionedJobs = make(map[string]EnrichmentJob)

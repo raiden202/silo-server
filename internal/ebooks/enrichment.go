@@ -713,12 +713,45 @@ func (e *Enricher) enrichClaimedItem(ctx context.Context, item enrichmentItemRow
 		// provider ever saw it.
 		return EnrichmentOutcomeSkipped, nil
 	}
+	if ebookHasCompleteLocalMetadata(item) {
+		slog.DebugContext(ctx, "ebook enrichment: local metadata is complete",
+			"component", "ebooks",
+			"content_id", item.ContentID,
+		)
+		return EnrichmentOutcomeSuccess, nil
+	}
+	slog.DebugContext(ctx, "ebook enrichment: remote metadata required",
+		"component", "ebooks",
+		"content_id", item.ContentID,
+		"missing_fields", ebookMissingMetadataFields(item),
+	)
 
 	providers, err := metadata.ResolveChain(ctx, item.FolderID, ebookContentType(), e.chainRepo, e.resolver)
 	if err != nil {
 		return "", fmt.Errorf("resolving ebook chain for folder %d: %w", item.FolderID, err)
 	}
 	return e.enrichWithProvidersOutcome(ctx, item, providers)
+}
+
+func ebookHasCompleteLocalMetadata(item enrichmentItemRow) bool {
+	return len(ebookMissingMetadataFields(item)) == 0
+}
+
+func ebookMissingMetadataFields(item enrichmentItemRow) []string {
+	missing := make([]string, 0, 4)
+	if strings.TrimSpace(item.Title) == "" {
+		missing = append(missing, "title")
+	}
+	if strings.TrimSpace(item.Author) == "" {
+		missing = append(missing, "author")
+	}
+	if strings.TrimSpace(item.Overview) == "" {
+		missing = append(missing, "description")
+	}
+	if strings.TrimSpace(item.PosterPath) == "" {
+		missing = append(missing, "cover")
+	}
+	return missing
 }
 
 // enrichWithProviders runs the provider chain for one claimed item. Outcomes:
