@@ -145,9 +145,10 @@ func normalizeTrigger(trigger string) string {
 // ResolveVanishedPath resolves a change for a path that no longer exists on
 // disk (a file deleted by an upgrade/replacement, or a removed directory) to a
 // reconciling scan target. Paths with a supported extension for their library
-// map to an exact file scan; other paths map to a subtree scan of the path
-// itself. The scoped scan marks vanished files missing so stale versions stop
-// being offered for playback.
+// map to an exact file scan; paths with a media extension the library type
+// does not support are rejected; remaining paths map to a subtree scan of the
+// path itself. The scoped scan marks vanished files missing so stale versions
+// stop being offered for playback.
 //
 // Two guards keep this from turning transient storage loss into cleanup:
 // the path must actually be gone (a still-existing path is rejected — use
