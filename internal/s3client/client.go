@@ -22,6 +22,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
@@ -35,6 +36,10 @@ const (
 	URLAuthPublic          = "public"           // unsigned public URLs via custom domain
 	URLAuthCloudflareToken = "cloudflare_token" // Cloudflare WAF token authentication
 )
+
+// streamUploadPartSize bounds per-upload memory for unsized streaming uploads.
+// S3-compatible backends require parts of at least 5 MiB (except the last).
+const streamUploadPartSize = 8 * 1024 * 1024
 
 // BucketConfig holds the configuration for connecting to a single S3 bucket.
 // Each bucket may have different credentials and endpoints, allowing per-bucket
@@ -197,6 +202,10 @@ func (c *Client) PutObject(ctx context.Context, bucket, key string, data []byte)
 
 // PutObjectStream uploads a streaming body to the given key. When contentType is
 // empty, it falls back to the same extension-based inference used by PutObject.
+// The body length is untrusted until streamed, so the upload goes through the
+// SDK's multipart manager: it buffers fixed-size parts and sends each with a
+// known Content-Length, which backends like Cloudflare R2 require (a plain
+// PutObject with an unsized stream is rejected with 411 MissingContentLength).
 func (c *Client) PutObjectStream(ctx context.Context, bucket, key string, r io.Reader, contentType string) error {
 	objectKey := c.prefixedKey(key)
 
@@ -205,15 +214,17 @@ func (c *Client) PutObjectStream(ctx context.Context, bucket, key string, r io.R
 		Key:    aws.String(objectKey),
 		Body:   r,
 	}
-	// Content-Length is intentionally omitted because client-reported sizes are untrusted until streamed.
 	if contentType != "" {
 		input.ContentType = aws.String(contentType)
 	} else if ct := contentTypeFromKey(key); ct != "" {
 		input.ContentType = aws.String(ct)
 	}
 
-	_, err := c.s3Client.PutObject(ctx, input)
-	if err != nil {
+	uploader := manager.NewUploader(c.s3Client, func(u *manager.Uploader) {
+		u.PartSize = streamUploadPartSize
+		u.Concurrency = 1
+	})
+	if _, err := uploader.Upload(ctx, input); err != nil {
 		return fmt.Errorf("s3 PutObject stream %s/%s: %w", bucket, key, err)
 	}
 
