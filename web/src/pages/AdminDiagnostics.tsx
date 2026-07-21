@@ -447,7 +447,10 @@ function DiagnosticReportRow({
       </TableCell>
       <TableCell>
         <div>{formatPlatform(report.platform)}</div>
-        <div className="text-muted-foreground text-xs">v{report.app_version}</div>
+        <div className="text-muted-foreground text-xs">
+          v{report.app_version}
+          {report.manifest.report.app_build ? ` (${report.manifest.report.app_build})` : ""}
+        </div>
       </TableCell>
       <TableCell>
         <Badge variant="outline">{formatToken(report.report_type)}</Badge>
