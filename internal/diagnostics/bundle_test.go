@@ -24,11 +24,12 @@ func TestValidateBundle(t *testing.T) {
 	}
 
 	tests := []struct {
-		name    string
-		entries []testArchiveEntry
-		limits  BundleLimits
-		mutate  func([]byte) []byte
-		wantErr error
+		name        string
+		entries     []testArchiveEntry
+		limits      BundleLimits
+		mutate      func([]byte) []byte
+		wantErr     error
+		wantEntries string
 	}{
 		{
 			name:    "happy path",
@@ -62,12 +63,66 @@ func TestValidateBundle(t *testing.T) {
 			name: "ratio bomb",
 			entries: []testArchiveEntry{
 				{name: "manifest.json", body: []byte(`{}`)},
-				{name: "logs.jsonl", body: []byte(strings.Repeat("a", 1024*1024))},
+				// Valid newline-delimited JSON objects that still compress far
+				// beyond the ratio limit, so the ratio guard trips before the
+				// content validator can pass judgement on every line.
+				{name: "logs.jsonl", body: bytes.Repeat([]byte("{}\n"), 400*1024)},
 			},
 			limits: BundleLimits{
-				MaxUncompressedBytes: 2 * 1024 * 1024,
+				MaxUncompressedBytes: 4 * 1024 * 1024,
 			},
 			wantErr: ErrCompressionRatio,
+		},
+		{
+			name: "rejects malformed device.json",
+			entries: []testArchiveEntry{
+				{name: "manifest.json", body: []byte(`{}`)},
+				{name: "device.json", body: []byte(`{"identity": }`)},
+			},
+			wantErr: ErrInvalidBundle,
+		},
+		{
+			name: "rejects non-object device.json",
+			entries: []testArchiveEntry{
+				{name: "manifest.json", body: []byte(`{}`)},
+				{name: "device.json", body: []byte(`[1,2,3]`)},
+			},
+			wantErr: ErrInvalidBundle,
+		},
+		{
+			name: "rejects trailing data in device.json",
+			entries: []testArchiveEntry{
+				{name: "manifest.json", body: []byte(`{}`)},
+				{name: "device.json", body: []byte(`{}{}`)},
+			},
+			wantErr: ErrInvalidBundle,
+		},
+		{
+			name: "rejects malformed logs.jsonl line",
+			entries: []testArchiveEntry{
+				{name: "manifest.json", body: []byte(`{}`)},
+				{name: "logs.jsonl", body: []byte("{}\nnot json\n")},
+			},
+			wantErr: ErrInvalidBundle,
+		},
+		{
+			name: "rejects non-object logs.jsonl line",
+			entries: []testArchiveEntry{
+				{name: "manifest.json", body: []byte(`{}`)},
+				{name: "logs.jsonl", body: []byte("{}\n[1,2]\n")},
+			},
+			wantErr: ErrInvalidBundle,
+		},
+		{
+			name: "accepts well-formed device.json and crash json",
+			entries: []testArchiveEntry{
+				{name: "manifest.json", body: []byte(`{}`)},
+				{name: "device.json", body: []byte(`{"identity":{"model":"Pixel"}}` + "\n")},
+				{name: "logs.jsonl", body: []byte(`{"lvl":"I","msg":"hi"}` + "\n")},
+				{name: "crash/summary.json", body: []byte(`{"summary":"boom"}`)},
+				{name: "crash/tombstone.pb", body: []byte{0x00, 0x01, 0x02, 0x03}},
+			},
+			wantEntries: "manifest.json,device.json,logs.jsonl,crash/summary.json,crash/tombstone.pb",
 		},
 		{
 			name: "over count",
@@ -179,8 +234,12 @@ func TestValidateBundle(t *testing.T) {
 			if info.SHA256 != fmtHex(sum[:]) {
 				t.Fatalf("sha256 = %s, want %s", info.SHA256, fmtHex(sum[:]))
 			}
-			if got, want := strings.Join(info.Entries, ","), "manifest.json,logs.jsonl"; got != want {
-				t.Fatalf("entries = %s, want %s", got, want)
+			wantEntries := tt.wantEntries
+			if wantEntries == "" {
+				wantEntries = "manifest.json,logs.jsonl"
+			}
+			if got := strings.Join(info.Entries, ","); got != wantEntries {
+				t.Fatalf("entries = %s, want %s", got, wantEntries)
 			}
 			gzr, err := gzip.NewReader(bytes.NewReader(raw))
 			if err != nil {

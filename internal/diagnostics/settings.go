@@ -30,14 +30,19 @@ const (
 	// DefaultCleanupIntervalMinutes matches the prior opslog-shared cadence so
 	// splitting diagnostics onto its own key preserves current behavior.
 	DefaultCleanupIntervalMinutes = 15
-	defaultUploadsEnabledStr      = "false"
-	defaultMaxBundleStr           = "10485760"
-	defaultMaxUncompressed        = "67108864"
-	defaultMaxReportsStr          = "20"
-	defaultRetentionDaysStr       = "30"
-	defaultMaxBytesUserStr        = "209715200"
-	defaultConsentNoticeStr       = "1"
-	defaultCleanupIntervalStr     = "15"
+	// maxCleanupIntervalMinutes caps the parsed interval well below the point
+	// where minutes * time.Minute overflows int64 nanoseconds (~1.5e8 minutes,
+	// which would wrap a huge configured value into a tiny — or negative —
+	// duration). 7 days is far longer than any sane cleanup cadence.
+	maxCleanupIntervalMinutes = 7 * 24 * 60
+	defaultUploadsEnabledStr  = "false"
+	defaultMaxBundleStr       = "10485760"
+	defaultMaxUncompressed    = "67108864"
+	defaultMaxReportsStr      = "20"
+	defaultRetentionDaysStr   = "30"
+	defaultMaxBytesUserStr    = "209715200"
+	defaultConsentNoticeStr   = "1"
+	defaultCleanupIntervalStr = "15"
 )
 
 // SettingsStore is the read/write surface over server_settings used by the
@@ -147,6 +152,9 @@ func LoadCleanupInterval(ctx context.Context, store SettingsStore) time.Duration
 	if raw, err := store.Get(ctx, KeyCleanupIntervalMinutes); err == nil && strings.TrimSpace(raw) != "" {
 		if parsed := parseInt(raw); parsed > 0 {
 			minutes = parsed
+			if minutes > maxCleanupIntervalMinutes {
+				minutes = maxCleanupIntervalMinutes
+			}
 		}
 	}
 	return time.Duration(minutes) * time.Minute
@@ -169,43 +177,60 @@ func LoadSettings(ctx context.Context, store SettingsStore) (Settings, error) {
 	if store == nil {
 		return settings, nil
 	}
-	if raw, err := store.Get(ctx, KeyUploadsEnabled); err == nil && strings.TrimSpace(raw) != "" {
-		if parsed, parseErr := strconv.ParseBool(strings.TrimSpace(raw)); parseErr == nil {
+	// get distinguishes a genuine read failure — propagated so callers can
+	// surface a retryable error — from a missing or empty value, which falls
+	// back to the default. Silently defaulting on a transient DB error could
+	// report uploads disabled or the wrong quota limits to clients making
+	// decisions from /diagnostics/status.
+	get := func(key string) (string, error) {
+		raw, err := store.Get(ctx, key)
+		if err != nil {
+			return "", fmt.Errorf("load diagnostics setting %s: %w", key, err)
+		}
+		return strings.TrimSpace(raw), nil
+	}
+
+	if raw, err := get(KeyUploadsEnabled); err != nil {
+		return Settings{}, err
+	} else if raw != "" {
+		if parsed, parseErr := strconv.ParseBool(raw); parseErr == nil {
 			settings.UploadsEnabled = parsed
 		}
 	}
-	if raw, err := store.Get(ctx, KeyMaxBundleBytes); err == nil && strings.TrimSpace(raw) != "" {
-		if parsed := parseInt64(raw); parsed > 0 {
-			settings.MaxBundleBytes = parsed
-		}
+	if raw, err := get(KeyMaxBundleBytes); err != nil {
+		return Settings{}, err
+	} else if parsed := parseInt64(raw); parsed > 0 {
+		settings.MaxBundleBytes = parsed
 	}
-	if raw, err := store.Get(ctx, KeyMaxUncompressedBytes); err == nil && strings.TrimSpace(raw) != "" {
-		if parsed := parseInt64(raw); parsed > 0 {
-			settings.MaxUncompressedBytes = parsed
-		}
+	if raw, err := get(KeyMaxUncompressedBytes); err != nil {
+		return Settings{}, err
+	} else if parsed := parseInt64(raw); parsed > 0 {
+		settings.MaxUncompressedBytes = parsed
 	}
-	if raw, err := store.Get(ctx, KeyMaxReportsPerUserDay); err == nil && strings.TrimSpace(raw) != "" {
-		if parsed := parseInt(raw); parsed > 0 {
-			settings.MaxReportsPerUserDay = parsed
-		}
+	if raw, err := get(KeyMaxReportsPerUserDay); err != nil {
+		return Settings{}, err
+	} else if parsed := parseInt(raw); parsed > 0 {
+		settings.MaxReportsPerUserDay = parsed
 	}
-	if raw, err := store.Get(ctx, KeyRetentionDays); err == nil && strings.TrimSpace(raw) != "" {
-		if parsed := parseInt(raw); parsed > 0 {
-			settings.RetentionDays = parsed
-		}
+	if raw, err := get(KeyRetentionDays); err != nil {
+		return Settings{}, err
+	} else if parsed := parseInt(raw); parsed > 0 {
+		settings.RetentionDays = parsed
 	}
-	if raw, err := store.Get(ctx, KeyMaxBytesPerUser); err == nil && strings.TrimSpace(raw) != "" {
-		if parsed := parseInt64(raw); parsed > 0 {
-			settings.MaxBytesPerUser = parsed
-		}
+	if raw, err := get(KeyMaxBytesPerUser); err != nil {
+		return Settings{}, err
+	} else if parsed := parseInt64(raw); parsed > 0 {
+		settings.MaxBytesPerUser = parsed
 	}
-	if raw, err := store.Get(ctx, KeyConsentNoticeVersion); err == nil && strings.TrimSpace(raw) != "" {
-		if parsed := parseInt(raw); parsed > 0 {
-			settings.ConsentNoticeVersion = parsed
-		}
+	if raw, err := get(KeyConsentNoticeVersion); err != nil {
+		return Settings{}, err
+	} else if parsed := parseInt(raw); parsed > 0 {
+		settings.ConsentNoticeVersion = parsed
 	}
-	if raw, err := store.Get(ctx, KeyServerInstanceID); err == nil {
-		settings.ServerInstanceID = strings.TrimSpace(raw)
+	if raw, err := get(KeyServerInstanceID); err != nil {
+		return Settings{}, err
+	} else {
+		settings.ServerInstanceID = raw
 	}
 	return settings, nil
 }

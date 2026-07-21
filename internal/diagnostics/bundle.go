@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"hash"
@@ -125,18 +126,34 @@ func ValidateBundle(r io.Reader, limits BundleLimits) (BundleInfo, error) {
 			return BundleInfo{}, ErrUncompressedTooLarge
 		}
 
+		entry := &tarEntryReader{tr: tr, limits: limits, metered: metered, total: &payloadBytes}
 		var manifestCapture *bytes.Buffer
-		var capture io.Writer
-		if isManifestEntry {
+		var consumeErr error
+		switch {
+		case isManifestEntry:
+			// Capture the embedded manifest so Ingest can compare it against the
+			// part-1 manifest; it is the only entry buffered whole.
 			manifestCapture = &bytes.Buffer{}
 			manifestCapture.Grow(int(hdr.Size))
-			capture = manifestCapture
+			_, consumeErr = io.Copy(manifestCapture, entry)
+		case isNDJSONBundleEntry(name):
+			// logs.jsonl / breadcrumbs.jsonl: newline-delimited JSON objects,
+			// validated line-by-line so memory stays bounded to one capped line.
+			consumeErr = validateNDJSONObjectEntry(entry)
+		case isJSONObjectBundleEntry(name):
+			// device.json / crash/*.json: a single JSON object, validated with a
+			// streaming token decoder (no whole-entry buffering).
+			consumeErr = validateJSONObjectEntry(entry)
+		default:
+			// Opaque members (crash/stack.txt, crash/tombstone.pb) carry no JSON
+			// contract; drain them so their bytes still count toward the size,
+			// ratio, and count limits.
+			_, consumeErr = io.Copy(io.Discard, entry)
 		}
-		entryBytes, err := copyTarEntry(tr, buffer, limits, metered, &payloadBytes, capture)
-		if err != nil {
-			return BundleInfo{}, err
+		if consumeErr != nil {
+			return BundleInfo{}, consumeErr
 		}
-		if entryBytes != hdr.Size {
+		if entry.entryBytes != hdr.Size {
 			return BundleInfo{}, fmt.Errorf("%w: entry size mismatch for %s", ErrInvalidBundle, name)
 		}
 		if manifestCapture != nil {
@@ -229,32 +246,166 @@ func validateEntryHeader(hdr *tar.Header) (string, error) {
 	return name, nil
 }
 
-func copyTarEntry(tr *tar.Reader, buffer []byte, limits BundleLimits, metered *compressedMeter, total *int64, capture io.Writer) (int64, error) {
-	var entryBytes int64
+// tarEntryReader streams one tar entry's payload while charging every read
+// against the bundle's entry-size, total-size, and compression-ratio limits —
+// the same accounting the opaque drain path applied — so structural validators
+// can pull the payload without letting a member slip past the guards. It also
+// tracks entryBytes so the caller can compare it against the declared header
+// size.
+type tarEntryReader struct {
+	tr         *tar.Reader
+	limits     BundleLimits
+	metered    *compressedMeter
+	total      *int64
+	entryBytes int64
+}
+
+func (er *tarEntryReader) Read(p []byte) (int, error) {
+	n, err := er.tr.Read(p)
+	if n > 0 {
+		er.entryBytes += int64(n)
+		if er.entryBytes > er.limits.MaxEntryBytes {
+			return n, ErrEntryTooLarge
+		}
+		*er.total += int64(n)
+		if *er.total > er.limits.MaxUncompressedBytes {
+			return n, ErrUncompressedTooLarge
+		}
+		if ratioExceeded(*er.total, er.metered.Count(), er.limits.MaxCompressionRatio) {
+			return n, ErrCompressionRatio
+		}
+	}
+	if err != nil && !errors.Is(err, io.EOF) {
+		return n, classifyBundleReadError(err)
+	}
+	return n, err
+}
+
+func isNDJSONBundleEntry(name string) bool {
+	return name == "logs.jsonl" || name == "breadcrumbs.jsonl"
+}
+
+func isJSONObjectBundleEntry(name string) bool {
+	return name == "device.json" ||
+		(strings.HasPrefix(name, "crash/") && strings.HasSuffix(name, ".json"))
+}
+
+// validateJSONObjectEntry streams a single JSON object from r, rejecting
+// anything that is not exactly one top-level object. It uses the token decoder
+// so memory stays bounded to the nesting depth rather than the entry size.
+func validateJSONObjectEntry(r io.Reader) error {
+	dec := json.NewDecoder(r)
+	tok, err := dec.Token()
+	if err != nil {
+		return classifyEntryContentError(err)
+	}
+	if delim, ok := tok.(json.Delim); !ok || delim != '{' {
+		return fmt.Errorf("%w: entry is not a JSON object", ErrInvalidBundle)
+	}
+	depth := 1
+	for depth > 0 {
+		tok, err := dec.Token()
+		if err != nil {
+			return classifyEntryContentError(err)
+		}
+		if delim, ok := tok.(json.Delim); ok {
+			switch delim {
+			case '{', '[':
+				depth++
+			case '}', ']':
+				depth--
+			}
+		}
+	}
+	// A well-formed entry ends here; anything after the top-level object is
+	// smuggled content.
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return fmt.Errorf("%w: trailing data after JSON object", ErrInvalidBundle)
+		}
+		return classifyEntryContentError(err)
+	}
+	return nil
+}
+
+// validateNDJSONObjectEntry streams newline-delimited JSON, requiring each
+// non-blank line to be a single JSON object. Lines are validated one at a time
+// with a byte cap so a pathological entry can never buffer unbounded memory.
+func validateNDJSONObjectEntry(r io.Reader) error {
+	buffer := make([]byte, defaultBundleReadBufferSize)
+	line := make([]byte, 0, 512)
 	for {
-		n, err := tr.Read(buffer)
-		if n > 0 {
-			if capture != nil {
-				_, _ = capture.Write(buffer[:n])
+		n, err := r.Read(buffer)
+		if err != nil && !errors.Is(err, io.EOF) {
+			return classifyEntryContentError(err)
+		}
+		chunk := buffer[:n]
+		for len(chunk) > 0 {
+			idx := bytes.IndexByte(chunk, '\n')
+			if idx < 0 {
+				line = append(line, chunk...)
+				if len(line) > contract.MaxLogLineBytes {
+					return errLogLineTooLarge()
+				}
+				break
 			}
-			entryBytes += int64(n)
-			if entryBytes > limits.MaxEntryBytes {
-				return entryBytes, ErrEntryTooLarge
+			line = append(line, chunk[:idx]...)
+			if len(line) > contract.MaxLogLineBytes {
+				return errLogLineTooLarge()
 			}
-			*total += int64(n)
-			if *total > limits.MaxUncompressedBytes {
-				return entryBytes, ErrUncompressedTooLarge
+			if verr := validateJSONObjectLine(line); verr != nil {
+				return verr
 			}
-			if ratioExceeded(*total, metered.Count(), limits.MaxCompressionRatio) {
-				return entryBytes, ErrCompressionRatio
-			}
+			line = line[:0]
+			chunk = chunk[idx+1:]
 		}
 		if errors.Is(err, io.EOF) {
-			return entryBytes, nil
+			break
 		}
-		if err != nil {
-			return entryBytes, classifyBundleReadError(err)
+	}
+	// Handle a trailing line without a closing newline.
+	if len(bytes.TrimSpace(line)) > 0 {
+		if len(line) > contract.MaxLogLineBytes {
+			return errLogLineTooLarge()
 		}
+		return validateJSONObjectLine(line)
+	}
+	return nil
+}
+
+func validateJSONObjectLine(line []byte) error {
+	trimmed := bytes.TrimSpace(line)
+	if len(trimmed) == 0 {
+		return nil
+	}
+	if trimmed[0] != '{' || !json.Valid(trimmed) {
+		return fmt.Errorf("%w: entry contains a line that is not a JSON object", ErrInvalidBundle)
+	}
+	return nil
+}
+
+func errLogLineTooLarge() error {
+	return fmt.Errorf("%w: entry line exceeds %d bytes", ErrInvalidBundle, contract.MaxLogLineBytes)
+}
+
+// classifyEntryContentError maps a decode-time error to the right bundle
+// sentinel: the streaming limit sentinels and existing bundle errors pass
+// through unchanged; a truncated/empty stream or malformed JSON becomes
+// ErrInvalidBundle.
+func classifyEntryContentError(err error) error {
+	switch {
+	case errors.Is(err, ErrEntryTooLarge),
+		errors.Is(err, ErrUncompressedTooLarge),
+		errors.Is(err, ErrCompressionRatio),
+		errors.Is(err, ErrCompressedTooLarge),
+		errors.Is(err, ErrInvalidBundle):
+		return err
+	case isBundleUploadAbortError(err):
+		return err
+	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
+		return fmt.Errorf("%w: truncated or empty JSON entry", ErrInvalidBundle)
+	default:
+		return fmt.Errorf("%w: %v", ErrInvalidBundle, err)
 	}
 }
 

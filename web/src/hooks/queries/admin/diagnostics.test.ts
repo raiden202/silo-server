@@ -23,39 +23,7 @@ describe("downloadDiagnosticReport", () => {
     mocks.apiResponse.mockReset();
   });
 
-  it("opens a presigned download URL returned as JSON", async () => {
-    const downloadWindow = {
-      close: vi.fn(),
-      location: { href: "about:blank" },
-      opener: window,
-    } as unknown as Window;
-    const open = vi.spyOn(window, "open").mockReturnValue(downloadWindow);
-    mocks.apiResponse.mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          download_url: "https://storage.example/report.tar.gz?signature=test",
-          expires_at: "2026-07-20T18:00:00Z",
-        }),
-        { headers: { "Content-Type": "application/json; charset=utf-8" } },
-      ),
-    );
-
-    await downloadDiagnosticReport(report);
-
-    expect(mocks.apiResponse).toHaveBeenCalledWith(
-      "/admin/diagnostics/reports/83fd3186-bd4f-42e1-8285-58107c503685/download",
-    );
-    expect(open).toHaveBeenCalledWith("about:blank", "_blank");
-    expect(downloadWindow.opener).toBeNull();
-    expect(downloadWindow.location.href).toBe(
-      "https://storage.example/report.tar.gz?signature=test",
-    );
-    open.mockRestore();
-  });
-
-  it("downloads a streamed gzip fallback as a file", async () => {
-    const close = vi.fn();
-    const open = vi.spyOn(window, "open").mockReturnValue({ close } as unknown as Window);
+  it("streams the bundle through the proxy download path", async () => {
     const objectURL = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:diagnostic");
     const revokeObjectURL = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
     const click = vi
@@ -67,9 +35,11 @@ describe("downloadDiagnosticReport", () => {
 
     await downloadDiagnosticReport(report);
 
+    expect(mocks.apiResponse).toHaveBeenCalledWith(
+      "/admin/diagnostics/reports/83fd3186-bd4f-42e1-8285-58107c503685/download?proxy=1",
+    );
     expect(click).toHaveBeenCalledOnce();
     expect(objectURL).toHaveBeenCalledOnce();
-    expect(close).toHaveBeenCalledOnce();
     expect(document.querySelector('a[download="silo-diagnostics-ABCDEF123456.tar.gz"]')).toBeNull();
 
     await new Promise((resolve) => window.setTimeout(resolve, 0));
@@ -77,20 +47,13 @@ describe("downloadDiagnosticReport", () => {
     objectURL.mockRestore();
     revokeObjectURL.mockRestore();
     click.mockRestore();
-    open.mockRestore();
   });
 
-  it("reports when a presigned download window is blocked", async () => {
-    const open = vi.spyOn(window, "open").mockReturnValue(null);
-    mocks.apiResponse.mockResolvedValue(
-      new Response(JSON.stringify({ download_url: "https://storage.example/report.tar.gz" }), {
-        headers: { "Content-Type": "application/json" },
-      }),
-    );
+  it("propagates request failures to the caller", async () => {
+    mocks.apiResponse.mockRejectedValue(new Error("Diagnostic report bundle not found"));
 
     await expect(downloadDiagnosticReport(report)).rejects.toThrow(
-      "The browser blocked the diagnostic download window.",
+      "Diagnostic report bundle not found",
     );
-    open.mockRestore();
   });
 });

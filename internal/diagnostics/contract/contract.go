@@ -15,6 +15,12 @@ import (
 const (
 	SchemaVersion        = 1
 	MaxStackExcerptBytes = 8192
+	// MaxLogLineBytes bounds a single newline-delimited entry line
+	// (logs.jsonl / breadcrumbs.jsonl) during streaming bundle validation. It
+	// is well above the per-field caps a log line can legitimately reach (msg
+	// 2048, tag/run 128, plus registered attrs) so it never rejects a valid
+	// line, while keeping per-line memory bounded when validating.
+	MaxLogLineBytes = 64 * 1024
 )
 
 var (

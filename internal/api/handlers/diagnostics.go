@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	apimw "github.com/Silo-Server/silo-server/internal/api/middleware"
 	"github.com/Silo-Server/silo-server/internal/auth"
@@ -20,6 +21,13 @@ const (
 	diagnosticsMultipartOverheadBytes = int64(128 * 1024)
 	diagnosticsBusyRetryAfter         = "5"
 	diagnosticsQuotaRetryAfter        = "60"
+	// diagnosticsUploadReadTimeout replaces the shared 30s server ReadTimeout
+	// for this route only. Bundles are up to 10 MiB (admin-tunable higher) and
+	// mobile crash uploads over slow uplinks routinely exceed 30s; without this
+	// net/http aborts the read mid-stream before Ingest can return a retryable
+	// error. The bound stays generous but finite so a stalled upload still can't
+	// hold the connection open indefinitely.
+	diagnosticsUploadReadTimeout = 10 * time.Minute
 )
 
 var (
@@ -65,6 +73,16 @@ func (h *DiagnosticsHandler) HandleStatus(w http.ResponseWriter, r *http.Request
 }
 
 func (h *DiagnosticsHandler) HandleUpload(w http.ResponseWriter, r *http.Request) {
+	// Extend the read deadline for this request only; the server-wide
+	// ReadTimeout is too short for slow, large bundle uploads (see the constant).
+	rc := http.NewResponseController(w)
+	if err := rc.SetReadDeadline(time.Now().Add(diagnosticsUploadReadTimeout)); err != nil {
+		h.diagnosticsLogger().WarnContext(r.Context(), "diagnostics upload read deadline not extended",
+			"component", "diagnostics",
+			"error", err,
+		)
+	}
+
 	userID, ok := diagnosticsUserID(w, r)
 	if !ok {
 		claims := apimw.GetClaims(r.Context())

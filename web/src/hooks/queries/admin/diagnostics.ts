@@ -3,7 +3,6 @@ import { toast } from "sonner";
 
 import { api, apiResponse } from "@/api/client";
 import type {
-  DiagnosticDownloadResponse,
   DiagnosticReport,
   DiagnosticReportListResponse,
   DiagnosticStatus,
@@ -77,46 +76,24 @@ export function useDeleteDiagnosticReport() {
 }
 
 export async function downloadDiagnosticReport(report: DiagnosticReport) {
-  const downloadWindow = window.open("about:blank", "_blank");
-  if (downloadWindow) {
-    downloadWindow.opener = null;
-  }
-
-  try {
-    const response = await apiResponse(
-      `/admin/diagnostics/reports/${encodeURIComponent(report.id)}/download`,
-    );
-    const contentType = response.headers
-      .get("Content-Type")
-      ?.split(";", 1)[0]
-      ?.trim()
-      .toLowerCase();
-
-    if (contentType === "application/json") {
-      const payload = (await response.json()) as Partial<DiagnosticDownloadResponse>;
-      if (typeof payload.download_url !== "string" || !payload.download_url.trim()) {
-        throw new Error("The server returned an invalid diagnostic download response.");
-      }
-      if (!downloadWindow) {
-        throw new Error("The browser blocked the diagnostic download window.");
-      }
-      downloadWindow.location.href = payload.download_url;
-      return;
-    }
-
-    downloadWindow?.close();
-    const blob = await response.blob();
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = `silo-diagnostics-${report.short_id || report.id}.tar.gz`;
-    anchor.style.display = "none";
-    document.body.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
-    window.setTimeout(() => URL.revokeObjectURL(url), 0);
-  } catch (error) {
-    downloadWindow?.close();
-    throw error;
-  }
+  // Always stream the bundle through the server (proxy mode) instead of
+  // following a presigned URL. When S3Private points at an endpoint only the
+  // server can reach (an internal MinIO/R2 gateway), a presigned URL sends the
+  // browser to an unreachable host, and because that navigation happens in a
+  // separate window the UI can neither detect the failure nor fall back. Admin
+  // downloads are bounded and rare, so proxying through the server is reliable
+  // and lets errors surface here for the caller to report.
+  const response = await apiResponse(
+    `/admin/diagnostics/reports/${encodeURIComponent(report.id)}/download?proxy=1`,
+  );
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `silo-diagnostics-${report.short_id || report.id}.tar.gz`;
+  anchor.style.display = "none";
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
 }

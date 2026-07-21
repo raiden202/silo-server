@@ -2,6 +2,8 @@ package diagnostics
 
 import (
 	"context"
+	"errors"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -69,6 +71,56 @@ func TestLoadCleanupIntervalUsesDiagnosticsKey(t *testing.T) {
 	}
 	if got := LoadCleanupInterval(context.Background(), newMemorySettingsStore(nil)); got != DefaultCleanupIntervalMinutes*time.Minute {
 		t.Fatalf("LoadCleanupInterval default = %v, want %d minutes", got, DefaultCleanupIntervalMinutes)
+	}
+}
+
+func TestLoadCleanupIntervalCapsHugeValues(t *testing.T) {
+	// The boundary: the largest value that still fits under the cap is accepted
+	// verbatim, while anything larger (including values that would overflow
+	// int64 nanoseconds when multiplied by time.Minute) clamps to the cap
+	// instead of wrapping into a tiny or negative duration.
+	atCap := newMemorySettingsStore(map[string]string{
+		KeyCleanupIntervalMinutes: strconv.Itoa(maxCleanupIntervalMinutes),
+	})
+	if got := LoadCleanupInterval(context.Background(), atCap); got != maxCleanupIntervalMinutes*time.Minute {
+		t.Fatalf("LoadCleanupInterval at cap = %v, want %v", got, maxCleanupIntervalMinutes*time.Minute)
+	}
+
+	for _, raw := range []string{
+		strconv.Itoa(maxCleanupIntervalMinutes + 1),
+		"153722868",           // wraps int64 nanoseconds without the cap
+		"9223372036854775807", // math.MaxInt64 minutes
+	} {
+		store := newMemorySettingsStore(map[string]string{KeyCleanupIntervalMinutes: raw})
+		got := LoadCleanupInterval(context.Background(), store)
+		if got != maxCleanupIntervalMinutes*time.Minute {
+			t.Fatalf("LoadCleanupInterval(%s) = %v, want capped %v", raw, got, maxCleanupIntervalMinutes*time.Minute)
+		}
+		if got <= 0 {
+			t.Fatalf("LoadCleanupInterval(%s) = %v, want a positive duration", raw, got)
+		}
+	}
+}
+
+func TestLoadSettingsPropagatesReadErrors(t *testing.T) {
+	// A genuine read failure must surface as an error so callers can return a
+	// retryable failure instead of silently reporting defaults (e.g. uploads
+	// disabled) to clients.
+	store := &failingSettingsStore{
+		memorySettingsStore: memorySettingsStore{values: map[string]string{KeyUploadsEnabled: "true"}},
+		failKey:             KeyUploadsEnabled,
+	}
+	if _, err := LoadSettings(context.Background(), store); err == nil {
+		t.Fatal("LoadSettings did not propagate a store read error")
+	}
+
+	// A later key failing must also propagate, not be swallowed as a default.
+	store = &failingSettingsStore{
+		memorySettingsStore: memorySettingsStore{values: map[string]string{KeyUploadsEnabled: "true"}},
+		failKey:             KeyMaxBytesPerUser,
+	}
+	if _, err := LoadSettings(context.Background(), store); err == nil {
+		t.Fatal("LoadSettings did not propagate a late store read error")
 	}
 }
 
@@ -144,6 +196,20 @@ func (s *memorySettingsStore) Get(_ context.Context, key string) (string, error)
 func (s *memorySettingsStore) Set(_ context.Context, key, value string) error {
 	s.values[key] = value
 	return nil
+}
+
+// failingSettingsStore returns an error when Get is called for failKey,
+// simulating a transient database read failure for one setting.
+type failingSettingsStore struct {
+	memorySettingsStore
+	failKey string
+}
+
+func (s *failingSettingsStore) Get(ctx context.Context, key string) (string, error) {
+	if key == s.failKey {
+		return "", errors.New("transient read failure")
+	}
+	return s.memorySettingsStore.Get(ctx, key)
 }
 
 // racingSettingsStore adds insert-if-absent semantics and simulates another node
