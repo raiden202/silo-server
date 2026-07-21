@@ -69,6 +69,12 @@ func (r *PostgresRepository) InsertReceiving(ctx context.Context, input InsertRe
 	}
 
 	crashSummary := truncateCrashSummary(input.CrashSummary)
+	sessionIDs := input.PlaybackSessionIDs
+	if sessionIDs == nil {
+		// pgx binds a nil slice as SQL NULL, which bypasses the column's
+		// '{}' default and violates its NOT NULL constraint.
+		sessionIDs = []string{}
+	}
 	for attempt := 0; attempt < retries; attempt++ {
 		id := reportIDGenerator()
 		if _, err := uuid.Parse(id); err != nil {
@@ -95,7 +101,7 @@ func (r *PostgresRepository) InsertReceiving(ctx context.Context, input InsertRe
 		`, id, shortID, input.UserID, nullableString(input.ProfileID), input.CapturedAt,
 			strings.TrimSpace(input.ReportType), strings.TrimSpace(input.Platform),
 			strings.TrimSpace(input.AppVersion), nullableString(crashSummary),
-			string(input.Manifest), input.PlaybackSessionIDs).Scan(&insertedID, &insertedShortID)
+			string(input.Manifest), sessionIDs).Scan(&insertedID, &insertedShortID)
 		if errors.Is(err, pgx.ErrNoRows) {
 			continue
 		}

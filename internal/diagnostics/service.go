@@ -172,6 +172,12 @@ func (s *Service) Ingest(ctx context.Context, userID int, profileID *string, man
 		reason := "insert_failed"
 		if errors.Is(err, ErrQuotaExceeded) {
 			reason = "quota_exceeded"
+		} else {
+			s.logger.ErrorContext(ctx, "diagnostic report insert failed",
+				"component", "diagnostics",
+				"user_id", userID,
+				"error", err,
+			)
 		}
 		s.logRejected(ctx, "", userID, manifest.Report.Platform, manifest.Report.Type, manifest.Archive.Bytes, reason)
 		return IngestResult{}, err
@@ -182,6 +188,12 @@ func (s *Service) Ingest(ctx context.Context, userID int, profileID *string, man
 	if err != nil {
 		s.compensateFailedUpload(ctx, reserved.ID, key)
 		rejectErr := classifyBundleUploadError(err)
+		s.logger.ErrorContext(ctx, "diagnostic bundle validation failed",
+			"component", "diagnostics",
+			"report_id", reserved.ID,
+			"user_id", userID,
+			"error", err,
+		)
 		s.logRejected(ctx, reserved.ID, userID, manifest.Report.Platform, manifest.Report.Type, manifest.Archive.Bytes, rejectReason(rejectErr))
 		return IngestResult{}, rejectErr
 	}
