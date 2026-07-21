@@ -82,6 +82,17 @@ func (h *DiagnosticsHandler) HandleUpload(w http.ResponseWriter, r *http.Request
 			"error", err,
 		)
 	}
+	// Extend the write deadline the same way. cmd/silo's integrated server sets
+	// WriteTimeout 120s, but a slow upload can take longer than that within the
+	// read window above; Ingest may store and mark the report ready and then the
+	// final writeJSON would miss the 120s write deadline, so the client sees a
+	// timeout and retries a report that already succeeded.
+	if err := rc.SetWriteDeadline(time.Now().Add(diagnosticsUploadReadTimeout)); err != nil {
+		h.diagnosticsLogger().WarnContext(r.Context(), "diagnostics upload write deadline not extended",
+			"component", "diagnostics",
+			"error", err,
+		)
+	}
 
 	userID, ok := diagnosticsUserID(w, r)
 	if !ok {

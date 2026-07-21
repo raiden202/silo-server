@@ -248,6 +248,45 @@ func TestServiceIngestStoresOnlyValidatedProfileAttribution(t *testing.T) {
 	}
 }
 
+func TestNewProfileAttributionValidatorRejectsChildProfiles(t *testing.T) {
+	tests := []struct {
+		name    string
+		found   bool
+		isChild bool
+		lookErr error
+		want    bool
+		wantErr bool
+	}{
+		{name: "non-child profile attributed", found: true, isChild: false, want: true},
+		{name: "child profile rejected", found: true, isChild: true, want: false},
+		{name: "missing profile rejected", found: false, isChild: false, want: false},
+		{name: "lookup error propagated", lookErr: errors.New("boom"), wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			validator := NewProfileAttributionValidator(func(_ context.Context, userID int, profileID string) (bool, bool, error) {
+				if userID != 42 || profileID != "prof_1" {
+					t.Fatalf("lookup called with userID=%d profileID=%q", userID, profileID)
+				}
+				return tc.found, tc.isChild, tc.lookErr
+			})
+			got, err := validator.ProfileBelongsToUser(context.Background(), 42, "prof_1")
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("ProfileBelongsToUser error = nil, want error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ProfileBelongsToUser: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("ProfileBelongsToUser = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestServiceIngestAcceptsManifestWithoutProfileID(t *testing.T) {
 	bundle, manifest, _ := testDiagnosticsUpload(t, "server-1", DefaultConsentNoticeVer, "")
 	repo := &fakeDiagnosticReportStore{}

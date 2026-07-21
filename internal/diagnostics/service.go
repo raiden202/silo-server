@@ -90,6 +90,26 @@ func (f ProfileAttributionValidatorFunc) ProfileBelongsToUser(ctx context.Contex
 	return f(ctx, userID, profileID)
 }
 
+// ProfileLookup resolves whether profileID exists for userID and whether it is
+// a child profile. It backs NewProfileAttributionValidator.
+type ProfileLookup func(ctx context.Context, userID int, profileID string) (found bool, isChild bool, err error)
+
+// NewProfileAttributionValidator builds a ProfileAttributionValidator that
+// attributes a report to a profile only when it belongs to the user and is not
+// a child profile. The client diagnostics design forbids child profiles from
+// performing diagnostics actions, so a nonconforming client that sends a child
+// profile's ID (via X-Profile-Id or a manifest profile_id) has that attribution
+// rejected rather than recorded against the child.
+func NewProfileAttributionValidator(lookup ProfileLookup) ProfileAttributionValidator {
+	return ProfileAttributionValidatorFunc(func(ctx context.Context, userID int, profileID string) (bool, error) {
+		found, isChild, err := lookup(ctx, userID, profileID)
+		if err != nil {
+			return false, err
+		}
+		return found && !isChild, nil
+	})
+}
+
 func (s *Service) SetProfileAttributionValidator(validator ProfileAttributionValidator) {
 	s.profileValidator = validator
 }

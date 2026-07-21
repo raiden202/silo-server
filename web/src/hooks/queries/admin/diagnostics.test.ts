@@ -40,6 +40,11 @@ describe("downloadDiagnosticReport", () => {
     );
     expect(click).toHaveBeenCalledOnce();
     expect(objectURL).toHaveBeenCalledOnce();
+    // The click spy records `this` as the anchor the download helper clicked;
+    // assert it carried the blob URL and expected filename before cleanup.
+    const clickedAnchor = click.mock.contexts[0] as HTMLAnchorElement;
+    expect(clickedAnchor.href).toBe("blob:diagnostic");
+    expect(clickedAnchor.download).toBe("silo-diagnostics-ABCDEF123456.tar.gz");
     expect(document.querySelector('a[download="silo-diagnostics-ABCDEF123456.tar.gz"]')).toBeNull();
 
     await new Promise((resolve) => window.setTimeout(resolve, 0));

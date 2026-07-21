@@ -255,14 +255,22 @@ func NewRouter(deps Dependencies) chi.Router {
 	// acting-admin profile policy, degrading admin routes to the plain
 	// role check.
 	var checkPrimaryProfile apimw.PrimaryProfileChecker
+	// lookupProfile resolves a profile for the given user, returning nil when it
+	// does not exist. Shared by the acting-admin primary check and the
+	// diagnostics profile-attribution validator so both read profile state
+	// (IsPrimary, IsChild) the same way.
+	var lookupProfile func(ctx context.Context, userID int, profileID string) (*userstore.Profile, error)
 	if deps.UserStoreProvider != nil {
 		userStores := deps.UserStoreProvider
-		checkPrimaryProfile = func(ctx context.Context, userID int, profileID string) (bool, bool, error) {
+		lookupProfile = func(ctx context.Context, userID int, profileID string) (*userstore.Profile, error) {
 			store, err := userStores.ForUser(ctx, userID)
 			if err != nil {
-				return false, false, err
+				return nil, err
 			}
-			profile, err := store.GetProfile(ctx, profileID)
+			return store.GetProfile(ctx, profileID)
+		}
+		checkPrimaryProfile = func(ctx context.Context, userID int, profileID string) (bool, bool, error) {
+			profile, err := lookupProfile(ctx, userID, profileID)
 			if err != nil {
 				return false, false, err
 			}
@@ -321,11 +329,20 @@ func NewRouter(deps Dependencies) chi.Router {
 			diagnosticsStore,
 			slog.Default(),
 		)
-		if checkPrimaryProfile != nil {
-			diagnosticsService.SetProfileAttributionValidator(diagnostics.ProfileAttributionValidatorFunc(
-				func(ctx context.Context, userID int, profileID string) (bool, error) {
-					_, found, err := checkPrimaryProfile(ctx, userID, profileID)
-					return found, err
+		if lookupProfile != nil {
+			// Attribute reports only to a profile that belongs to the account and
+			// is not a child profile; child profiles must not perform diagnostics
+			// actions per the design, so reject their attribution here.
+			diagnosticsService.SetProfileAttributionValidator(diagnostics.NewProfileAttributionValidator(
+				func(ctx context.Context, userID int, profileID string) (bool, bool, error) {
+					profile, err := lookupProfile(ctx, userID, profileID)
+					if err != nil {
+						return false, false, err
+					}
+					if profile == nil {
+						return false, false, nil
+					}
+					return true, profile.IsChild, nil
 				},
 			))
 		}
