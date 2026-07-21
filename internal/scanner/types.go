@@ -67,6 +67,7 @@ type VideoTrackInfo struct {
 	Bitrate            int
 	VideoRange         string
 	VideoRangeType     string
+	ColorRange         string
 	ColorPrimaries     string
 	ColorSpace         string
 	ColorTransfer      string

@@ -890,6 +890,7 @@ func buildMediaStreamsWithSelection(routeItemID, mediaSourceID string, version c
 			AspectRatio:            track.AspectRatio,
 			VideoRange:             compatVideoRange(track, version.HDR),
 			VideoRangeType:         compatVideoRangeType(track, version.HDR),
+			ColorRange:             track.ColorRange,
 			ColorPrimaries:         track.ColorPrimaries,
 			ColorSpace:             track.ColorSpace,
 			ColorTransfer:          track.ColorTransfer,

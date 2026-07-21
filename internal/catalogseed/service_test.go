@@ -3,7 +3,23 @@ package catalogseed
 import (
 	"reflect"
 	"testing"
+
+	"github.com/Silo-Server/silo-server/internal/models"
 )
+
+func TestToVideoTrackRecordsPreservesColorRange(t *testing.T) {
+	got := toVideoTrackRecords([]models.VideoTrack{
+		{ColorRange: "tv"},
+		{ColorRange: "pc"},
+	})
+
+	if len(got) != 2 {
+		t.Fatalf("records length = %d, want 2", len(got))
+	}
+	if got[0].ColorRange != "tv" || got[1].ColorRange != "pc" {
+		t.Fatalf("ColorRange values = [%q, %q], want [tv, pc]", got[0].ColorRange, got[1].ColorRange)
+	}
+}
 
 func TestCatalogSeedSearchUpsertIDsIncludesChangedItemsAndEmbeddings(t *testing.T) {
 	itemStates := map[string]bool{

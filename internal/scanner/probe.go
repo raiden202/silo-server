@@ -76,6 +76,7 @@ type ffprobeStream struct {
 	StartTime          string              `json:"start_time"`
 	Duration           string              `json:"duration"`
 	BitRate            string              `json:"bit_rate"`
+	ColorRange         string              `json:"color_range"`
 	ColorTransfer      string              `json:"color_transfer"`
 	ColorPrimaries     string              `json:"color_primaries"`
 	ColorSpace         string              `json:"color_space"`
@@ -205,6 +206,7 @@ func convertProbeData(raw *ffprobeOutput) *ProbeData {
 				Bitrate:            parseNumeric(s.BitRate) / 1000,
 				VideoRange:         videoRangeLabel(s),
 				VideoRangeType:     videoRangeType(s),
+				ColorRange:         firstNonEmpty(s.ColorRange, "unknown"),
 				ColorPrimaries:     s.ColorPrimaries,
 				ColorSpace:         s.ColorSpace,
 				ColorTransfer:      s.ColorTransfer,

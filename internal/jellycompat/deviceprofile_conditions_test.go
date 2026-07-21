@@ -1,6 +1,7 @@
 package jellycompat
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -270,6 +271,39 @@ func TestBuildMediaStreamsUsesJellyfinVideoRangeType(t *testing.T) {
 	}
 	if streams[0].VideoRangeType != "DOVIWithEL" {
 		t.Fatalf("VideoRangeType = %q, want DOVIWithEL", streams[0].VideoRangeType)
+	}
+}
+
+func TestBuildMediaStreamsPreservesColorRange(t *testing.T) {
+	for _, colorRange := range []string{"tv", "pc"} {
+		t.Run(colorRange, func(t *testing.T) {
+			version := catalog.FileVersion{
+				VideoTracks: []models.VideoTrack{{
+					Codec:      "h264",
+					ColorRange: colorRange,
+				}},
+			}
+
+			streams := buildMediaStreams("item", "source", version)
+			if len(streams) != 1 {
+				t.Fatalf("streams length = %d, want 1", len(streams))
+			}
+			if got := streams[0].ColorRange; got != colorRange {
+				t.Fatalf("ColorRange = %q, want %q", got, colorRange)
+			}
+
+			payload, err := json.Marshal(streams[0])
+			if err != nil {
+				t.Fatalf("marshal media stream: %v", err)
+			}
+			var decoded map[string]any
+			if err := json.Unmarshal(payload, &decoded); err != nil {
+				t.Fatalf("unmarshal media stream: %v", err)
+			}
+			if got := decoded["ColorRange"]; got != colorRange {
+				t.Fatalf("JSON ColorRange = %#v, want %q", got, colorRange)
+			}
+		})
 	}
 }
 
