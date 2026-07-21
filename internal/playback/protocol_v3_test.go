@@ -265,6 +265,28 @@ func TestSourceDescriptorV3NormalizesLegacyHEVCMetadata(t *testing.T) {
 	}
 }
 
+func TestSourceDescriptorV3PreservesCanonicalColorRange(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "limited", input: "tv", want: "tv"},
+		{name: "full", input: "pc", want: "pc"},
+		{name: "unspecified", input: "unknown", want: "unknown"},
+		{name: "normalizes case and whitespace", input: " PC ", want: "pc"},
+		{name: "rejects non-ffmpeg value", input: "limited", want: ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			file := detailedFixtureFileV3()
+			file.VideoTracks[0].ColorRange = test.input
+			if got := SourceDescriptorFromFileV3(file, 0).ColorRange; got != test.want {
+				t.Fatalf("color range = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestPlanPlaybackV3DirectPlaysLegacyHDR10WithInferredBitDepth(t *testing.T) {
 	file := detailedFixtureFileV3()
 	file.VideoTracks[0].BitDepth = 0
@@ -933,7 +955,7 @@ func validStartRequestV3() StartRequestV3 {
 }
 
 func detailedFixtureFileV3() *models.MediaFile {
-	return &models.MediaFile{ID: 42, FilePath: "/media/movie.mkv", Container: "mkv", CodecVideo: "hevc", CodecAudio: "aac", Resolution: "2160p", Bitrate: 60_000, AudioChannels: 2, VideoTracks: []models.VideoTrack{{Codec: "hevc", Profile: "Main 10", Level: 153, Width: 3840, Height: 2160, FrameRate: "24000/1001", Bitrate: 60_000, BitDepth: 10, VideoRange: "HDR", VideoRangeType: "HDR10"}}, AudioTracks: []models.AudioTrack{{Codec: "aac", Channels: 2, Layout: "stereo"}}}
+	return &models.MediaFile{ID: 42, FilePath: "/media/movie.mkv", Container: "mkv", CodecVideo: "hevc", CodecAudio: "aac", Resolution: "2160p", Bitrate: 60_000, AudioChannels: 2, VideoTracks: []models.VideoTrack{{Codec: "hevc", Profile: "Main 10", Level: 153, Width: 3840, Height: 2160, FrameRate: "24000/1001", Bitrate: 60_000, BitDepth: 10, VideoRange: "HDR", VideoRangeType: "HDR10", ColorRange: "tv"}}, AudioTracks: []models.AudioTrack{{Codec: "aac", Channels: 2, Layout: "stereo"}}}
 }
 
 func testTransformationRegistryV3() *TransformationRegistryV3 {

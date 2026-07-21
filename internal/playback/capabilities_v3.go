@@ -26,6 +26,7 @@ func SourceDescriptorFromFileV3(file *models.MediaFile, audioIndex int) SourceDe
 		source.VideoProfile = strings.ToLower(strings.TrimSpace(track.Profile))
 		source.VideoLevel = track.Level
 		source.BitDepth = models.NormalizeVideoBitDepth(track.BitDepth, track.PixelFormat, track.Profile)
+		source.ColorRange = normalizeColorRangeV3(track.ColorRange)
 		source.Width = track.Width
 		source.Height = track.Height
 		source.FrameRate = parseFrameRateV3(track.FrameRate)
@@ -71,6 +72,15 @@ func SourceDescriptorFromFileV3(file *models.MediaFile, audioIndex int) SourceDe
 		}
 	}
 	return source
+}
+
+func normalizeColorRangeV3(value string) string {
+	switch normalized := strings.ToLower(strings.TrimSpace(value)); normalized {
+	case "tv", "pc", "unknown":
+		return normalized
+	default:
+		return ""
+	}
 }
 
 func detailedVideoEligibleV3(source SourceDescriptorV3, request StartRequestV3) bool {
