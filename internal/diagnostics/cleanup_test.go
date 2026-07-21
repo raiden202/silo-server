@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-func TestCleanupReportsDeletesBlobBeforeRowAndToleratesMissingObject(t *testing.T) {
+func TestCleanupReportsDeletesRowBeforeBlobAndToleratesMissingObject(t *testing.T) {
 	ops := []string{}
 	repo := &fakeCleanupRepo{
 		retention: []Report{
@@ -38,15 +38,15 @@ func TestCleanupReportsDeletesBlobBeforeRowAndToleratesMissingObject(t *testing.
 		t.Fatalf("RetentionReportsDeleted = %d, want 2", result.RetentionReportsDeleted)
 	}
 	wantOps := []string{
-		"delete-object:diagnostics/7/r1.tar.gz",
 		"delete-row:r1",
-		"delete-object:diagnostics/7/r2.tar.gz",
+		"delete-object:diagnostics/7/r1.tar.gz",
 		"delete-row:r2",
+		"delete-object:diagnostics/7/r2.tar.gz",
 	}
 	assertStrings(t, ops, wantOps)
 }
 
-func TestCleanupReportsContinuesPastPerReportFailure(t *testing.T) {
+func TestCleanupReportsTreatsBlobFailureAsNonFatal(t *testing.T) {
 	ops := []string{}
 	repo := &fakeCleanupRepo{
 		retention: []Report{
@@ -68,17 +68,20 @@ func TestCleanupReportsContinuesPastPerReportFailure(t *testing.T) {
 		Now:    func() time.Time { return time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC) },
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
-	if err == nil {
-		t.Fatal("CleanupReports error = nil, want aggregated per-report failure")
+	// r1's row is deleted first, so its blob delete failing does not abort the
+	// run or roll back the row: it is logged for orphan cleanup to reap, both
+	// rows count as deleted, and no error is surfaced.
+	if err != nil {
+		t.Fatalf("CleanupReports: %v", err)
 	}
-	// r1's blob delete failed, so its row is left intact; r2 is still processed.
-	if result.RetentionReportsDeleted != 1 {
-		t.Fatalf("RetentionReportsDeleted = %d, want 1", result.RetentionReportsDeleted)
+	if result.RetentionReportsDeleted != 2 {
+		t.Fatalf("RetentionReportsDeleted = %d, want 2", result.RetentionReportsDeleted)
 	}
 	assertStrings(t, ops, []string{
+		"delete-row:r1",
 		"delete-object:diagnostics/7/r1.tar.gz",
-		"delete-object:diagnostics/7/r2.tar.gz",
 		"delete-row:r2",
+		"delete-object:diagnostics/7/r2.tar.gz",
 	})
 }
 
@@ -103,9 +106,9 @@ func TestCleanupReportsCleansStaleReceiving(t *testing.T) {
 		t.Fatalf("StaleReportsDeleted = %d, want 1", result.StaleReportsDeleted)
 	}
 	assertStrings(t, ops, []string{
-		"delete-object:diagnostics/7/r1.tar.gz",
 		"mark-failed:r1",
 		"delete-row:r1",
+		"delete-object:diagnostics/7/r1.tar.gz",
 	})
 }
 

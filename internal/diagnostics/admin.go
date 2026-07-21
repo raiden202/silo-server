@@ -78,13 +78,7 @@ func (s *Service) DeleteReport(ctx context.Context, id string) (*Report, error) 
 		return nil, err
 	}
 	if err := deleteReportObjects(ctx, s.store, deleted, s.logger); err != nil {
-		s.logger.ErrorContext(ctx, "diagnostic report blob deletion failed after row deletion",
-			"component", "diagnostics",
-			"report_id", deleted.ID,
-			"bucket", reportBlobBucket(deleted, s.store),
-			"keys", reportObjectKeys(*deleted),
-			"error", err,
-		)
+		logDeferredBlobDeletion(ctx, s.logger, s.store, deleted, err)
 	}
 	return deleted, nil
 }

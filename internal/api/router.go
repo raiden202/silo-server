@@ -1816,6 +1816,12 @@ func NewRouter(deps Dependencies) chi.Router {
 		if diagnosticsHandler != nil && authMiddleware != nil {
 			r.Group(func(r chi.Router) {
 				r.Use(authMiddleware.RequireAuth)
+				// Demo mode blocks non-admin report uploads (a write to the
+				// private bucket and DB); the read-only status endpoint stays
+				// available because DemoGuard always lets GETs through.
+				if demoGuard != nil {
+					r.Use(demoGuard.Guard)
+				}
 				if deps.RateLimitMW != nil {
 					r.Use(deps.RateLimitMW.Handler)
 				}

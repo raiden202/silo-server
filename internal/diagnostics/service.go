@@ -34,6 +34,7 @@ var (
 	ErrArchiveMismatch        = errors.New("diagnostics archive metadata mismatch")
 	ErrReportStoreUnavailable = errors.New("diagnostics report store unavailable")
 	ErrProfileMismatch        = errors.New("diagnostics profile id mismatch")
+	ErrChildProfileForbidden  = errors.New("diagnostics child profile attribution forbidden")
 )
 
 type AvailabilityStatus string
@@ -99,15 +100,20 @@ type ProfileLookup func(ctx context.Context, userID int, profileID string) (foun
 // attributes a report to a profile only when it belongs to the user and is not
 // a child profile. The client diagnostics design forbids child profiles from
 // performing diagnostics actions, so a nonconforming client that sends a child
-// profile's ID (via X-Profile-Id or a manifest profile_id) has that attribution
-// rejected rather than recorded against the child.
+// profile's ID (via X-Profile-Id or a manifest profile_id) has the upload
+// rejected with ErrChildProfileForbidden rather than silently losing the
+// attribution. A profile that is simply not the user's (found == false) is not
+// an error: attribution is dropped and the upload proceeds unattributed.
 func NewProfileAttributionValidator(lookup ProfileLookup) ProfileAttributionValidator {
 	return ProfileAttributionValidatorFunc(func(ctx context.Context, userID int, profileID string) (bool, error) {
 		found, isChild, err := lookup(ctx, userID, profileID)
 		if err != nil {
 			return false, err
 		}
-		return found && !isChild, nil
+		if found && isChild {
+			return false, ErrChildProfileForbidden
+		}
+		return found, nil
 	})
 }
 
@@ -479,6 +485,12 @@ func (s *Service) validatedProfileID(ctx context.Context, userID int, profileID 
 	}
 	found, err := s.profileValidator.ProfileBelongsToUser(ctx, userID, *candidate)
 	if err != nil {
+		// A child-profile attribution is a client-facing rejection, not an
+		// internal failure: surface it verbatim so the handler can return a
+		// clear error instead of a generic 500.
+		if errors.Is(err, ErrChildProfileForbidden) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("validate diagnostic profile attribution: %w", err)
 	}
 	if !found {

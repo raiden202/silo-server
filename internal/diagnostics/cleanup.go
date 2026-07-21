@@ -94,13 +94,16 @@ func CleanupReports(
 		return result, errors.Join(errs...)
 	}
 	for _, report := range candidates {
-		if err := deleteReportObjects(ctx, store, &report, logger); err != nil {
-			errs = append(errs, fmt.Errorf("delete diagnostic retention blob %s: %w", report.ID, err))
-			continue
-		}
+		// Row first: a DB failure after the object is gone would leave a visible
+		// ready report whose bundle 404s on download. If the blob delete then
+		// fails the row is already gone, so log it for the orphan pass below to
+		// reap rather than aborting the run (see the admin DeleteReport path).
 		if _, err := repo.DeleteByID(ctx, report.ID); err != nil && !IsReportNotFound(err) {
 			errs = append(errs, fmt.Errorf("delete diagnostic retention row %s: %w", report.ID, err))
 			continue
+		}
+		if err := deleteReportObjects(ctx, store, &report, logger); err != nil {
+			logDeferredBlobDeletion(ctx, logger, store, &report, err)
 		}
 		result.RetentionReportsDeleted++
 	}
@@ -111,10 +114,9 @@ func CleanupReports(
 		return result, errors.Join(errs...)
 	}
 	for _, report := range stale {
-		if err := deleteReportObjects(ctx, store, &report, logger); err != nil {
-			errs = append(errs, fmt.Errorf("delete stale diagnostic blob %s: %w", report.ID, err))
-			continue
-		}
+		// Same rows-first ordering as retention: mark/delete the row before the
+		// blob so a mid-cleanup DB failure never leaves a row pointing at a
+		// missing object, and let orphan cleanup reap a blob that fails to delete.
 		if report.State == StateReceiving {
 			if err := repo.MarkFailed(ctx, report.ID); err != nil && !IsReportNotFound(err) {
 				errs = append(errs, fmt.Errorf("mark stale diagnostic report failed %s: %w", report.ID, err))
@@ -124,6 +126,9 @@ func CleanupReports(
 		if _, err := repo.DeleteByID(ctx, report.ID); err != nil && !IsReportNotFound(err) {
 			errs = append(errs, fmt.Errorf("delete stale diagnostic row %s: %w", report.ID, err))
 			continue
+		}
+		if err := deleteReportObjects(ctx, store, &report, logger); err != nil {
+			logDeferredBlobDeletion(ctx, logger, store, &report, err)
 		}
 		result.StaleReportsDeleted++
 	}
@@ -193,6 +198,25 @@ func logSkippedObjectDeletion(ctx context.Context, logger *slog.Logger, reportID
 		"component", "diagnostics",
 		"report_id", reportID,
 		"keys", keys,
+	)
+}
+
+// logDeferredBlobDeletion records a report blob that could not be deleted after
+// its DB row was already removed. The row is the source of truth, so the object
+// is now an orphan for the orphan-cleanup pass (this run or a later one) to
+// reap; we log the bucket and keys rather than fail so one unreachable object
+// can't block row deletion. Shared by the retention/stale loops and the admin
+// DeleteReport path.
+func logDeferredBlobDeletion(ctx context.Context, logger *slog.Logger, store ObjectStore, report *Report, err error) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.ErrorContext(ctx, "diagnostic report blob deletion failed after row deletion",
+		"component", "diagnostics",
+		"report_id", report.ID,
+		"bucket", reportBlobBucket(report, store),
+		"keys", reportObjectKeys(*report),
+		"error", err,
 	)
 }
 

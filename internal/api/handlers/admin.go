@@ -2472,6 +2472,11 @@ func (h *AdminHandler) normalizeDiagnosticsNumericSetting(ctx context.Context, k
 		if value > settings.MaxUncompressedBytes {
 			return "", fmt.Errorf("%s must not exceed %s (%d bytes)", key, diagnostics.KeyMaxUncompressedBytes, settings.MaxUncompressedBytes)
 		}
+		// A single bundle can never exceed the per-user byte cap, or every upload
+		// at this size would fail quota; keep the two bounds consistent.
+		if value > settings.MaxBytesPerUser {
+			return "", fmt.Errorf("%s must not exceed %s (%d bytes)", key, diagnostics.KeyMaxBytesPerUser, settings.MaxBytesPerUser)
+		}
 	case diagnostics.KeyMaxUncompressedBytes:
 		if value < settings.MaxBundleBytes || value > gib {
 			return "", fmt.Errorf("%s must be between %s (%d bytes) and 1 GiB (%d bytes)", key, diagnostics.KeyMaxBundleBytes, settings.MaxBundleBytes, gib)
@@ -2487,6 +2492,12 @@ func (h *AdminHandler) normalizeDiagnosticsNumericSetting(ctx context.Context, k
 	case diagnostics.KeyMaxBytesPerUser:
 		if value < 10*mib || value > 10*gib {
 			return "", fmt.Errorf("%s must be between 10 MiB (%d bytes) and 10 GiB (%d bytes)", key, 10*mib, 10*gib)
+		}
+		// The per-user cap must leave room for at least one max-size bundle, or
+		// /diagnostics/status would advertise a bundle size InsertReceiving always
+		// rejects as quota_exceeded.
+		if value < settings.MaxBundleBytes {
+			return "", fmt.Errorf("%s must be at least %s (%d bytes)", key, diagnostics.KeyMaxBundleBytes, settings.MaxBundleBytes)
 		}
 	default:
 		return "", fmt.Errorf("unsupported diagnostics numeric setting %s", key)

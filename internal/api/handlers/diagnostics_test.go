@@ -447,7 +447,7 @@ func TestDiagnosticsNumericSettingsAcceptBoundaries(t *testing.T) {
 		initial map[string]string
 	}{
 		{name: "bundle minimum", key: diagnostics.KeyMaxBundleBytes, value: "1048576", initial: map[string]string{diagnostics.KeyMaxUncompressedBytes: "1073741824"}},
-		{name: "bundle maximum", key: diagnostics.KeyMaxBundleBytes, value: "268435456", initial: map[string]string{diagnostics.KeyMaxUncompressedBytes: "1073741824"}},
+		{name: "bundle maximum", key: diagnostics.KeyMaxBundleBytes, value: "268435456", initial: map[string]string{diagnostics.KeyMaxUncompressedBytes: "1073741824", diagnostics.KeyMaxBytesPerUser: "10737418240"}},
 		{name: "uncompressed bundle floor", key: diagnostics.KeyMaxUncompressedBytes, value: "1048576", initial: map[string]string{diagnostics.KeyMaxBundleBytes: "1048576"}},
 		{name: "uncompressed maximum", key: diagnostics.KeyMaxUncompressedBytes, value: "1073741824", initial: map[string]string{diagnostics.KeyMaxBundleBytes: "1048576"}},
 		{name: "reports minimum", key: diagnostics.KeyMaxReportsPerUserDay, value: "1"},
@@ -482,6 +482,8 @@ func TestDiagnosticsNumericSettingsRejectOutOfRangeValues(t *testing.T) {
 		{name: "bundle above maximum", key: diagnostics.KeyMaxBundleBytes, value: "268435457", initial: map[string]string{diagnostics.KeyMaxUncompressedBytes: "1073741824"}},
 		{name: "bundle above uncompressed", key: diagnostics.KeyMaxBundleBytes, value: "67108865", initial: map[string]string{diagnostics.KeyMaxUncompressedBytes: "67108864"}},
 		{name: "uncompressed below bundle", key: diagnostics.KeyMaxUncompressedBytes, value: "10485759", initial: map[string]string{diagnostics.KeyMaxBundleBytes: "10485760"}},
+		{name: "bundle above per-user cap", key: diagnostics.KeyMaxBundleBytes, value: "104857600", initial: map[string]string{diagnostics.KeyMaxUncompressedBytes: "1073741824", diagnostics.KeyMaxBytesPerUser: "10485760"}},
+		{name: "per-user below bundle", key: diagnostics.KeyMaxBytesPerUser, value: "10485760", initial: map[string]string{diagnostics.KeyMaxBundleBytes: "104857600", diagnostics.KeyMaxUncompressedBytes: "1073741824"}},
 		{name: "uncompressed above maximum", key: diagnostics.KeyMaxUncompressedBytes, value: "1073741825"},
 		{name: "reports below minimum", key: diagnostics.KeyMaxReportsPerUserDay, value: "0"},
 		{name: "reports above maximum", key: diagnostics.KeyMaxReportsPerUserDay, value: "1001"},

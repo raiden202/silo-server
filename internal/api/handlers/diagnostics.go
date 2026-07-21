@@ -323,6 +323,8 @@ func writeDiagnosticsServiceError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusBadRequest, "archive_mismatch", "Diagnostics archive metadata does not match")
 	case errors.Is(err, diagnostics.ErrProfileMismatch):
 		writeError(w, http.StatusBadRequest, "profile_mismatch", "Diagnostics profile does not match the captured report")
+	case errors.Is(err, diagnostics.ErrChildProfileForbidden):
+		writeError(w, http.StatusForbidden, "child_profile_forbidden", "Diagnostics cannot be attributed to a child profile")
 	case errors.Is(err, diagnostics.ErrInvalidBundle):
 		writeError(w, http.StatusBadRequest, "invalid_bundle", "Invalid diagnostics bundle")
 	default:

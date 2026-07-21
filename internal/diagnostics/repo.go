@@ -260,7 +260,7 @@ func (r *PostgresRepository) ListForAdmin(ctx context.Context, filters ListFilte
 	}
 
 	query := fmt.Sprintf("%s\n\t\tWHERE %s\n\t\tORDER BY received_at DESC, id DESC\n\t\tLIMIT $%d",
-		reportSelectSQL(), strings.Join(conditions, " AND "), argIdx)
+		reportListSelectSQL(), strings.Join(conditions, " AND "), argIdx)
 	args = append(args, limit+1)
 
 	rows, err := r.pool.Query(ctx, query, args...)
@@ -271,7 +271,7 @@ func (r *PostgresRepository) ListForAdmin(ctx context.Context, filters ListFilte
 
 	reports := make([]Report, 0, limit+1)
 	for rows.Next() {
-		report, err := scanReport(rows)
+		report, err := scanReportSummary(rows)
 		if err != nil {
 			return ListResult{}, err
 		}
@@ -314,13 +314,13 @@ func (r *PostgresRepository) RetentionCandidates(ctx context.Context, olderThan 
 		return nil, nil
 	}
 
-	query := reportSelectSQL() + `
+	query := reportListSelectSQL() + `
 		WHERE received_at < $1
 		ORDER BY received_at ASC, id ASC
 	`
 	args := []any{olderThan}
 	if olderThan.IsZero() {
-		query = reportSelectSQL() + `
+		query = reportListSelectSQL() + `
 			WHERE false
 		`
 		args = nil
@@ -341,12 +341,12 @@ func (r *PostgresRepository) RetentionCandidates(ctx context.Context, olderThan 
 				) ranked
 				WHERE retained_bytes > $1
 			)
-		` + reportSelectSQL() + `
+		` + reportListSelectSQL() + `
 			WHERE id IN (SELECT id FROM quota_candidates)
 			ORDER BY received_at ASC, id ASC
 		`
 		if olderThan.IsZero() {
-			return r.queryReports(ctx, byteCapQuery, perUserByteCap)
+			return r.queryReportSummaries(ctx, byteCapQuery, perUserByteCap)
 		}
 
 		query = `
@@ -363,14 +363,14 @@ func (r *PostgresRepository) RetentionCandidates(ctx context.Context, olderThan 
 				) ranked
 				WHERE retained_bytes > $2
 			)
-		` + reportSelectSQL() + `
+		` + reportListSelectSQL() + `
 			WHERE received_at < $1 OR id IN (SELECT id FROM quota_candidates)
 			ORDER BY received_at ASC, id ASC
 		`
 		args = []any{olderThan, perUserByteCap}
 	}
 
-	return r.queryReports(ctx, query, args...)
+	return r.queryReportSummaries(ctx, query, args...)
 }
 
 func (r *PostgresRepository) StaleReceiving(ctx context.Context, grace time.Duration) ([]Report, error) {
@@ -378,7 +378,7 @@ func (r *PostgresRepository) StaleReceiving(ctx context.Context, grace time.Dura
 		grace = time.Hour
 	}
 	cutoff := time.Now().UTC().Add(-grace)
-	return r.queryReports(ctx, reportSelectSQL()+`
+	return r.queryReportSummaries(ctx, reportListSelectSQL()+`
 		WHERE state IN ('receiving', 'failed')
 		  AND received_at < $1
 		ORDER BY received_at ASC, id ASC
@@ -417,7 +417,9 @@ func (r *PostgresRepository) LiveBlobKeys(ctx context.Context, keys []string) (m
 	return live, nil
 }
 
-func (r *PostgresRepository) queryReports(ctx context.Context, query string, args ...any) ([]Report, error) {
+// queryReportSummaries runs a reportListSelectSQL-shaped query; the returned
+// reports carry no manifest. Only list/cleanup paths use it.
+func (r *PostgresRepository) queryReportSummaries(ctx context.Context, query string, args ...any) ([]Report, error) {
 	rows, err := r.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query diagnostic reports: %w", err)
@@ -426,7 +428,7 @@ func (r *PostgresRepository) queryReports(ctx context.Context, query string, arg
 
 	reports := []Report{}
 	for rows.Next() {
-		report, err := scanReport(rows)
+		report, err := scanReportSummary(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -463,9 +465,23 @@ func validateInsertReceivingInput(input InsertReceivingInput) error {
 	return nil
 }
 
+// reportSelectSQL is the full projection including the manifest JSONB (up to
+// MaxManifestBytes per row). Reserve it for single-report detail/download paths;
+// list and cleanup queries use reportListSelectSQL so browsing a page or running
+// a retention/stale batch doesn't drag every report's manifest through the DB.
 func reportSelectSQL() string {
 	return `SELECT id::text, short_id, user_id, profile_id, state, captured_at, received_at,
 		       report_type, platform, app_version, crash_summary, manifest, playback_session_ids,
+		       blob_bucket, blob_key, blob_bytes, uncompressed_bytes, blob_sha256
+		FROM client_diagnostic_reports`
+}
+
+// reportListSelectSQL mirrors reportSelectSQL but omits the manifest column.
+// Reports scanned with scanReportSummary therefore have a nil Manifest; the
+// list and cleanup callers only need summary and blob fields.
+func reportListSelectSQL() string {
+	return `SELECT id::text, short_id, user_id, profile_id, state, captured_at, received_at,
+		       report_type, platform, app_version, crash_summary, playback_session_ids,
 		       blob_bucket, blob_key, blob_bytes, uncompressed_bytes, blob_sha256
 		FROM client_diagnostic_reports`
 }
@@ -474,60 +490,106 @@ type reportScanner interface {
 	Scan(dest ...any) error
 }
 
+// reportNulls holds the nullable columns shared by the full and summary
+// projections so both scanners apply them the same way.
+type reportNulls struct {
+	profileID         sql.NullString
+	crashSummary      sql.NullString
+	blobBucket        sql.NullString
+	blobKey           sql.NullString
+	blobSHA256        sql.NullString
+	blobBytes         sql.NullInt64
+	uncompressedBytes sql.NullInt64
+}
+
+func (n *reportNulls) apply(report *Report) {
+	if n.profileID.Valid {
+		report.ProfileID = &n.profileID.String
+	}
+	if n.crashSummary.Valid {
+		report.CrashSummary = &n.crashSummary.String
+	}
+	if report.PlaybackSessionIDs == nil {
+		report.PlaybackSessionIDs = []string{}
+	}
+	if n.blobBucket.Valid {
+		report.BlobBucket = &n.blobBucket.String
+	}
+	if n.blobKey.Valid {
+		report.BlobKey = &n.blobKey.String
+	}
+	if n.blobBytes.Valid {
+		report.BlobBytes = &n.blobBytes.Int64
+	}
+	if n.uncompressedBytes.Valid {
+		report.UncompressedBytes = &n.uncompressedBytes.Int64
+	}
+	if n.blobSHA256.Valid {
+		report.BlobSHA256 = &n.blobSHA256.String
+	}
+}
+
+// scanReport scans the full reportSelectSQL projection, including the manifest.
 func scanReport(row reportScanner) (*Report, error) {
 	var report Report
-	var profileID, crashSummary, blobBucket, blobKey, blobSHA256 sql.NullString
-	var blobBytes, uncompressedBytes sql.NullInt64
+	var nulls reportNulls
 	var manifest []byte
 	if err := row.Scan(
 		&report.ID,
 		&report.ShortID,
 		&report.UserID,
-		&profileID,
+		&nulls.profileID,
 		&report.State,
 		&report.CapturedAt,
 		&report.ReceivedAt,
 		&report.ReportType,
 		&report.Platform,
 		&report.AppVersion,
-		&crashSummary,
+		&nulls.crashSummary,
 		&manifest,
 		&report.PlaybackSessionIDs,
-		&blobBucket,
-		&blobKey,
-		&blobBytes,
-		&uncompressedBytes,
-		&blobSHA256,
+		&nulls.blobBucket,
+		&nulls.blobKey,
+		&nulls.blobBytes,
+		&nulls.uncompressedBytes,
+		&nulls.blobSHA256,
 	); err != nil {
 		return nil, fmt.Errorf("scan diagnostic report: %w", err)
-	}
-	if profileID.Valid {
-		report.ProfileID = &profileID.String
-	}
-	if crashSummary.Valid {
-		report.CrashSummary = &crashSummary.String
 	}
 	if len(manifest) > 0 {
 		report.Manifest = append(json.RawMessage(nil), manifest...)
 	}
-	if report.PlaybackSessionIDs == nil {
-		report.PlaybackSessionIDs = []string{}
+	nulls.apply(&report)
+	return &report, nil
+}
+
+// scanReportSummary scans the reportListSelectSQL projection, which omits the
+// manifest; the returned report's Manifest is left nil.
+func scanReportSummary(row reportScanner) (*Report, error) {
+	var report Report
+	var nulls reportNulls
+	if err := row.Scan(
+		&report.ID,
+		&report.ShortID,
+		&report.UserID,
+		&nulls.profileID,
+		&report.State,
+		&report.CapturedAt,
+		&report.ReceivedAt,
+		&report.ReportType,
+		&report.Platform,
+		&report.AppVersion,
+		&nulls.crashSummary,
+		&report.PlaybackSessionIDs,
+		&nulls.blobBucket,
+		&nulls.blobKey,
+		&nulls.blobBytes,
+		&nulls.uncompressedBytes,
+		&nulls.blobSHA256,
+	); err != nil {
+		return nil, fmt.Errorf("scan diagnostic report: %w", err)
 	}
-	if blobBucket.Valid {
-		report.BlobBucket = &blobBucket.String
-	}
-	if blobKey.Valid {
-		report.BlobKey = &blobKey.String
-	}
-	if blobBytes.Valid {
-		report.BlobBytes = &blobBytes.Int64
-	}
-	if uncompressedBytes.Valid {
-		report.UncompressedBytes = &uncompressedBytes.Int64
-	}
-	if blobSHA256.Valid {
-		report.BlobSHA256 = &blobSHA256.String
-	}
+	nulls.apply(&report)
 	return &report, nil
 }
 

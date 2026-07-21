@@ -301,16 +301,17 @@ func TestServiceIngestAcceptsMatchingProfileID(t *testing.T) {
 
 func TestNewProfileAttributionValidatorRejectsChildProfiles(t *testing.T) {
 	tests := []struct {
-		name    string
-		found   bool
-		isChild bool
-		lookErr error
-		want    bool
-		wantErr bool
+		name      string
+		found     bool
+		isChild   bool
+		lookErr   error
+		want      bool
+		wantErr   bool
+		wantChild bool
 	}{
 		{name: "non-child profile attributed", found: true, isChild: false, want: true},
-		{name: "child profile rejected", found: true, isChild: true, want: false},
-		{name: "missing profile rejected", found: false, isChild: false, want: false},
+		{name: "child profile forbidden", found: true, isChild: true, wantErr: true, wantChild: true},
+		{name: "missing profile dropped", found: false, isChild: false, want: false},
 		{name: "lookup error propagated", lookErr: errors.New("boom"), wantErr: true},
 	}
 	for _, tc := range tests {
@@ -326,6 +327,9 @@ func TestNewProfileAttributionValidatorRejectsChildProfiles(t *testing.T) {
 				if err == nil {
 					t.Fatal("ProfileBelongsToUser error = nil, want error")
 				}
+				if tc.wantChild && !errors.Is(err, ErrChildProfileForbidden) {
+					t.Fatalf("ProfileBelongsToUser error = %v, want ErrChildProfileForbidden", err)
+				}
 				return
 			}
 			if err != nil {
@@ -335,6 +339,30 @@ func TestNewProfileAttributionValidatorRejectsChildProfiles(t *testing.T) {
 				t.Fatalf("ProfileBelongsToUser = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestServiceIngestRejectsChildProfileAttribution(t *testing.T) {
+	// A nonconforming client attributes the report to a child profile. The
+	// validator rejects it with ErrChildProfileForbidden, so the upload is
+	// refused outright rather than silently stored without attribution.
+	bundle, manifest, _ := testDiagnosticsUpload(t, "server-1", DefaultConsentNoticeVer, "prof_child")
+	repo := &fakeDiagnosticReportStore{}
+	store := &fakeDiagnosticObjectStore{bucket: "private"}
+	svc := newTestDiagnosticsService(repo, store)
+	svc.SetProfileAttributionValidator(ProfileAttributionValidatorFunc(func(context.Context, int, string) (bool, error) {
+		return false, ErrChildProfileForbidden
+	}))
+
+	_, err := svc.Ingest(context.Background(), 42, nil, manifest, bytes.NewReader(bundle))
+	if !errors.Is(err, ErrChildProfileForbidden) {
+		t.Fatalf("Ingest error = %v, want ErrChildProfileForbidden", err)
+	}
+	if repo.insertInput.ProfileID != nil {
+		t.Fatalf("ProfileID = %v, want no insert on child profile", *repo.insertInput.ProfileID)
+	}
+	if len(repo.ready) != 0 || len(store.puts) != 0 {
+		t.Fatalf("no report should be stored on child rejection: ready=%v puts=%v", repo.ready, store.puts)
 	}
 }
 

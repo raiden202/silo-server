@@ -82,7 +82,7 @@ type Report struct {
 	Platform           string          `json:"platform"`
 	AppVersion         string          `json:"app_version"`
 	CrashSummary       *string         `json:"crash_summary,omitempty"`
-	Manifest           json.RawMessage `json:"manifest"`
+	Manifest           json.RawMessage `json:"manifest,omitempty"`
 	PlaybackSessionIDs []string        `json:"playback_session_ids"`
 	BlobBucket         *string         `json:"blob_bucket,omitempty"`
 	BlobKey            *string         `json:"blob_key,omitempty"`
