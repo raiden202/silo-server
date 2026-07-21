@@ -5,6 +5,7 @@ import { api, apiResponse } from "@/api/client";
 import type {
   DiagnosticReport,
   DiagnosticReportListResponse,
+  DiagnosticReportSummary,
   DiagnosticStatus,
 } from "@/api/types";
 import { adminKeys } from "@/hooks/queries/keys";
@@ -75,7 +76,7 @@ export function useDeleteDiagnosticReport() {
   });
 }
 
-export async function downloadDiagnosticReport(report: DiagnosticReport) {
+export async function downloadDiagnosticReport(report: DiagnosticReportSummary) {
   // Always stream the bundle through the server (proxy mode) instead of
   // following a presigned URL. When S3Private points at an endpoint only the
   // server can reach (an internal MinIO/R2 gateway), a presigned URL sends the

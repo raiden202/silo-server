@@ -220,12 +220,16 @@ func nextDiagnosticsPart(mr *multipart.Reader, expectedName, expectedContentType
 	if err != nil {
 		return nil, err
 	}
+	// Reject a mismatched part without calling part.Close(): Close drains the
+	// unread part body first, so a max-size wrongly-named/typed first part would
+	// stream up to the bundle limit — holding the per-user/global in-flight slot —
+	// before we return 400. Abandoning the part returns immediately; net/http then
+	// discards only a small bounded prefix of the request before closing the
+	// connection, so malformed uploads fail promptly under load.
 	if part.FormName() != expectedName {
-		_ = part.Close()
 		return nil, errDiagnosticsUnexpectedPart
 	}
 	if !diagnosticsContentTypeMatches(part.Header.Get("Content-Type"), expectedContentType) {
-		_ = part.Close()
 		return nil, errDiagnosticsUnexpectedPart
 	}
 	return part, nil

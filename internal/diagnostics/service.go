@@ -1,6 +1,7 @@
 package diagnostics
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -181,6 +182,17 @@ func (s *Service) Ingest(ctx context.Context, userID int, profileID *string, man
 		return IngestResult{}, err
 	}
 	crashSummary := crashSummaryFromManifest(manifest)
+	// ExpectedBlobBytes reserves the client-claimed archive size against the
+	// per-user byte quota before the bundle streams in. Trusting the claim here is
+	// safe: a report only reaches MarkReady (which rewrites blob_bytes to the
+	// measured size) after archiveMatches confirms the claimed bytes/sha/entries
+	// exactly equal the streamed bundle, so no stored report can ever occupy more
+	// bytes than it reserved. A client that under-claims to under-reserve then
+	// uploads a larger bundle fails archiveMatches and is compensated (blob
+	// deleted, row marked failed) before it counts, gaining no storage. The
+	// residual cost of such rejected churn is bandwidth, not storage — bounded by
+	// the per-account single in-flight upload cap, not by max_bytes_per_user,
+	// which is a storage cap enforced oldest-first by retention.
 	reserved, err := s.reports.InsertReceiving(ctx, InsertReceivingInput{
 		UserID:               userID,
 		ProfileID:            reportProfileID,
@@ -536,9 +548,25 @@ func embeddedManifestMatches(received, embedded []byte) bool {
 }
 
 func decodeJSONObject(data []byte) (map[string]any, error) {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	// UseNumber keeps every JSON number as its exact decimal text (json.Number)
+	// instead of float64. Without it, two manifests that differ only in a large
+	// integer above 2^53 (e.g. log_summary.lines) both round to the same float
+	// and DeepEqual reports a false match, letting a tampered bundle through.
+	dec.UseNumber()
 	var obj map[string]any
-	if err := json.Unmarshal(data, &obj); err != nil {
+	if err := dec.Decode(&obj); err != nil {
 		return nil, err
+	}
+	// json.Unmarshal rejects trailing bytes after the value; Decoder.Decode does
+	// not, and Decoder.More() misses a stray closing delimiter (e.g. `{...}}`)
+	// because it only reports iteration inside an array/object. Re-assert that
+	// strictness by requiring the stream to be exhausted: a second Decode must
+	// hit io.EOF, so a manifest with any trailing token — junk or an extra
+	// `}`/`]` — is rejected and cannot compare equal. Trailing whitespace is
+	// fine; the decoder skips it and still returns io.EOF.
+	if err := dec.Decode(new(json.RawMessage)); err != io.EOF {
+		return nil, errors.New("unexpected trailing data after JSON object")
 	}
 	return obj, nil
 }

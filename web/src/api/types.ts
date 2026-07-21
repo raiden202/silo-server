@@ -2554,7 +2554,10 @@ export interface ClientDiagnosticManifest {
   [key: string]: unknown;
 }
 
-export interface DiagnosticReport {
+// DiagnosticReportSummary is the shape returned by the admin list endpoint,
+// which omits the full manifest JSONB for cheap paging. `app_build` is projected
+// out of the manifest server-side so rows can still show the build number.
+export interface DiagnosticReportSummary {
   id: string;
   short_id: string;
   user_id: number;
@@ -2565,8 +2568,8 @@ export interface DiagnosticReport {
   report_type: DiagnosticReportType;
   platform: DiagnosticPlatform;
   app_version: string;
+  app_build: string;
   crash_summary?: string;
-  manifest: ClientDiagnosticManifest;
   playback_session_ids: string[];
   blob_bucket?: string;
   blob_key?: string;
@@ -2575,8 +2578,14 @@ export interface DiagnosticReport {
   blob_sha256?: string;
 }
 
+// DiagnosticReport is the full detail shape (GetByID), which additionally
+// includes the parsed manifest for the detail pane.
+export interface DiagnosticReport extends DiagnosticReportSummary {
+  manifest: ClientDiagnosticManifest;
+}
+
 export interface DiagnosticReportListResponse {
-  reports: DiagnosticReport[];
+  reports: DiagnosticReportSummary[];
   next_cursor?: string;
 }
 

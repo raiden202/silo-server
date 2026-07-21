@@ -71,16 +71,20 @@ type BlobInfo struct {
 }
 
 type Report struct {
-	ID                 string          `json:"id"`
-	ShortID            string          `json:"short_id"`
-	UserID             int             `json:"user_id"`
-	ProfileID          *string         `json:"profile_id,omitempty"`
-	State              ReportState     `json:"state"`
-	CapturedAt         time.Time       `json:"captured_at"`
-	ReceivedAt         time.Time       `json:"received_at"`
-	ReportType         string          `json:"report_type"`
-	Platform           string          `json:"platform"`
-	AppVersion         string          `json:"app_version"`
+	ID         string      `json:"id"`
+	ShortID    string      `json:"short_id"`
+	UserID     int         `json:"user_id"`
+	ProfileID  *string     `json:"profile_id,omitempty"`
+	State      ReportState `json:"state"`
+	CapturedAt time.Time   `json:"captured_at"`
+	ReceivedAt time.Time   `json:"received_at"`
+	ReportType string      `json:"report_type"`
+	Platform   string      `json:"platform"`
+	AppVersion string      `json:"app_version"`
+	// AppBuild is projected from manifest->'report'->>'app_build' so list rows
+	// (which omit the full manifest) can still show the build number without
+	// dragging every report's manifest JSONB through the DB. Empty when absent.
+	AppBuild           string          `json:"app_build"`
 	CrashSummary       *string         `json:"crash_summary,omitempty"`
 	Manifest           json.RawMessage `json:"manifest,omitempty"`
 	PlaybackSessionIDs []string        `json:"playback_session_ids"`

@@ -297,7 +297,8 @@ func (r *PostgresRepository) DeleteByID(ctx context.Context, id string) (*Report
 		WHERE id = $1::uuid
 		RETURNING id::text, short_id, user_id, profile_id, state, captured_at, received_at,
 		          report_type, platform, app_version, crash_summary, manifest, playback_session_ids,
-		          blob_bucket, blob_key, blob_bytes, uncompressed_bytes, blob_sha256
+		          blob_bucket, blob_key, blob_bytes, uncompressed_bytes, blob_sha256,
+		          COALESCE(manifest->'report'->>'app_build', '')
 	`, id)
 	report, err := scanReport(row)
 	if err != nil {
@@ -314,13 +315,13 @@ func (r *PostgresRepository) RetentionCandidates(ctx context.Context, olderThan 
 		return nil, nil
 	}
 
-	query := reportListSelectSQL() + `
+	query := reportCleanupSelectSQL() + `
 		WHERE received_at < $1
 		ORDER BY received_at ASC, id ASC
 	`
 	args := []any{olderThan}
 	if olderThan.IsZero() {
-		query = reportListSelectSQL() + `
+		query = reportCleanupSelectSQL() + `
 			WHERE false
 		`
 		args = nil
@@ -341,12 +342,12 @@ func (r *PostgresRepository) RetentionCandidates(ctx context.Context, olderThan 
 				) ranked
 				WHERE retained_bytes > $1
 			)
-		` + reportListSelectSQL() + `
+		` + reportCleanupSelectSQL() + `
 			WHERE id IN (SELECT id FROM quota_candidates)
 			ORDER BY received_at ASC, id ASC
 		`
 		if olderThan.IsZero() {
-			return r.queryReportSummaries(ctx, byteCapQuery, perUserByteCap)
+			return r.queryReportCleanup(ctx, byteCapQuery, perUserByteCap)
 		}
 
 		query = `
@@ -363,14 +364,14 @@ func (r *PostgresRepository) RetentionCandidates(ctx context.Context, olderThan 
 				) ranked
 				WHERE retained_bytes > $2
 			)
-		` + reportListSelectSQL() + `
+		` + reportCleanupSelectSQL() + `
 			WHERE received_at < $1 OR id IN (SELECT id FROM quota_candidates)
 			ORDER BY received_at ASC, id ASC
 		`
 		args = []any{olderThan, perUserByteCap}
 	}
 
-	return r.queryReportSummaries(ctx, query, args...)
+	return r.queryReportCleanup(ctx, query, args...)
 }
 
 func (r *PostgresRepository) StaleReceiving(ctx context.Context, grace time.Duration) ([]Report, error) {
@@ -378,7 +379,7 @@ func (r *PostgresRepository) StaleReceiving(ctx context.Context, grace time.Dura
 		grace = time.Hour
 	}
 	cutoff := time.Now().UTC().Add(-grace)
-	return r.queryReportSummaries(ctx, reportListSelectSQL()+`
+	return r.queryReportCleanup(ctx, reportCleanupSelectSQL()+`
 		WHERE state IN ('receiving', 'failed')
 		  AND received_at < $1
 		ORDER BY received_at ASC, id ASC
@@ -417,9 +418,10 @@ func (r *PostgresRepository) LiveBlobKeys(ctx context.Context, keys []string) (m
 	return live, nil
 }
 
-// queryReportSummaries runs a reportListSelectSQL-shaped query; the returned
-// reports carry no manifest. Only list/cleanup paths use it.
-func (r *PostgresRepository) queryReportSummaries(ctx context.Context, query string, args ...any) ([]Report, error) {
+// queryReportCleanup runs a reportCleanupSelectSQL-shaped query; the returned
+// reports carry no manifest and no app_build. Only the retention and
+// stale-cleanup batches use it.
+func (r *PostgresRepository) queryReportCleanup(ctx context.Context, query string, args ...any) ([]Report, error) {
 	rows, err := r.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query diagnostic reports: %w", err)
@@ -428,7 +430,7 @@ func (r *PostgresRepository) queryReportSummaries(ctx context.Context, query str
 
 	reports := []Report{}
 	for rows.Next() {
-		report, err := scanReportSummary(rows)
+		report, err := scanReportCleanup(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -467,19 +469,38 @@ func validateInsertReceivingInput(input InsertReceivingInput) error {
 
 // reportSelectSQL is the full projection including the manifest JSONB (up to
 // MaxManifestBytes per row). Reserve it for single-report detail/download paths;
-// list and cleanup queries use reportListSelectSQL so browsing a page or running
-// a retention/stale batch doesn't drag every report's manifest through the DB.
+// the admin list uses reportListSelectSQL and retention/stale batches use
+// reportCleanupSelectSQL so browsing a page or running a cleanup pass doesn't
+// drag every report's manifest through the DB.
 func reportSelectSQL() string {
 	return `SELECT id::text, short_id, user_id, profile_id, state, captured_at, received_at,
 		       report_type, platform, app_version, crash_summary, manifest, playback_session_ids,
-		       blob_bucket, blob_key, blob_bytes, uncompressed_bytes, blob_sha256
+		       blob_bucket, blob_key, blob_bytes, uncompressed_bytes, blob_sha256,
+		       COALESCE(manifest->'report'->>'app_build', '')
 		FROM client_diagnostic_reports`
 }
 
-// reportListSelectSQL mirrors reportSelectSQL but omits the manifest column.
-// Reports scanned with scanReportSummary therefore have a nil Manifest; the
-// list and cleanup callers only need summary and blob fields.
+// reportListSelectSQL is the admin-list projection: it omits the full manifest
+// column but still extracts app_build from the manifest JSONB (a cheap text
+// extraction) so list rows can show the build number without shipping the whole
+// manifest. Reports scanned with scanReportSummary therefore have a nil
+// Manifest. Cleanup batches must not pay for the JSONB extraction, so they use
+// reportCleanupSelectSQL instead.
 func reportListSelectSQL() string {
+	return `SELECT id::text, short_id, user_id, profile_id, state, captured_at, received_at,
+		       report_type, platform, app_version, crash_summary, playback_session_ids,
+		       blob_bucket, blob_key, blob_bytes, uncompressed_bytes, blob_sha256,
+		       COALESCE(manifest->'report'->>'app_build', '')
+		FROM client_diagnostic_reports`
+}
+
+// reportCleanupSelectSQL is the retention/stale-cleanup projection. It omits
+// both the manifest column and the app_build extraction because cleanup only
+// needs id/state/blob fields to delete a row and its object; touching the JSONB
+// per candidate would turn a scheduled pass over many large manifests into
+// needless manifest I/O. Reports scanned with scanReportCleanup therefore have
+// a nil Manifest and an empty AppBuild.
+func reportCleanupSelectSQL() string {
 	return `SELECT id::text, short_id, user_id, profile_id, state, captured_at, received_at,
 		       report_type, platform, app_version, crash_summary, playback_session_ids,
 		       blob_bucket, blob_key, blob_bytes, uncompressed_bytes, blob_sha256
@@ -553,6 +574,7 @@ func scanReport(row reportScanner) (*Report, error) {
 		&nulls.blobBytes,
 		&nulls.uncompressedBytes,
 		&nulls.blobSHA256,
+		&report.AppBuild,
 	); err != nil {
 		return nil, fmt.Errorf("scan diagnostic report: %w", err)
 	}
@@ -563,12 +585,12 @@ func scanReport(row reportScanner) (*Report, error) {
 	return &report, nil
 }
 
-// scanReportSummary scans the reportListSelectSQL projection, which omits the
-// manifest; the returned report's Manifest is left nil.
-func scanReportSummary(row reportScanner) (*Report, error) {
-	var report Report
-	var nulls reportNulls
-	if err := row.Scan(
+// summaryScanTargets returns the scan destinations shared by the admin-list and
+// cleanup projections, in column order. The two scanners differ only in whether
+// app_build is appended, so keeping the common prefix in one place stops the
+// long Scan lists from drifting apart.
+func summaryScanTargets(report *Report, nulls *reportNulls) []any {
+	return []any{
 		&report.ID,
 		&report.ShortID,
 		&report.UserID,
@@ -586,7 +608,29 @@ func scanReportSummary(row reportScanner) (*Report, error) {
 		&nulls.blobBytes,
 		&nulls.uncompressedBytes,
 		&nulls.blobSHA256,
-	); err != nil {
+	}
+}
+
+// scanReportSummary scans the reportListSelectSQL projection, which omits the
+// manifest but includes app_build; the returned report's Manifest is left nil.
+func scanReportSummary(row reportScanner) (*Report, error) {
+	var report Report
+	var nulls reportNulls
+	targets := append(summaryScanTargets(&report, &nulls), &report.AppBuild)
+	if err := row.Scan(targets...); err != nil {
+		return nil, fmt.Errorf("scan diagnostic report: %w", err)
+	}
+	nulls.apply(&report)
+	return &report, nil
+}
+
+// scanReportCleanup scans the reportCleanupSelectSQL projection, which omits
+// both the manifest and app_build; the returned report's Manifest is nil and
+// AppBuild is empty. Cleanup only reads id/state/blob fields.
+func scanReportCleanup(row reportScanner) (*Report, error) {
+	var report Report
+	var nulls reportNulls
+	if err := row.Scan(summaryScanTargets(&report, &nulls)...); err != nil {
 		return nil, fmt.Errorf("scan diagnostic report: %w", err)
 	}
 	nulls.apply(&report)

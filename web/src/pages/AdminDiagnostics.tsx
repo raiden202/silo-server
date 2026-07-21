@@ -4,7 +4,7 @@ import { Link, useSearchParams } from "react-router";
 import { Bug, Download, ExternalLink, FilterX, Trash2, TriangleAlert } from "lucide-react";
 import { toast } from "sonner";
 
-import type { DiagnosticReport, DiagnosticReportState } from "@/api/types";
+import type { DiagnosticReport, DiagnosticReportState, DiagnosticReportSummary } from "@/api/types";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -417,7 +417,7 @@ function DiagnosticReportRow({
   report,
   onSelect,
 }: {
-  report: DiagnosticReport;
+  report: DiagnosticReportSummary;
   onSelect: (id: string) => void;
 }) {
   function handleKeyDown(event: KeyboardEvent<HTMLTableRowElement>) {
@@ -449,7 +449,7 @@ function DiagnosticReportRow({
         <div>{formatPlatform(report.platform)}</div>
         <div className="text-muted-foreground text-xs">
           v{report.app_version}
-          {report.manifest.report.app_build ? ` (${report.manifest.report.app_build})` : ""}
+          {report.app_build ? ` (${report.app_build})` : ""}
         </div>
       </TableCell>
       <TableCell>
@@ -484,7 +484,7 @@ function DiagnosticReportDetail({
   onDelete: () => void;
 }) {
   const device = report.manifest.device_summary;
-  const appBuild = report.manifest.report.app_build;
+  const appBuild = report.app_build;
 
   return (
     <div className="space-y-6">

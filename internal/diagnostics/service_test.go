@@ -160,6 +160,48 @@ func TestServiceIngestRejectsEmbeddedManifestMismatch(t *testing.T) {
 	}
 }
 
+func TestEmbeddedManifestMatchesPreservesLargeIntegers(t *testing.T) {
+	// The received (part-1) and embedded manifests differ only in
+	// log_summary.lines by 1, at a magnitude above 2^53 where float64 cannot
+	// represent adjacent integers. Decoding with UseNumber must keep them distinct
+	// so a bundle whose embedded manifest was tampered is rejected, not accepted.
+	received := []byte(`{"log_summary":{"lines":9007199254740993},"archive":{"bytes":1}}`)
+	embedded := []byte(`{"log_summary":{"lines":9007199254740992}}`)
+	if embeddedManifestMatches(received, embedded) {
+		t.Fatal("embeddedManifestMatches = true for manifests differing by a large integer, want false")
+	}
+
+	// Sanity: with the archive object stripped from the received manifest, an
+	// otherwise identical large integer still compares equal.
+	sameReceived := []byte(`{"log_summary":{"lines":9007199254740993},"archive":{"bytes":1}}`)
+	sameEmbedded := []byte(`{"log_summary":{"lines":9007199254740993}}`)
+	if !embeddedManifestMatches(sameReceived, sameEmbedded) {
+		t.Fatal("embeddedManifestMatches = false for identical manifests, want true")
+	}
+}
+
+func TestEmbeddedManifestMatchesRejectsTrailingData(t *testing.T) {
+	// A stray closing delimiter after an otherwise-matching object must be
+	// rejected. Decoder.More() returns false here (it only tracks array/object
+	// iteration), so the decode-to-EOF check is what catches it; without it a
+	// bundle whose embedded manifest is not a single clean JSON object would
+	// still compare equal to the accepted part-1 manifest.
+	received := []byte(`{"log_summary":{"lines":1},"archive":{"bytes":1}}`)
+	for _, trailer := range []string{"}", "]", "garbage", `{"extra":1}`} {
+		embedded := []byte(`{"log_summary":{"lines":1}}` + trailer)
+		if embeddedManifestMatches(received, embedded) {
+			t.Fatalf("embeddedManifestMatches = true for embedded manifest with trailing %q, want false", trailer)
+		}
+	}
+
+	// Trailing whitespace after the object is not trailing data; it must still
+	// compare equal.
+	embeddedWithWhitespace := []byte("{\"log_summary\":{\"lines\":1}}\n  ")
+	if !embeddedManifestMatches(received, embeddedWithWhitespace) {
+		t.Fatal("embeddedManifestMatches = false for embedded manifest with trailing whitespace, want true")
+	}
+}
+
 func TestServiceIngestReturnsStorageErrorForMidStreamPutFailure(t *testing.T) {
 	bundle, info := testDiagnosticsBundle(t)
 	putErr := errors.New("s3: connection reset by peer")
