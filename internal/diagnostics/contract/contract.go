@@ -129,10 +129,15 @@ type LogSummary struct {
 }
 
 type Archive struct {
-	Entries           []string
-	Bytes             int64
+	Entries []string
+	// Bytes is the size of the bundle part as transmitted (the gzip stream).
+	Bytes int64
+	// UncompressedBytes is the total size of the decompressed tar stream,
+	// including headers, end-of-archive blocks, and record padding — the
+	// byte count a client observes between its tar writer and gzip writer.
 	UncompressedBytes int64
-	SHA256            string
+	// SHA256 is the hex digest of the bundle part as transmitted.
+	SHA256 string
 }
 
 type DeviceSnapshot struct {

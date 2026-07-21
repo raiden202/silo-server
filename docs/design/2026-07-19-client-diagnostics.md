@@ -215,7 +215,12 @@ Hashing note: `archive.sha256` and the size fields in part 1 describe the
 finalized `bundle` part bytes as transmitted. Since the archive is hashed
 after it is built, the embedded `manifest.json` is the manifest **without**
 the `archive` object; the server verifies part 1's `archive` fields against
-the received blob.
+the received blob. `archive.bytes` is the transmitted (gzip) size;
+`archive.uncompressed_bytes` is the total decompressed tar stream size,
+including tar headers, the end-of-archive marker, and record padding —
+i.e. the byte count between the client's tar writer and gzip writer, and
+what `gzip -l` reports. Standard end-of-archive zero padding (up to 64 KiB)
+is accepted; any other trailing data is rejected.
 
 The contract lives in this repo as a versioned JSON Schema
 (`docs/design/schemas/client-diagnostics/v1/`) with canonical valid and

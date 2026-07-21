@@ -20,6 +20,11 @@ const (
 	DefaultMaxBundleEntries     = 16
 	DefaultMaxCompressionRatio  = int64(200)
 	defaultBundleReadBufferSize = 32 * 1024
+	// Standard tar writers (GNU tar, Python tarfile, Apache Commons Compress)
+	// pad the archive with zero blocks to a record boundary, 10240 bytes by
+	// default; 64 KiB also covers writers configured with larger blocking
+	// factors.
+	maxTarTrailingPaddingBytes = 64 * 1024
 )
 
 var (
@@ -40,7 +45,10 @@ type BundleLimits struct {
 }
 
 type BundleInfo struct {
-	CompressedBytes   int64
+	CompressedBytes int64
+	// UncompressedBytes is the total size of the decompressed tar stream —
+	// headers, entry payloads, end-of-archive marker, and padding — matching
+	// what a client counts on the way into its gzip writer (and `gzip -l`).
 	UncompressedBytes int64
 	SHA256            string
 	Entries           []string
@@ -70,11 +78,13 @@ func ValidateBundle(r io.Reader, limits BundleLimits) (BundleInfo, error) {
 		}
 	}()
 
-	tr := tar.NewReader(gz)
+	uncompressed := &uncompressedCounter{r: gz}
+	tr := tar.NewReader(uncompressed)
 	info := BundleInfo{
 		Entries: make([]string, 0, len(allowedBundleEntries)),
 	}
 	buffer := make([]byte, defaultBundleReadBufferSize)
+	var payloadBytes int64
 
 	for {
 		hdr, err := tr.Next()
@@ -101,11 +111,11 @@ func ValidateBundle(r io.Reader, limits BundleLimits) (BundleInfo, error) {
 		if hdr.Size > limits.MaxEntryBytes {
 			return BundleInfo{}, ErrEntryTooLarge
 		}
-		if info.UncompressedBytes+hdr.Size > limits.MaxUncompressedBytes {
+		if payloadBytes+hdr.Size > limits.MaxUncompressedBytes {
 			return BundleInfo{}, ErrUncompressedTooLarge
 		}
 
-		entryBytes, err := copyTarEntry(tr, buffer, limits, metered, &info.UncompressedBytes)
+		entryBytes, err := copyTarEntry(tr, buffer, limits, metered, &payloadBytes)
 		if err != nil {
 			return BundleInfo{}, err
 		}
@@ -117,7 +127,7 @@ func ValidateBundle(r io.Reader, limits BundleLimits) (BundleInfo, error) {
 	if len(info.Entries) == 0 {
 		return BundleInfo{}, fmt.Errorf("%w: empty archive", ErrInvalidBundle)
 	}
-	if err := rejectPostTarData(gz, buffer); err != nil {
+	if err := rejectPostTarData(uncompressed, buffer); err != nil {
 		return BundleInfo{}, err
 	}
 	if err := gz.Close(); err != nil {
@@ -127,10 +137,14 @@ func ValidateBundle(r io.Reader, limits BundleLimits) (BundleInfo, error) {
 	if err := rejectTrailingCompressedData(metered); err != nil {
 		return BundleInfo{}, err
 	}
-	if ratioExceeded(info.UncompressedBytes, metered.Count(), limits.MaxCompressionRatio) {
+	if uncompressed.count > limits.MaxUncompressedBytes {
+		return BundleInfo{}, ErrUncompressedTooLarge
+	}
+	if ratioExceeded(uncompressed.count, metered.Count(), limits.MaxCompressionRatio) {
 		return BundleInfo{}, ErrCompressionRatio
 	}
 
+	info.UncompressedBytes = uncompressed.count
 	info.CompressedBytes = metered.Count()
 	info.SHA256 = hex.EncodeToString(metered.Sum())
 	return info, nil
@@ -205,14 +219,23 @@ func copyTarEntry(tr *tar.Reader, buffer []byte, limits BundleLimits, metered *c
 	}
 }
 
-func rejectPostTarData(gz *gzip.Reader, buffer []byte) error {
+func rejectPostTarData(r io.Reader, buffer []byte) error {
+	var padding int64
 	for {
-		n, err := gz.Read(buffer)
+		n, err := r.Read(buffer)
 		if errors.Is(err, ErrCompressedTooLarge) {
 			return ErrCompressedTooLarge
 		}
 		if n > 0 {
-			return fmt.Errorf("%w: trailing data after tar archive", ErrInvalidBundle)
+			for _, b := range buffer[:n] {
+				if b != 0 {
+					return fmt.Errorf("%w: trailing data after tar archive", ErrInvalidBundle)
+				}
+			}
+			padding += int64(n)
+			if padding > maxTarTrailingPaddingBytes {
+				return fmt.Errorf("%w: excessive padding after tar archive", ErrInvalidBundle)
+			}
 		}
 		if errors.Is(err, io.EOF) {
 			return nil
@@ -293,6 +316,20 @@ func allowlistMap(entries []string) map[string]struct{} {
 		allowed[entry] = struct{}{}
 	}
 	return allowed
+}
+
+// uncompressedCounter tracks the total number of decompressed bytes read out
+// of the gzip stream, including tar headers, end-of-archive blocks, and
+// record padding.
+type uncompressedCounter struct {
+	r     io.Reader
+	count int64
+}
+
+func (c *uncompressedCounter) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.count += int64(n)
+	return n, err
 }
 
 type compressedMeter struct {

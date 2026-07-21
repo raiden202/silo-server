@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"crypto/sha256"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 )
@@ -98,6 +99,31 @@ func TestValidateBundle(t *testing.T) {
 			wantErr: ErrInvalidBundle,
 		},
 		{
+			name:    "accepts tar record padding",
+			entries: validEntries,
+			mutate: func([]byte) []byte {
+				return buildTestArchiveWithPostTarPayload(t, validEntries, make([]byte, 8*1024))
+			},
+		},
+		{
+			name:    "rejects nonzero byte inside trailing padding",
+			entries: validEntries,
+			mutate: func([]byte) []byte {
+				padding := make([]byte, 8*1024)
+				padding[len(padding)-1] = 1
+				return buildTestArchiveWithPostTarPayload(t, validEntries, padding)
+			},
+			wantErr: ErrInvalidBundle,
+		},
+		{
+			name:    "rejects excessive trailing padding",
+			entries: validEntries,
+			mutate: func([]byte) []byte {
+				return buildTestArchiveWithPostTarPayload(t, validEntries, make([]byte, maxTarTrailingPaddingBytes+1))
+			},
+			wantErr: ErrInvalidBundle,
+		},
+		{
 			name:    "rejects concatenated gzip member",
 			entries: validEntries,
 			mutate: func(raw []byte) []byte {
@@ -141,8 +167,16 @@ func TestValidateBundle(t *testing.T) {
 			if got, want := strings.Join(info.Entries, ","), "manifest.json,logs.jsonl"; got != want {
 				t.Fatalf("entries = %s, want %s", got, want)
 			}
-			if info.UncompressedBytes != int64(len(validEntries[0].body)+len(validEntries[1].body)) {
-				t.Fatalf("uncompressed bytes = %d", info.UncompressedBytes)
+			gzr, err := gzip.NewReader(bytes.NewReader(raw))
+			if err != nil {
+				t.Fatalf("open gzip for uncompressed size: %v", err)
+			}
+			wantUncompressed, err := io.Copy(io.Discard, gzr)
+			if err != nil {
+				t.Fatalf("measure uncompressed size: %v", err)
+			}
+			if info.UncompressedBytes != wantUncompressed {
+				t.Fatalf("uncompressed bytes = %d, want %d", info.UncompressedBytes, wantUncompressed)
 			}
 		})
 	}
