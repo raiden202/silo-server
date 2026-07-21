@@ -160,6 +160,26 @@ func TestServiceIngestRejectsEmbeddedManifestMismatch(t *testing.T) {
 	}
 }
 
+func TestEmbeddedManifestMatchesPreservesLargeIntegers(t *testing.T) {
+	// The received (part-1) and embedded manifests differ only in
+	// log_summary.lines by 1, at a magnitude above 2^53 where float64 cannot
+	// represent adjacent integers. Decoding with UseNumber must keep them distinct
+	// so a bundle whose embedded manifest was tampered is rejected, not accepted.
+	received := []byte(`{"log_summary":{"lines":9007199254740993},"archive":{"bytes":1}}`)
+	embedded := []byte(`{"log_summary":{"lines":9007199254740992}}`)
+	if embeddedManifestMatches(received, embedded) {
+		t.Fatal("embeddedManifestMatches = true for manifests differing by a large integer, want false")
+	}
+
+	// Sanity: with the archive object stripped from the received manifest, an
+	// otherwise identical large integer still compares equal.
+	sameReceived := []byte(`{"log_summary":{"lines":9007199254740993},"archive":{"bytes":1}}`)
+	sameEmbedded := []byte(`{"log_summary":{"lines":9007199254740993}}`)
+	if !embeddedManifestMatches(sameReceived, sameEmbedded) {
+		t.Fatal("embeddedManifestMatches = false for identical manifests, want true")
+	}
+}
+
 func TestServiceIngestReturnsStorageErrorForMidStreamPutFailure(t *testing.T) {
 	bundle, info := testDiagnosticsBundle(t)
 	putErr := errors.New("s3: connection reset by peer")

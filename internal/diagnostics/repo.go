@@ -297,7 +297,8 @@ func (r *PostgresRepository) DeleteByID(ctx context.Context, id string) (*Report
 		WHERE id = $1::uuid
 		RETURNING id::text, short_id, user_id, profile_id, state, captured_at, received_at,
 		          report_type, platform, app_version, crash_summary, manifest, playback_session_ids,
-		          blob_bucket, blob_key, blob_bytes, uncompressed_bytes, blob_sha256
+		          blob_bucket, blob_key, blob_bytes, uncompressed_bytes, blob_sha256,
+		          COALESCE(manifest->'report'->>'app_build', '')
 	`, id)
 	report, err := scanReport(row)
 	if err != nil {
@@ -472,17 +473,21 @@ func validateInsertReceivingInput(input InsertReceivingInput) error {
 func reportSelectSQL() string {
 	return `SELECT id::text, short_id, user_id, profile_id, state, captured_at, received_at,
 		       report_type, platform, app_version, crash_summary, manifest, playback_session_ids,
-		       blob_bucket, blob_key, blob_bytes, uncompressed_bytes, blob_sha256
+		       blob_bucket, blob_key, blob_bytes, uncompressed_bytes, blob_sha256,
+		       COALESCE(manifest->'report'->>'app_build', '')
 		FROM client_diagnostic_reports`
 }
 
 // reportListSelectSQL mirrors reportSelectSQL but omits the manifest column.
 // Reports scanned with scanReportSummary therefore have a nil Manifest; the
-// list and cleanup callers only need summary and blob fields.
+// list and cleanup callers only need summary and blob fields. It still projects
+// app_build out of the manifest JSONB (a cheap text extraction) so list rows can
+// show the build number without shipping the whole manifest.
 func reportListSelectSQL() string {
 	return `SELECT id::text, short_id, user_id, profile_id, state, captured_at, received_at,
 		       report_type, platform, app_version, crash_summary, playback_session_ids,
-		       blob_bucket, blob_key, blob_bytes, uncompressed_bytes, blob_sha256
+		       blob_bucket, blob_key, blob_bytes, uncompressed_bytes, blob_sha256,
+		       COALESCE(manifest->'report'->>'app_build', '')
 		FROM client_diagnostic_reports`
 }
 
@@ -553,6 +558,7 @@ func scanReport(row reportScanner) (*Report, error) {
 		&nulls.blobBytes,
 		&nulls.uncompressedBytes,
 		&nulls.blobSHA256,
+		&report.AppBuild,
 	); err != nil {
 		return nil, fmt.Errorf("scan diagnostic report: %w", err)
 	}
@@ -586,6 +592,7 @@ func scanReportSummary(row reportScanner) (*Report, error) {
 		&nulls.blobBytes,
 		&nulls.uncompressedBytes,
 		&nulls.blobSHA256,
+		&report.AppBuild,
 	); err != nil {
 		return nil, fmt.Errorf("scan diagnostic report: %w", err)
 	}

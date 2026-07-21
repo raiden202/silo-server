@@ -85,6 +85,60 @@ func TestDiagnosticsUploadWrongPartOrder(t *testing.T) {
 	assertDiagnosticsRejectionLog(t, logs, "invalid_bundle", 42)
 }
 
+func TestDiagnosticsUploadWrongFirstPartNotDrained(t *testing.T) {
+	service := newFakeDiagnosticsService()
+	handler := NewDiagnosticsHandler(service)
+
+	// A large, wrongly-named first part must be rejected without draining its
+	// body: an invalid upload must not be allowed to stream its whole payload
+	// (holding the in-flight slot) before it gets a 400.
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	header := make(textproto.MIMEHeader)
+	header.Set("Content-Disposition", `form-data; name="bundle"`)
+	header.Set("Content-Type", "application/gzip")
+	w, err := writer.CreatePart(header)
+	if err != nil {
+		t.Fatalf("create multipart part: %v", err)
+	}
+	if _, err := w.Write(bytes.Repeat([]byte("x"), 1<<20)); err != nil {
+		t.Fatalf("write multipart part: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+
+	counter := &countingReader{r: &body}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/diagnostics/reports", counter)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer token")
+	req = req.WithContext(apimw.SetClaims(req.Context(), accessClaims()))
+
+	rec := httptest.NewRecorder()
+	handler.HandleUpload(rec, req)
+
+	assertDiagnosticsError(t, rec, http.StatusBadRequest, "invalid_bundle")
+	if service.ingestCalls != 0 {
+		t.Fatalf("ingest calls = %d, want 0", service.ingestCalls)
+	}
+	// Only the small multipart framing/headers should have been read; the 1 MiB
+	// wrong-first-part body must not have been drained.
+	if counter.n > 128*1024 {
+		t.Fatalf("read %d bytes from request body, want the wrong first part rejected without draining (< 128 KiB)", counter.n)
+	}
+}
+
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
+}
+
 func TestDiagnosticsUploadBodyTooLargeLogsRejection(t *testing.T) {
 	service := newFakeDiagnosticsService()
 	service.status.MaxBundleBytes = 1
