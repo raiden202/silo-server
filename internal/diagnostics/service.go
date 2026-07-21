@@ -559,9 +559,13 @@ func decodeJSONObject(data []byte) (map[string]any, error) {
 		return nil, err
 	}
 	// json.Unmarshal rejects trailing bytes after the value; Decoder.Decode does
-	// not, so re-assert that strictness — a manifest with trailing junk is not a
-	// clean single object and must not compare equal.
-	if dec.More() {
+	// not, and Decoder.More() misses a stray closing delimiter (e.g. `{...}}`)
+	// because it only reports iteration inside an array/object. Re-assert that
+	// strictness by requiring the stream to be exhausted: a second Decode must
+	// hit io.EOF, so a manifest with any trailing token — junk or an extra
+	// `}`/`]` — is rejected and cannot compare equal. Trailing whitespace is
+	// fine; the decoder skips it and still returns io.EOF.
+	if err := dec.Decode(new(json.RawMessage)); err != io.EOF {
 		return nil, errors.New("unexpected trailing data after JSON object")
 	}
 	return obj, nil
