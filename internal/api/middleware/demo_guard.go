@@ -17,7 +17,8 @@ type DemoSettingsReader interface {
 // Allowed: browsing, playback, favorites, watchlist, ratings, collections,
 // profiles, playback progress, watched state.
 //
-// Blocked: API key management, downloads, history imports, subtitle downloads.
+// Blocked: API key management, downloads, history imports, subtitle downloads,
+// diagnostics report uploads/deletes.
 type DemoGuard struct {
 	settings DemoSettingsReader
 }
@@ -41,6 +42,9 @@ var demoBlockedRoutes = []blockedRoute{
 	{methods: []string{"POST"}, prefix: "/api/v1/subtitles/download"},
 	{methods: []string{"POST"}, prefix: "/api/v1/subtitles/upload"},
 	{methods: []string{"DELETE"}, prefix: "/api/v1/subtitles/"},
+	// Diagnostics report uploads/deletes write DB rows and private-bucket blobs;
+	// GET /api/v1/diagnostics/status is unaffected (GETs always pass).
+	{methods: []string{"POST", "DELETE"}, prefix: "/api/v1/diagnostics/reports"},
 }
 
 // Guard is an HTTP middleware that enforces demo mode restrictions.

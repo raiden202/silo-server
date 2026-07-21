@@ -392,6 +392,10 @@ export const adminKeys = {
   ipUsers: (ip: string, days?: number) => ["admin", "ips", ip, days] as const,
   operationalLogs: (params: Record<string, unknown>) => ["admin", "logs", "app", params] as const,
   auditLogs: (params: Record<string, unknown>) => ["admin", "logs", "audit", params] as const,
+  diagnosticStatus: () => ["diagnostics", "status"] as const,
+  diagnosticReports: (params: Record<string, unknown>) =>
+    ["admin", "diagnostics", "reports", params] as const,
+  diagnosticReport: (id?: string) => ["admin", "diagnostics", "reports", id ?? "none"] as const,
   policyCapability: () => ["policy", "capability"] as const,
   policyVendor: () => ["admin", "policy", "vendor"] as const,
   policyDocuments: () => ["admin", "policy", "documents"] as const,

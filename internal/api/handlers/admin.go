@@ -30,6 +30,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/clientip"
 	"github.com/Silo-Server/silo-server/internal/config"
+	"github.com/Silo-Server/silo-server/internal/diagnostics"
 	evt "github.com/Silo-Server/silo-server/internal/events"
 	"github.com/Silo-Server/silo-server/internal/markers"
 	"github.com/Silo-Server/silo-server/internal/models"
@@ -62,6 +63,12 @@ type ServerSettingsStore interface {
 	Get(ctx context.Context, key string) (string, error)
 	Set(ctx context.Context, key, value string) error
 	GetAll(ctx context.Context) (map[string]string, error)
+}
+
+type DiagnosticsEnablementStore interface {
+	PutStream(ctx context.Context, bucket, key string, r io.Reader, contentType string) error
+	DeleteObject(ctx context.Context, bucket, key string) error
+	Bucket() string
 }
 
 type AdminJobCreator interface {
@@ -97,6 +104,7 @@ type AdminHandler struct {
 	EventBus                     cache.EventBus
 	EventsHub                    *evt.Hub
 	SettingsRepo                 ServerSettingsStore
+	DiagnosticsStore             DiagnosticsEnablementStore
 	JobRepo                      AdminJobCreator
 	ItemRefreshResolver          ItemRefreshScopeResolver
 	ImpersonationService         ImpersonationService
@@ -2215,6 +2223,38 @@ func (h *AdminHandler) HandleUpdateSetting(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		req.Value = strconv.FormatBool(enabled)
+	case diagnostics.KeyUploadsEnabled:
+		enabled, err := strconv.ParseBool(strings.TrimSpace(req.Value))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "bad_request", diagnostics.KeyUploadsEnabled+" must be true or false")
+			return
+		}
+		req.Value = strconv.FormatBool(enabled)
+		if enabled {
+			if err := h.validateDiagnosticsUploadsEnabled(r.Context()); err != nil {
+				writeError(w, http.StatusBadRequest, "storage_unavailable", err.Error())
+				return
+			}
+		}
+	case diagnostics.KeyMaxBundleBytes,
+		diagnostics.KeyMaxUncompressedBytes,
+		diagnostics.KeyMaxReportsPerUserDay,
+		diagnostics.KeyRetentionDays,
+		diagnostics.KeyMaxBytesPerUser:
+		normalized, err := h.normalizeDiagnosticsNumericSetting(r.Context(), key, req.Value)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+			return
+		}
+		req.Value = normalized
+	case diagnostics.KeyConsentNoticeVersion:
+		n, err := strconv.Atoi(strings.TrimSpace(req.Value))
+		if err != nil || n < 1 {
+			writeError(w, http.StatusBadRequest, "bad_request",
+				diagnostics.KeyConsentNoticeVersion+" must be an integer greater than 0")
+			return
+		}
+		req.Value = strconv.Itoa(n)
 	case policy.SettingDecisionLogScopeSampleRate:
 		n, err := strconv.Atoi(strings.TrimSpace(req.Value))
 		if err != nil || n <= 0 {
@@ -2382,4 +2422,86 @@ func (h *AdminHandler) HandleUpdateSetting(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	writeJSON(w, http.StatusOK, adminSettingResponse{Key: key, Value: req.Value, RestartRequired: restartRequired})
+}
+
+func (h *AdminHandler) validateDiagnosticsUploadsEnabled(ctx context.Context) error {
+	if h.DiagnosticsStore == nil || strings.TrimSpace(h.DiagnosticsStore.Bucket()) == "" {
+		return errors.New("diagnostics uploads require configured private object storage")
+	}
+	const probeKey = "diagnostics/.probe"
+	if err := h.DiagnosticsStore.PutStream(
+		ctx,
+		h.DiagnosticsStore.Bucket(),
+		probeKey,
+		strings.NewReader("ok"),
+		"application/octet-stream",
+	); err != nil {
+		return fmt.Errorf("diagnostics storage probe write failed: %w", err)
+	}
+	if err := h.DiagnosticsStore.DeleteObject(ctx, h.DiagnosticsStore.Bucket(), probeKey); err != nil {
+		return fmt.Errorf("diagnostics storage probe delete failed: %w", err)
+	}
+	return nil
+}
+
+func (h *AdminHandler) normalizeDiagnosticsNumericSetting(ctx context.Context, key, raw string) (string, error) {
+	const (
+		mib = int64(1024 * 1024)
+		gib = int64(1024 * mib)
+	)
+
+	value, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+	if err != nil {
+		return "", fmt.Errorf("%s must be an integer", key)
+	}
+
+	settings := diagnostics.DefaultSettings()
+	if h.SettingsRepo != nil {
+		loaded, loadErr := diagnostics.LoadSettings(ctx, h.SettingsRepo)
+		if loadErr != nil {
+			return "", fmt.Errorf("load diagnostics settings: %w", loadErr)
+		}
+		settings = loaded
+	}
+
+	switch key {
+	case diagnostics.KeyMaxBundleBytes:
+		if value < mib || value > 256*mib {
+			return "", fmt.Errorf("%s must be between 1 MiB (%d bytes) and 256 MiB (%d bytes)", key, mib, 256*mib)
+		}
+		if value > settings.MaxUncompressedBytes {
+			return "", fmt.Errorf("%s must not exceed %s (%d bytes)", key, diagnostics.KeyMaxUncompressedBytes, settings.MaxUncompressedBytes)
+		}
+		// A single bundle can never exceed the per-user byte cap, or every upload
+		// at this size would fail quota; keep the two bounds consistent.
+		if value > settings.MaxBytesPerUser {
+			return "", fmt.Errorf("%s must not exceed %s (%d bytes)", key, diagnostics.KeyMaxBytesPerUser, settings.MaxBytesPerUser)
+		}
+	case diagnostics.KeyMaxUncompressedBytes:
+		if value < settings.MaxBundleBytes || value > gib {
+			return "", fmt.Errorf("%s must be between %s (%d bytes) and 1 GiB (%d bytes)", key, diagnostics.KeyMaxBundleBytes, settings.MaxBundleBytes, gib)
+		}
+	case diagnostics.KeyMaxReportsPerUserDay:
+		if value < 1 || value > 1000 {
+			return "", fmt.Errorf("%s must be between 1 and 1000", key)
+		}
+	case diagnostics.KeyRetentionDays:
+		if value < 1 || value > 365 {
+			return "", fmt.Errorf("%s must be between 1 and 365", key)
+		}
+	case diagnostics.KeyMaxBytesPerUser:
+		if value < 10*mib || value > 10*gib {
+			return "", fmt.Errorf("%s must be between 10 MiB (%d bytes) and 10 GiB (%d bytes)", key, 10*mib, 10*gib)
+		}
+		// The per-user cap must leave room for at least one max-size bundle, or
+		// /diagnostics/status would advertise a bundle size InsertReceiving always
+		// rejects as quota_exceeded.
+		if value < settings.MaxBundleBytes {
+			return "", fmt.Errorf("%s must be at least %s (%d bytes)", key, diagnostics.KeyMaxBundleBytes, settings.MaxBundleBytes)
+		}
+	default:
+		return "", fmt.Errorf("unsupported diagnostics numeric setting %s", key)
+	}
+
+	return strconv.FormatInt(value, 10), nil
 }

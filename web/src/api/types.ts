@@ -2474,6 +2474,117 @@ export interface AuditLogListResponse {
   next_cursor?: string;
 }
 
+export type DiagnosticAvailabilityStatus = "available" | "disabled" | "storage_unavailable";
+
+export interface DiagnosticStatus {
+  status: DiagnosticAvailabilityStatus;
+  server_instance_id: string;
+  accepted_schema_versions: number[];
+  max_bundle_bytes: number;
+  max_manifest_bytes: number;
+  retention_days: number;
+  consent_notice_version: number;
+}
+
+export type DiagnosticReportState = "receiving" | "ready" | "failed";
+export type DiagnosticReportType =
+  | "crash"
+  | "anr"
+  | "native_crash"
+  | "hang"
+  | "abnormal_exit"
+  | "manual";
+export type DiagnosticPlatform = "android" | "android-tv" | "ios" | "tvos";
+
+export interface ClientDiagnosticManifest {
+  schema_version: number;
+  report: {
+    type: DiagnosticReportType;
+    captured_at: string;
+    capture_session_id: string;
+    app_version: string;
+    app_build: string;
+    platform: DiagnosticPlatform;
+    os_version: string;
+    profile_id?: string;
+    [key: string]: unknown;
+  };
+  destination: {
+    server_instance_id: string;
+    [key: string]: unknown;
+  };
+  consent: {
+    mode: "prompt" | "always" | "manual";
+    notice_version: number;
+    [key: string]: unknown;
+  };
+  crash?: {
+    summary: string;
+    stack_excerpt?: string;
+    thread?: string;
+    foreground?: boolean;
+    source: "ueh" | "exit_info" | "metrickit" | "exit_sentinel";
+    provenance: "pre_failure" | "post_restart" | "metric_reporting_period";
+    occurred_at: string;
+    [key: string]: unknown;
+  };
+  device_summary: {
+    manufacturer: string;
+    model: string;
+    os: string;
+    form_factor: string;
+    [key: string]: unknown;
+  };
+  playback_session_ids: string[];
+  log_summary: {
+    lines: number;
+    bytes_gz: number;
+    dropped_lines: number;
+    categories: string[];
+    debug_logging: boolean;
+    [key: string]: unknown;
+  };
+  archive: {
+    entries: string[];
+    bytes: number;
+    uncompressed_bytes: number;
+    sha256: string;
+    [key: string]: unknown;
+  };
+  [key: string]: unknown;
+}
+
+export interface DiagnosticReport {
+  id: string;
+  short_id: string;
+  user_id: number;
+  profile_id?: string;
+  state: DiagnosticReportState;
+  captured_at: string;
+  received_at: string;
+  report_type: DiagnosticReportType;
+  platform: DiagnosticPlatform;
+  app_version: string;
+  crash_summary?: string;
+  manifest: ClientDiagnosticManifest;
+  playback_session_ids: string[];
+  blob_bucket?: string;
+  blob_key?: string;
+  blob_bytes?: number;
+  uncompressed_bytes?: number;
+  blob_sha256?: string;
+}
+
+export interface DiagnosticReportListResponse {
+  reports: DiagnosticReport[];
+  next_cursor?: string;
+}
+
+export interface DiagnosticDownloadResponse {
+  download_url: string;
+  expires_at: string;
+}
+
 export type AdminLogStream = "app" | "audit";
 
 export interface AdminLogSnapshotMessage {

@@ -32,6 +32,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/catalogseed"
 	"github.com/Silo-Server/silo-server/internal/clientip"
 	"github.com/Silo-Server/silo-server/internal/config"
+	"github.com/Silo-Server/silo-server/internal/diagnostics"
 	"github.com/Silo-Server/silo-server/internal/downloads"
 	evt "github.com/Silo-Server/silo-server/internal/events"
 	"github.com/Silo-Server/silo-server/internal/historyimport"
@@ -254,14 +255,22 @@ func NewRouter(deps Dependencies) chi.Router {
 	// acting-admin profile policy, degrading admin routes to the plain
 	// role check.
 	var checkPrimaryProfile apimw.PrimaryProfileChecker
+	// lookupProfile resolves a profile for the given user, returning nil when it
+	// does not exist. Shared by the acting-admin primary check and the
+	// diagnostics profile-attribution validator so both read profile state
+	// (IsPrimary, IsChild) the same way.
+	var lookupProfile func(ctx context.Context, userID int, profileID string) (*userstore.Profile, error)
 	if deps.UserStoreProvider != nil {
 		userStores := deps.UserStoreProvider
-		checkPrimaryProfile = func(ctx context.Context, userID int, profileID string) (bool, bool, error) {
+		lookupProfile = func(ctx context.Context, userID int, profileID string) (*userstore.Profile, error) {
 			store, err := userStores.ForUser(ctx, userID)
 			if err != nil {
-				return false, false, err
+				return nil, err
 			}
-			profile, err := store.GetProfile(ctx, profileID)
+			return store.GetProfile(ctx, profileID)
+		}
+		checkPrimaryProfile = func(ctx context.Context, userID int, profileID string) (bool, bool, error) {
+			profile, err := lookupProfile(ctx, userID, profileID)
 			if err != nil {
 				return false, false, err
 			}
@@ -307,6 +316,39 @@ func NewRouter(deps Dependencies) chi.Router {
 	var accessGroupStore *access.GroupStore
 	if deps.DB != nil {
 		accessGroupStore = access.NewGroupStore(deps.DB)
+	}
+	var diagnosticsStore diagnostics.ObjectStore
+	if deps.S3Private != nil {
+		diagnosticsStore = diagnostics.NewS3ObjectStore(deps.S3Private)
+	}
+	var diagnosticsHandler *handlers.DiagnosticsHandler
+	if deps.DB != nil {
+		diagnosticsService := diagnostics.NewService(
+			diagnostics.NewPostgresRepository(deps.DB),
+			settingsRepo,
+			diagnosticsStore,
+			slog.Default(),
+		)
+		if lookupProfile != nil {
+			// Attribute reports only to a profile that belongs to the account and
+			// is not a child profile; child profiles must not perform diagnostics
+			// actions per the design, so reject their attribution here.
+			diagnosticsService.SetProfileAttributionValidator(diagnostics.NewProfileAttributionValidator(
+				func(ctx context.Context, userID int, profileID string) (bool, bool, error) {
+					profile, err := lookupProfile(ctx, userID, profileID)
+					if err != nil {
+						return false, false, err
+					}
+					if profile == nil {
+						return false, false, nil
+					}
+					return true, profile.IsChild, nil
+				},
+			))
+		}
+		diagnosticsHandler = handlers.NewDiagnosticsHandler(
+			diagnosticsService,
+		)
 	}
 
 	// Build auth handler and auth middleware if DB and config are available.
@@ -958,6 +1000,7 @@ func NewRouter(deps Dependencies) chi.Router {
 		adminHandler.BootstrapSensitiveValues = deps.BootstrapSensitiveValues
 		adminHandler.RestartStatus = restartStatus
 		adminHandler.CatalogSearchStatus = catalogSearchService
+		adminHandler.DiagnosticsStore = diagnosticsStore
 		if settingsRepo != nil {
 			adminHandler.SettingsRepo = settingsRepo
 		}
@@ -1763,6 +1806,28 @@ func NewRouter(deps Dependencies) chi.Router {
 					r.Post("/", apiKeyHandler.HandleCreateAPIKey)
 					r.Get("/", apiKeyHandler.HandleListAPIKeys)
 					r.Delete("/{id}", apiKeyHandler.HandleDeleteAPIKey)
+				})
+			})
+		}
+
+		// Client diagnostics are account-scoped and must work before profile
+		// selection, so this route intentionally uses auth only plus the
+		// generic rate limiter, not viewer/profile middleware.
+		if diagnosticsHandler != nil && authMiddleware != nil {
+			r.Group(func(r chi.Router) {
+				r.Use(authMiddleware.RequireAuth)
+				// Demo mode blocks non-admin report uploads (a write to the
+				// private bucket and DB); the read-only status endpoint stays
+				// available because DemoGuard always lets GETs through.
+				if demoGuard != nil {
+					r.Use(demoGuard.Guard)
+				}
+				if deps.RateLimitMW != nil {
+					r.Use(deps.RateLimitMW.Handler)
+				}
+				r.Route("/diagnostics", func(r chi.Router) {
+					r.Get("/status", diagnosticsHandler.HandleStatus)
+					r.Post("/reports", diagnosticsHandler.HandleUpload)
 				})
 			})
 		}
@@ -2882,6 +2947,9 @@ func NewRouter(deps Dependencies) chi.Router {
 								r.Get("/logs/app", adminLogsHandler.HandleListOperationalLogs)
 								r.Get("/logs/audit", adminLogsHandler.HandleListAuditLogs)
 								r.Get("/logs/ws", adminLogsHandler.HandleLogStreamWebSocket)
+							}
+							if diagnosticsHandler != nil {
+								handlers.RegisterAdminDiagnosticsRoutes(r, diagnosticsHandler)
 							}
 							if adminPlaybackControlHandler != nil {
 								r.Post("/sessions/{session_id}/pause", adminPlaybackControlHandler.HandlePauseSession)

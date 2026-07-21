@@ -341,6 +341,21 @@ export async function restoreUserSession<TUser>({
 }
 
 export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const res = await apiResponse(path, options);
+
+  // Handle empty successful responses.
+  if (res.status === 204 || res.status === 205) {
+    return undefined as T;
+  }
+  const text = await res.text();
+  if (text.trim() === "") {
+    return undefined as T;
+  }
+  return JSON.parse(text) as T;
+}
+
+/** Performs an authenticated API request while leaving the successful body unread. */
+export async function apiResponse(path: string, options: RequestInit = {}): Promise<Response> {
   const headers = buildApiHeaders(options);
 
   let res = await fetch(`/api/v1${path}`, { ...options, headers });
@@ -354,8 +369,8 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
     }
     const refreshed = await refreshPromise;
     if (refreshed) {
-      headers["Authorization"] = `Bearer ${accessToken}`;
-      res = await fetch(`/api/v1${path}`, { ...options, headers });
+      const refreshedHeaders = buildApiHeaders(options);
+      res = await fetch(`/api/v1${path}`, { ...options, headers: refreshedHeaders });
     }
   }
 
@@ -367,16 +382,7 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
     }
     throw apiClientErrorFrom(res.status, parsed);
   }
-
-  // Handle empty successful responses.
-  if (res.status === 204 || res.status === 205) {
-    return undefined as T;
-  }
-  const text = await res.text();
-  if (text.trim() === "") {
-    return undefined as T;
-  }
-  return JSON.parse(text) as T;
+  return res;
 }
 
 function buildApiHeaders(options: RequestInit = {}): Record<string, string> {
@@ -421,26 +427,7 @@ export async function apiDownload(
   filename: string,
   options: RequestInit = {},
 ): Promise<void> {
-  let headers = buildApiHeaders(options);
-  let res = await fetch(`/api/v1${path}`, { ...options, headers });
-
-  if (res.status === 401 && getRefreshToken()) {
-    if (!refreshPromise) {
-      refreshPromise = attemptRefresh().finally(() => {
-        refreshPromise = null;
-      });
-    }
-    const refreshed = await refreshPromise;
-    if (refreshed) {
-      headers = buildApiHeaders(options);
-      headers["Authorization"] = `Bearer ${accessToken}`;
-      res = await fetch(`/api/v1${path}`, { ...options, headers });
-    }
-  }
-
-  if (!res.ok) {
-    throw apiClientErrorFrom(res.status, await parseApiError(res));
-  }
+  const res = await apiResponse(path, options);
 
   const blob = await res.blob();
   const url = URL.createObjectURL(blob);
@@ -458,26 +445,7 @@ export async function apiDownload(
 export const API_BLOB_MAX_BYTES = 512 * 1024 * 1024;
 
 export async function apiBlob(path: string, options: RequestInit = {}): Promise<Blob> {
-  let headers = buildApiHeaders(options);
-  let res = await fetch(`/api/v1${path}`, { ...options, headers });
-
-  if (res.status === 401 && getRefreshToken()) {
-    if (!refreshPromise) {
-      refreshPromise = attemptRefresh().finally(() => {
-        refreshPromise = null;
-      });
-    }
-    const refreshed = await refreshPromise;
-    if (refreshed) {
-      headers = buildApiHeaders(options);
-      headers["Authorization"] = `Bearer ${accessToken}`;
-      res = await fetch(`/api/v1${path}`, { ...options, headers });
-    }
-  }
-
-  if (!res.ok) {
-    throw apiClientErrorFrom(res.status, await parseApiError(res));
-  }
+  const res = await apiResponse(path, options);
 
   // Reject oversized bodies up front instead of crashing the tab while
   // buffering them. When the header is absent, proceed; streaming byte counts
