@@ -2,6 +2,7 @@ package diagnostics
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
@@ -52,6 +53,11 @@ type BundleInfo struct {
 	UncompressedBytes int64
 	SHA256            string
 	Entries           []string
+	// EmbeddedManifest is the raw bytes of the archive's first entry
+	// (manifest.json). Per the bundle contract this is the part-1 manifest with
+	// the `archive` object removed; Ingest compares the two so a stored archive
+	// can never carry a manifest that disagrees with the accepted report.
+	EmbeddedManifest []byte
 }
 
 var allowedBundleEntries = allowlistMap(contract.ArchiveEntryAllowlist)
@@ -103,7 +109,8 @@ func ValidateBundle(r io.Reader, limits BundleLimits) (BundleInfo, error) {
 		if err != nil {
 			return BundleInfo{}, err
 		}
-		if len(info.Entries) == 0 && name != "manifest.json" {
+		isManifestEntry := len(info.Entries) == 0
+		if isManifestEntry && name != "manifest.json" {
 			return BundleInfo{}, fmt.Errorf("%w: first entry must be manifest.json", ErrInvalidBundle)
 		}
 		info.Entries = append(info.Entries, name)
@@ -111,16 +118,29 @@ func ValidateBundle(r io.Reader, limits BundleLimits) (BundleInfo, error) {
 		if hdr.Size > limits.MaxEntryBytes {
 			return BundleInfo{}, ErrEntryTooLarge
 		}
+		if isManifestEntry && hdr.Size > MaxManifestBytes {
+			return BundleInfo{}, fmt.Errorf("%w: embedded manifest exceeds %d bytes", ErrInvalidBundle, MaxManifestBytes)
+		}
 		if payloadBytes+hdr.Size > limits.MaxUncompressedBytes {
 			return BundleInfo{}, ErrUncompressedTooLarge
 		}
 
-		entryBytes, err := copyTarEntry(tr, buffer, limits, metered, &payloadBytes)
+		var manifestCapture *bytes.Buffer
+		var capture io.Writer
+		if isManifestEntry {
+			manifestCapture = &bytes.Buffer{}
+			manifestCapture.Grow(int(hdr.Size))
+			capture = manifestCapture
+		}
+		entryBytes, err := copyTarEntry(tr, buffer, limits, metered, &payloadBytes, capture)
 		if err != nil {
 			return BundleInfo{}, err
 		}
 		if entryBytes != hdr.Size {
 			return BundleInfo{}, fmt.Errorf("%w: entry size mismatch for %s", ErrInvalidBundle, name)
+		}
+		if manifestCapture != nil {
+			info.EmbeddedManifest = manifestCapture.Bytes()
 		}
 	}
 
@@ -173,13 +193,29 @@ func validateEntryHeader(hdr *tar.Header) (string, error) {
 	if hdr == nil {
 		return "", fmt.Errorf("%w: missing tar header", ErrInvalidBundle)
 	}
+	// PAX/GNU extension records are consumed by archive/tar before the next
+	// header surfaces, so bytes carried in them never reach the allowlist and
+	// count checks. The contract fixtures are plain USTAR; reject anything else
+	// rather than let extension records smuggle data past validation.
+	if hdr.Format == tar.FormatPAX || hdr.Format == tar.FormatGNU {
+		return "", fmt.Errorf("%w: unsupported tar format", ErrInvalidBundle)
+	}
+	if len(hdr.PAXRecords) > 0 {
+		return "", fmt.Errorf("%w: unsupported tar extension records", ErrInvalidBundle)
+	}
 	if hdr.Typeflag != tar.TypeReg && hdr.Typeflag != tar.TypeRegA {
 		return "", fmt.Errorf("%w: unsupported tar entry type", ErrInvalidBundle)
 	}
 	if hdr.Size < 0 {
 		return "", fmt.Errorf("%w: negative tar entry size", ErrInvalidBundle)
 	}
-	name := strings.TrimSpace(hdr.Name)
+	// Reject names that are not already trimmed instead of normalizing them:
+	// otherwise a padded name like "manifest.json " would be recorded as the
+	// allowlisted entry while the archive stores a different literal member.
+	name := hdr.Name
+	if name != strings.TrimSpace(name) {
+		return "", fmt.Errorf("%w: unsafe entry name", ErrInvalidBundle)
+	}
 	if name == "" || strings.Contains(name, "\\") || strings.HasPrefix(name, "/") || path.IsAbs(name) {
 		return "", fmt.Errorf("%w: unsafe entry name", ErrInvalidBundle)
 	}
@@ -193,11 +229,14 @@ func validateEntryHeader(hdr *tar.Header) (string, error) {
 	return name, nil
 }
 
-func copyTarEntry(tr *tar.Reader, buffer []byte, limits BundleLimits, metered *compressedMeter, total *int64) (int64, error) {
+func copyTarEntry(tr *tar.Reader, buffer []byte, limits BundleLimits, metered *compressedMeter, total *int64, capture io.Writer) (int64, error) {
 	var entryBytes int64
 	for {
 		n, err := tr.Read(buffer)
 		if n > 0 {
+			if capture != nil {
+				_, _ = capture.Write(buffer[:n])
+			}
 			entryBytes += int64(n)
 			if entryBytes > limits.MaxEntryBytes {
 				return entryBytes, ErrEntryTooLarge

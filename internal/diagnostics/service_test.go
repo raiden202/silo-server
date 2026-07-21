@@ -17,12 +17,11 @@ import (
 )
 
 func TestServiceIngestStoresReadyReport(t *testing.T) {
-	bundle, info := testDiagnosticsBundle(t)
+	bundle, manifest, info := testDiagnosticsUpload(t, "server-1", DefaultConsentNoticeVer, "prof_1")
 	repo := &fakeDiagnosticReportStore{}
 	store := &fakeDiagnosticObjectStore{bucket: "private"}
 	svc := newTestDiagnosticsService(repo, store)
 
-	manifest := testManifestJSON(t, "server-1", DefaultConsentNoticeVer, info)
 	result, err := svc.Ingest(context.Background(), 42, nil, manifest, bytes.NewReader(bundle))
 	if err != nil {
 		t.Fatalf("Ingest: %v", err)
@@ -126,6 +125,41 @@ func TestServiceIngestArchiveMismatchCompensates(t *testing.T) {
 	}
 }
 
+func TestServiceIngestRejectsEmbeddedManifestMismatch(t *testing.T) {
+	// The tar embeds a manifest.json that disagrees with the part-1 manifest
+	// (different os_version) while the archive size/sha fields still match the
+	// stored bundle, so this is caught only by the embedded-manifest check.
+	embedded := diagnosticsManifestBody("server-1", DefaultConsentNoticeVer, "prof_1", "15", nil)
+	bundle := buildManifestBundle(t, embedded)
+	info, err := ValidateBundle(bytes.NewReader(bundle), BundleLimits{})
+	if err != nil {
+		t.Fatalf("ValidateBundle: %v", err)
+	}
+	manifest := diagnosticsManifestBody("server-1", DefaultConsentNoticeVer, "prof_1", "99", &info)
+	if _, err := contract.ValidateManifest(manifest); err != nil {
+		t.Fatalf("test manifest invalid: %v\n%s", err, manifest)
+	}
+
+	repo := &fakeDiagnosticReportStore{}
+	store := &fakeDiagnosticObjectStore{bucket: "private"}
+	svc := newTestDiagnosticsService(repo, store)
+
+	_, err = svc.Ingest(context.Background(), 42, nil, manifest, bytes.NewReader(bundle))
+	if !errors.Is(err, ErrArchiveMismatch) {
+		t.Fatalf("Ingest error = %v, want ErrArchiveMismatch", err)
+	}
+	wantReportID := "11111111-1111-1111-1111-111111111111"
+	if len(repo.failed) != 1 || repo.failed[0] != wantReportID {
+		t.Fatalf("failed reports = %v, want [%s]", repo.failed, wantReportID)
+	}
+	if len(store.deleted) != 1 {
+		t.Fatalf("deleted keys = %v, want compensation delete", store.deleted)
+	}
+	if len(repo.ready) != 0 {
+		t.Fatalf("ready reports = %v, want none", repo.ready)
+	}
+}
+
 func TestServiceIngestReturnsStorageErrorForMidStreamPutFailure(t *testing.T) {
 	bundle, info := testDiagnosticsBundle(t)
 	putErr := errors.New("s3: connection reset by peer")
@@ -184,7 +218,7 @@ func TestServiceIngestCompensatesWithDetachedContext(t *testing.T) {
 }
 
 func TestServiceIngestStoresOnlyValidatedProfileAttribution(t *testing.T) {
-	bundle, info := testDiagnosticsBundle(t)
+	bundle, manifest, _ := testDiagnosticsUpload(t, "server-1", DefaultConsentNoticeVer, "prof_1")
 	repo := &fakeDiagnosticReportStore{}
 	store := &fakeDiagnosticObjectStore{bucket: "private"}
 	svc := newTestDiagnosticsService(repo, store)
@@ -193,7 +227,6 @@ func TestServiceIngestStoresOnlyValidatedProfileAttribution(t *testing.T) {
 	}))
 
 	headerProfileID := "prof_header"
-	manifest := testManifestJSON(t, "server-1", DefaultConsentNoticeVer, info)
 	if _, err := svc.Ingest(context.Background(), 42, &headerProfileID, manifest, bytes.NewReader(bundle)); err != nil {
 		t.Fatalf("Ingest: %v", err)
 	}
@@ -216,12 +249,11 @@ func TestServiceIngestStoresOnlyValidatedProfileAttribution(t *testing.T) {
 }
 
 func TestServiceIngestAcceptsManifestWithoutProfileID(t *testing.T) {
-	bundle, info := testDiagnosticsBundle(t)
+	bundle, manifest, _ := testDiagnosticsUpload(t, "server-1", DefaultConsentNoticeVer, "")
 	repo := &fakeDiagnosticReportStore{}
 	store := &fakeDiagnosticObjectStore{bucket: "private"}
 	svc := newTestDiagnosticsService(repo, store)
 
-	manifest := testManifestJSONWithProfile(t, "server-1", DefaultConsentNoticeVer, info, "")
 	if _, err := svc.Ingest(context.Background(), 42, nil, manifest, bytes.NewReader(bundle)); err != nil {
 		t.Fatalf("Ingest: %v", err)
 	}
@@ -247,6 +279,51 @@ func TestServiceDeleteReportDeletesRowWhenStorageUnavailable(t *testing.T) {
 	}
 	if len(repo.deleted) != 1 || repo.deleted[0] != report.ID {
 		t.Fatalf("deleted rows = %v, want [%s]", repo.deleted, report.ID)
+	}
+}
+
+func TestServiceDeleteReportKeepsBlobWhenRowDeletionFails(t *testing.T) {
+	report := testReadyDiagnosticReport("22222222-2222-2222-2222-222222222222", 42)
+	repo := &fakeDiagnosticReportStore{
+		getReport: &report,
+		deleteErr: errors.New("db down"),
+	}
+	store := &fakeDiagnosticObjectStore{bucket: "private"}
+	svc := newTestDiagnosticsService(repo, store)
+
+	if _, err := svc.DeleteReport(context.Background(), report.ID); err == nil {
+		t.Fatal("DeleteReport error = nil, want row deletion failure")
+	}
+	// The blob must survive a failed row deletion so a retry can still recover
+	// the original artifact.
+	if len(store.deleted) != 0 {
+		t.Fatalf("blob deleted despite row deletion failure: %v", store.deleted)
+	}
+}
+
+func TestServiceDeleteReportSucceedsWhenBlobDeletionFails(t *testing.T) {
+	report := testReadyDiagnosticReport("22222222-2222-2222-2222-222222222222", 42)
+	repo := &fakeDiagnosticReportStore{
+		getReport:    &report,
+		deleteReport: &report,
+	}
+	store := &fakeDiagnosticObjectStore{bucket: "private", deleteErr: errors.New("s3 down")}
+	svc := newTestDiagnosticsService(repo, store)
+
+	deleted, err := svc.DeleteReport(context.Background(), report.ID)
+	if err != nil {
+		t.Fatalf("DeleteReport error = %v, want success after row deletion", err)
+	}
+	if deleted == nil || deleted.ID != report.ID {
+		t.Fatalf("deleted report = %#v, want %s", deleted, report.ID)
+	}
+	if len(repo.deleted) != 1 || repo.deleted[0] != report.ID {
+		t.Fatalf("deleted rows = %v, want [%s]", repo.deleted, report.ID)
+	}
+	// The row is gone; the orphaned blob delete was attempted (and failed), and
+	// the reconciler will reap it later.
+	if len(store.deleted) == 0 {
+		t.Fatal("blob deletion was not attempted after row removal")
 	}
 }
 
@@ -303,12 +380,33 @@ func testManifestJSON(t *testing.T, serverID string, noticeVersion int, archive 
 
 func testManifestJSONWithProfile(t *testing.T, serverID string, noticeVersion int, archive BundleInfo, profileID string) []byte {
 	t.Helper()
+	data := diagnosticsManifestBody(serverID, noticeVersion, profileID, "15", &archive)
+	if _, err := contract.ValidateManifest(data); err != nil {
+		t.Fatalf("test manifest invalid: %v\n%s", err, string(data))
+	}
+	return data
+}
+
+// diagnosticsManifestBody builds a manifest JSON body. When info is nil the
+// `archive` object is omitted, producing the embedded manifest.json contract
+// form (part-1 manifest minus `archive`).
+func diagnosticsManifestBody(serverID string, noticeVersion int, profileID, osVersion string, info *BundleInfo) []byte {
 	profileField := ""
 	if profileID != "" {
 		profileField = `,
 			"profile_id": "` + profileID + `"`
 	}
-	data := []byte(`{
+	archiveField := ""
+	if info != nil {
+		archiveField = `,
+		"archive": {
+			"entries": ["manifest.json"],
+			"bytes": ` + strconv.FormatInt(info.CompressedBytes, 10) + `,
+			"uncompressed_bytes": ` + strconv.FormatInt(info.UncompressedBytes, 10) + `,
+			"sha256": "` + info.SHA256 + `"
+		}`
+	}
+	return []byte(`{
 		"schema_version": 1,
 		"report": {
 			"type": "manual",
@@ -317,7 +415,7 @@ func testManifestJSONWithProfile(t *testing.T, serverID string, noticeVersion in
 			"app_version": "1.0.0",
 			"app_build": "100",
 			"platform": "android",
-			"os_version": "15"` + profileField + `
+			"os_version": "` + osVersion + `"` + profileField + `
 		},
 		"destination": { "server_instance_id": "` + serverID + `" },
 		"consent": { "mode": "manual", "notice_version": ` + strconv.Itoa(noticeVersion) + ` },
@@ -334,18 +432,50 @@ func testManifestJSONWithProfile(t *testing.T, serverID string, noticeVersion in
 			"dropped_lines": 0,
 			"categories": ["crash"],
 			"debug_logging": true
-		},
-		"archive": {
-			"entries": ["manifest.json"],
-			"bytes": ` + strconv.FormatInt(archive.CompressedBytes, 10) + `,
-			"uncompressed_bytes": ` + strconv.FormatInt(archive.UncompressedBytes, 10) + `,
-			"sha256": "` + archive.SHA256 + `"
-		}
+		}` + archiveField + `
 	}`)
-	if _, err := contract.ValidateManifest(data); err != nil {
-		t.Fatalf("test manifest invalid: %v\n%s", err, string(data))
+}
+
+// testDiagnosticsUpload builds a coordinated (bundle, manifest) pair: the tar's
+// embedded manifest.json is the part-1 manifest minus `archive`, and the part-1
+// manifest's archive fields match the built bundle — the shape Ingest accepts.
+func testDiagnosticsUpload(t *testing.T, serverID string, noticeVersion int, profileID string) ([]byte, []byte, BundleInfo) {
+	t.Helper()
+	embedded := diagnosticsManifestBody(serverID, noticeVersion, profileID, "15", nil)
+	bundle := buildManifestBundle(t, embedded)
+	info, err := ValidateBundle(bytes.NewReader(bundle), BundleLimits{})
+	if err != nil {
+		t.Fatalf("ValidateBundle: %v", err)
 	}
-	return data
+	manifest := diagnosticsManifestBody(serverID, noticeVersion, profileID, "15", &info)
+	if _, err := contract.ValidateManifest(manifest); err != nil {
+		t.Fatalf("test manifest invalid: %v\n%s", err, manifest)
+	}
+	return bundle, manifest, info
+}
+
+func buildManifestBundle(t *testing.T, manifestBody []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	if err := tw.WriteHeader(&tar.Header{
+		Name: "manifest.json",
+		Mode: 0o600,
+		Size: int64(len(manifestBody)),
+	}); err != nil {
+		t.Fatalf("write tar header: %v", err)
+	}
+	if _, err := tw.Write(manifestBody); err != nil {
+		t.Fatalf("write tar payload: %v", err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("close gzip: %v", err)
+	}
+	return buf.Bytes()
 }
 
 type fakeDiagnosticReportStore struct {
@@ -427,6 +557,7 @@ type fakeDiagnosticObjectStore struct {
 	puts          []string
 	deleted       []string
 	deleteCtxErrs []error
+	deleteErr     error
 	data          []byte
 	putErr        error
 	putReadBytes  int64
@@ -456,7 +587,7 @@ func (f *fakeDiagnosticObjectStore) GetObject(context.Context, string, string) (
 func (f *fakeDiagnosticObjectStore) DeleteObject(ctx context.Context, _ string, key string) error {
 	f.deleted = append(f.deleted, key)
 	f.deleteCtxErrs = append(f.deleteCtxErrs, ctx.Err())
-	return nil
+	return f.deleteErr
 }
 
 func (f *fakeDiagnosticObjectStore) ListObjects(context.Context, string) ([]string, error) {

@@ -93,15 +93,16 @@ func (r *PostgresRepository) InsertReceiving(ctx context.Context, input InsertRe
 		err = tx.QueryRow(ctx, `
 			INSERT INTO client_diagnostic_reports (
 				id, short_id, user_id, profile_id, state, captured_at, report_type,
-				platform, app_version, crash_summary, manifest, playback_session_ids
+				platform, app_version, crash_summary, manifest, playback_session_ids,
+				blob_bytes
 			)
-			VALUES ($1::uuid, $2, $3, $4, 'receiving', $5, $6, $7, $8, $9, $10::jsonb, $11)
+			VALUES ($1::uuid, $2, $3, $4, 'receiving', $5, $6, $7, $8, $9, $10::jsonb, $11, $12)
 			ON CONFLICT DO NOTHING
 			RETURNING id::text, short_id
 		`, id, shortID, input.UserID, nullableString(input.ProfileID), input.CapturedAt,
 			strings.TrimSpace(input.ReportType), strings.TrimSpace(input.Platform),
 			strings.TrimSpace(input.AppVersion), nullableString(crashSummary),
-			string(input.Manifest), sessionIDs).Scan(&insertedID, &insertedShortID)
+			string(input.Manifest), sessionIDs, input.ExpectedBlobBytes).Scan(&insertedID, &insertedShortID)
 		if errors.Is(err, pgx.ErrNoRows) {
 			continue
 		}
@@ -135,12 +136,16 @@ func (r *PostgresRepository) checkQuotas(ctx context.Context, tx pgx.Tx, input I
 	}
 
 	if input.MaxBytesPerUser > 0 {
+		// Count 'receiving' rows too: a new upload reserves its expected size in
+		// blob_bytes before the bundle streams in, so concurrent or multi-node
+		// uploads can't each pass a near-limit check and both mark ready. Ready
+		// rows overwrite the reservation with their actual size on completion.
 		var used int64
 		if err := tx.QueryRow(ctx, `
 			SELECT COALESCE(SUM(blob_bytes), 0)
 			FROM client_diagnostic_reports
 			WHERE user_id = $1
-			  AND state = 'ready'
+			  AND state IN ('receiving', 'ready')
 		`, input.UserID).Scan(&used); err != nil {
 			return fmt.Errorf("sum diagnostic bytes for quota: %w", err)
 		}

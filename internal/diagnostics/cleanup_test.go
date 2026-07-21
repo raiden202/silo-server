@@ -46,6 +46,42 @@ func TestCleanupReportsDeletesBlobBeforeRowAndToleratesMissingObject(t *testing.
 	assertStrings(t, ops, wantOps)
 }
 
+func TestCleanupReportsContinuesPastPerReportFailure(t *testing.T) {
+	ops := []string{}
+	repo := &fakeCleanupRepo{
+		retention: []Report{
+			testCleanupReport("r1", 7, StateReady, "diagnostics/7/r1.tar.gz"),
+			testCleanupReport("r2", 7, StateReady, "diagnostics/7/r2.tar.gz"),
+		},
+		ops: &ops,
+	}
+	store := &fakeCleanupStore{
+		bucket:     "private",
+		deleteErrs: map[string]error{"diagnostics/7/r1.tar.gz": errors.New("s3 access denied")},
+		ops:        &ops,
+	}
+
+	result, err := CleanupReports(context.Background(), repo, store, Settings{
+		RetentionDays:   30,
+		MaxBytesPerUser: DefaultMaxBytesPerUser,
+	}, CleanupOptions{
+		Now:    func() time.Time { return time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC) },
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err == nil {
+		t.Fatal("CleanupReports error = nil, want aggregated per-report failure")
+	}
+	// r1's blob delete failed, so its row is left intact; r2 is still processed.
+	if result.RetentionReportsDeleted != 1 {
+		t.Fatalf("RetentionReportsDeleted = %d, want 1", result.RetentionReportsDeleted)
+	}
+	assertStrings(t, ops, []string{
+		"delete-object:diagnostics/7/r1.tar.gz",
+		"delete-object:diagnostics/7/r2.tar.gz",
+		"delete-row:r2",
+	})
+}
+
 func TestCleanupReportsCleansStaleReceiving(t *testing.T) {
 	ops := []string{}
 	repo := &fakeCleanupRepo{
@@ -194,6 +230,7 @@ type fakeCleanupStore struct {
 	bucket      string
 	list        []string
 	missingKeys map[string]bool
+	deleteErrs  map[string]error
 	deleted     []string
 	ops         *[]string
 }
@@ -211,6 +248,9 @@ func (f *fakeCleanupStore) DeleteObject(_ context.Context, _ string, key string)
 	f.deleted = append(f.deleted, key)
 	if f.missingKeys[key] {
 		return ErrObjectNotFound
+	}
+	if err := f.deleteErrs[key]; err != nil {
+		return err
 	}
 	return nil
 }

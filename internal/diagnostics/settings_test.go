@@ -3,6 +3,7 @@ package diagnostics
 import (
 	"context"
 	"testing"
+	"time"
 )
 
 func TestSeedDefaultsPreservesExistingServerInstanceID(t *testing.T) {
@@ -37,6 +38,37 @@ func TestSeedDefaultsGeneratesDedicatedServerInstanceIDWhenMissing(t *testing.T)
 	}
 	if store.values[jellyfinServerIDKey] != "constant-jellyfin-id" {
 		t.Fatalf("jellyfin server id changed to %q", store.values[jellyfinServerIDKey])
+	}
+}
+
+func TestSeedDefaultsAdoptsConcurrentInstanceIDWinner(t *testing.T) {
+	// A store that supports insert-if-absent seeds the instance ID atomically:
+	// when another node wins the race, this node adopts the winning value
+	// instead of overwriting it.
+	store := &racingSettingsStore{
+		memorySettingsStore: memorySettingsStore{values: map[string]string{}},
+		concurrentWinner:    "winner-instance",
+	}
+	if err := SeedDefaults(context.Background(), store); err != nil {
+		t.Fatalf("SeedDefaults: %v", err)
+	}
+	if got := store.values[KeyServerInstanceID]; got != "winner-instance" {
+		t.Fatalf("server instance id = %q, want winner-instance", got)
+	}
+	if store.setIfAbsentCalls != 1 {
+		t.Fatalf("SetIfAbsent calls = %d, want 1", store.setIfAbsentCalls)
+	}
+}
+
+func TestLoadCleanupIntervalUsesDiagnosticsKey(t *testing.T) {
+	store := newMemorySettingsStore(map[string]string{
+		KeyCleanupIntervalMinutes: "45",
+	})
+	if got := LoadCleanupInterval(context.Background(), store); got != 45*time.Minute {
+		t.Fatalf("LoadCleanupInterval = %v, want 45m", got)
+	}
+	if got := LoadCleanupInterval(context.Background(), newMemorySettingsStore(nil)); got != DefaultCleanupIntervalMinutes*time.Minute {
+		t.Fatalf("LoadCleanupInterval default = %v, want %d minutes", got, DefaultCleanupIntervalMinutes)
 	}
 }
 
@@ -112,4 +144,25 @@ func (s *memorySettingsStore) Get(_ context.Context, key string) (string, error)
 func (s *memorySettingsStore) Set(_ context.Context, key, value string) error {
 	s.values[key] = value
 	return nil
+}
+
+// racingSettingsStore adds insert-if-absent semantics and simulates another node
+// winning the instance-ID seed race via concurrentWinner.
+type racingSettingsStore struct {
+	memorySettingsStore
+	concurrentWinner string
+	setIfAbsentCalls int
+}
+
+func (s *racingSettingsStore) SetIfAbsent(_ context.Context, key, value string) (bool, error) {
+	s.setIfAbsentCalls++
+	if existing := s.values[key]; existing != "" {
+		return false, nil
+	}
+	if s.concurrentWinner != "" {
+		s.values[key] = s.concurrentWinner
+		return false, nil
+	}
+	s.values[key] = value
+	return true, nil
 }

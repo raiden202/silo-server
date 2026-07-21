@@ -80,60 +80,77 @@ func CleanupReports(
 		cutoff = now().Add(-time.Duration(settings.RetentionDays) * 24 * time.Hour)
 	}
 
+	// A single poisoned report (e.g. a permission error on one S3 object) must
+	// not abort the whole run, or every scheduled pass re-hits it first and
+	// blocks retention, stale reconciliation, and orphan cleanup indefinitely.
+	// Log-and-continue per report; aggregate per-item failures and still surface
+	// genuine query/iteration errors.
 	var result CleanupResult
+	var errs []error
+
 	candidates, err := repo.RetentionCandidates(ctx, cutoff, settings.MaxBytesPerUser)
 	if err != nil {
-		return result, fmt.Errorf("load diagnostic retention candidates: %w", err)
+		errs = append(errs, fmt.Errorf("load diagnostic retention candidates: %w", err))
+		return result, errors.Join(errs...)
 	}
 	for _, report := range candidates {
 		if err := deleteReportObjects(ctx, store, &report, logger); err != nil {
-			return result, fmt.Errorf("delete diagnostic retention blob %s: %w", report.ID, err)
+			errs = append(errs, fmt.Errorf("delete diagnostic retention blob %s: %w", report.ID, err))
+			continue
 		}
 		if _, err := repo.DeleteByID(ctx, report.ID); err != nil && !IsReportNotFound(err) {
-			return result, fmt.Errorf("delete diagnostic retention row %s: %w", report.ID, err)
+			errs = append(errs, fmt.Errorf("delete diagnostic retention row %s: %w", report.ID, err))
+			continue
 		}
 		result.RetentionReportsDeleted++
 	}
 
 	stale, err := repo.StaleReceiving(ctx, grace)
 	if err != nil {
-		return result, fmt.Errorf("load stale diagnostic reports: %w", err)
+		errs = append(errs, fmt.Errorf("load stale diagnostic reports: %w", err))
+		return result, errors.Join(errs...)
 	}
 	for _, report := range stale {
 		if err := deleteReportObjects(ctx, store, &report, logger); err != nil {
-			return result, fmt.Errorf("delete stale diagnostic blob %s: %w", report.ID, err)
+			errs = append(errs, fmt.Errorf("delete stale diagnostic blob %s: %w", report.ID, err))
+			continue
 		}
 		if report.State == StateReceiving {
 			if err := repo.MarkFailed(ctx, report.ID); err != nil && !IsReportNotFound(err) {
-				return result, fmt.Errorf("mark stale diagnostic report failed %s: %w", report.ID, err)
+				errs = append(errs, fmt.Errorf("mark stale diagnostic report failed %s: %w", report.ID, err))
+				continue
 			}
 		}
 		if _, err := repo.DeleteByID(ctx, report.ID); err != nil && !IsReportNotFound(err) {
-			return result, fmt.Errorf("delete stale diagnostic row %s: %w", report.ID, err)
+			errs = append(errs, fmt.Errorf("delete stale diagnostic row %s: %w", report.ID, err))
+			continue
 		}
 		result.StaleReportsDeleted++
 	}
 
 	if store == nil || strings.TrimSpace(store.Bucket()) == "" {
-		return result, nil
+		return result, errors.Join(errs...)
 	}
 	keys, err := store.ListObjects(ctx, ObjectPrefix)
 	if err != nil {
-		return result, fmt.Errorf("list diagnostic objects: %w", err)
+		errs = append(errs, fmt.Errorf("list diagnostic objects: %w", err))
+		return result, errors.Join(errs...)
 	}
 	if len(keys) == 0 {
-		return result, nil
+		return result, errors.Join(errs...)
 	}
 	liveKeys, err := repo.LiveBlobKeys(ctx, keys)
 	if err != nil {
-		return result, fmt.Errorf("load live diagnostic blob keys: %w", err)
+		errs = append(errs, fmt.Errorf("load live diagnostic blob keys: %w", err))
+		return result, errors.Join(errs...)
 	}
 	for _, key := range keys {
 		if _, ok := liveKeys[key]; ok {
 			continue
 		}
 		if err := deleteObjectIfPresent(ctx, store, store.Bucket(), key); err != nil {
-			return result, fmt.Errorf("delete orphan diagnostic object %s: %w", key, err)
+			errs = append(errs, fmt.Errorf("delete orphan diagnostic object %s: %w", key, err))
+			continue
 		}
 		logger.InfoContext(ctx, "diagnostic orphan object deleted",
 			"component", "diagnostics",
@@ -141,7 +158,7 @@ func CleanupReports(
 		)
 		result.OrphanObjectsDeleted++
 	}
-	return result, nil
+	return result, errors.Join(errs...)
 }
 
 func deleteReportObjects(ctx context.Context, store ObjectStore, report *Report, logger *slog.Logger) error {

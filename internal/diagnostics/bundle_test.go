@@ -139,6 +139,21 @@ func TestValidateBundle(t *testing.T) {
 			},
 			wantErr: ErrInvalidBundle,
 		},
+		{
+			name: "rejects padded entry name",
+			entries: []testArchiveEntry{
+				{name: "manifest.json ", body: []byte(`{}`)},
+			},
+			wantErr: ErrInvalidBundle,
+		},
+		{
+			name:    "rejects pax extension records",
+			entries: validEntries,
+			mutate: func([]byte) []byte {
+				return buildTestArchivePAX(t)
+			},
+			wantErr: ErrInvalidBundle,
+		},
 	}
 
 	for _, tt := range tests {
@@ -262,6 +277,40 @@ func buildTestArchiveWithPostTarPayload(t *testing.T, entries []testArchiveEntry
 	}
 	if _, err := gz.Write(trailing); err != nil {
 		t.Fatalf("write trailing gzip payload: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("close gzip: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// buildTestArchivePAX writes an archive whose first entry uses PAX extended
+// headers (forced by a custom PAX record). archive/tar consumes those records
+// before the entry header surfaces, so validation must reject the format even
+// though the visible name is allowlisted.
+func buildTestArchivePAX(t *testing.T) []byte {
+	t.Helper()
+
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	body := []byte(`{"schema_version":1}`)
+	hdr := &tar.Header{
+		Name:       "manifest.json",
+		Mode:       0o600,
+		Size:       int64(len(body)),
+		Typeflag:   tar.TypeReg,
+		Format:     tar.FormatPAX,
+		PAXRecords: map[string]string{"SILO.smuggled": "payload"},
+	}
+	if err := tw.WriteHeader(hdr); err != nil {
+		t.Fatalf("write pax header: %v", err)
+	}
+	if _, err := tw.Write(body); err != nil {
+		t.Fatalf("write pax body: %v", err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar: %v", err)
 	}
 	if err := gz.Close(); err != nil {
 		t.Fatalf("close gzip: %v", err)

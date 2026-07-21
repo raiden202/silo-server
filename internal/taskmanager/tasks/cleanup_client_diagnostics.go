@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/diagnostics"
-	"github.com/Silo-Server/silo-server/internal/opslog"
 	"github.com/Silo-Server/silo-server/internal/taskmanager"
 )
 
@@ -46,11 +45,15 @@ func (t *ClientDiagnosticsCleanupTask) Category() taskmanager.TaskCategory {
 func (t *ClientDiagnosticsCleanupTask) IsHidden() bool { return false }
 
 func (t *ClientDiagnosticsCleanupTask) DefaultTriggers() []taskmanager.TriggerConfig {
+	// DefaultTriggers runs on the startup path, so bound the settings read rather
+	// than letting a slow store stall trigger setup before the default applies.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	return []taskmanager.TriggerConfig{
 		{Type: taskmanager.TriggerTypeStartup},
 		{
 			Type:       taskmanager.TriggerTypeInterval,
-			IntervalMs: int64(opslog.LoadCleanupInterval(context.Background(), t.settings) / time.Millisecond),
+			IntervalMs: int64(diagnostics.LoadCleanupInterval(ctx, t.settings) / time.Millisecond),
 		},
 	}
 }

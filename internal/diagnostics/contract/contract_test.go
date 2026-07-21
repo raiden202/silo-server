@@ -65,6 +65,49 @@ func TestInvalidManifestFixtures(t *testing.T) {
 	}
 }
 
+func TestValidateManifestRequiresCrashForEventReports(t *testing.T) {
+	// A non-manual report with the crash object stripped must be rejected so
+	// event reports always carry crash summary/source/occurred_at.
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(mustReadFixture(t, "v1/fixtures/valid/android-tv-crash-ueh.json"), &m); err != nil {
+		t.Fatalf("parse crash fixture: %v", err)
+	}
+	delete(m, "crash")
+	stripped, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal stripped manifest: %v", err)
+	}
+	_, err = ValidateManifest(stripped)
+	if err == nil || !strings.Contains(err.Error(), "crash") {
+		t.Fatalf("ValidateManifest() error = %v, want crash required for event report", err)
+	}
+}
+
+func TestValidateManifestRejectsCrashOnManualReports(t *testing.T) {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(mustReadFixture(t, "v1/fixtures/valid/android-tv-crash-ueh.json"), &m); err != nil {
+		t.Fatalf("parse crash fixture: %v", err)
+	}
+	var report map[string]json.RawMessage
+	if err := json.Unmarshal(m["report"], &report); err != nil {
+		t.Fatalf("parse report: %v", err)
+	}
+	report["type"] = json.RawMessage(`"manual"`)
+	reportJSON, err := json.Marshal(report)
+	if err != nil {
+		t.Fatalf("marshal report: %v", err)
+	}
+	m["report"] = reportJSON
+	withCrash, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal manifest: %v", err)
+	}
+	_, err = ValidateManifest(withCrash)
+	if err == nil || !strings.Contains(err.Error(), "crash") {
+		t.Fatalf("ValidateManifest() error = %v, want crash rejected for manual report", err)
+	}
+}
+
 func TestSchemaEnumsAndRequiredFieldsStayInSync(t *testing.T) {
 	manifest := mustReadObject(t, "v1/manifest.schema.json")
 	assertStringsEqual(t, "manifest.required", schemaStrings(t, manifest, "required"), manifestRequiredFields)

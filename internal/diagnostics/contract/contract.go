@@ -310,11 +310,18 @@ func ValidateManifest(data []byte) (Manifest, error) {
 		return Manifest{}, err
 	}
 
+	// Per the spec the crash object is present for every event report type and
+	// absent for manual captures. Enforce both directions so an event report
+	// can't be accepted with no crash summary/source/occurred_at to diagnose.
 	var crash *Crash
-	if wire.Crash != nil {
-		if report.Type == "manual" {
+	switch {
+	case report.Type == "manual":
+		if wire.Crash != nil {
 			return Manifest{}, fieldError("manifest.crash", "must be absent for manual reports")
 		}
+	case wire.Crash == nil:
+		return Manifest{}, requiredError("manifest.crash")
+	default:
 		validated, err := validateCrash(*wire.Crash)
 		if err != nil {
 			return Manifest{}, err

@@ -67,18 +67,34 @@ func (s *Service) DeleteReport(ctx context.Context, id string) (*Report, error) 
 	if s.reports == nil {
 		return nil, ErrReportStoreUnavailable
 	}
-	report, err := s.reports.GetByID(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	if err := deleteReportObjects(ctx, s.store, report, s.logger); err != nil {
-		return nil, err
-	}
+	// Delete the row before the blob: a DB failure after the object is gone
+	// would otherwise leave a visible report whose bundle can no longer be
+	// downloaded. DeleteByID returns the deleted row (and ErrNotFound when
+	// absent), so the blob location is captured from it. If the blob delete
+	// fails the row is already gone, so log the bucket/key for an operator (and
+	// the orphan reconciler) to reap instead of failing the delete.
 	deleted, err := s.reports.DeleteByID(ctx, id)
 	if err != nil {
 		return nil, err
 	}
+	if err := deleteReportObjects(ctx, s.store, deleted, s.logger); err != nil {
+		s.logger.ErrorContext(ctx, "diagnostic report blob deletion failed after row deletion",
+			"component", "diagnostics",
+			"report_id", deleted.ID,
+			"bucket", reportBlobBucket(deleted, s.store),
+			"keys", reportObjectKeys(*deleted),
+			"error", err,
+		)
+	}
 	return deleted, nil
+}
+
+func reportBlobBucket(report *Report, store ObjectStore) string {
+	bucket := stringValue(report.BlobBucket)
+	if bucket == "" && store != nil {
+		bucket = store.Bucket()
+	}
+	return bucket
 }
 
 func (s *Service) readyReportBlobLocation(report *Report) (string, string, error) {

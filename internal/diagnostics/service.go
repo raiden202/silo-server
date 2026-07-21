@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -202,6 +203,11 @@ func (s *Service) Ingest(ctx context.Context, userID int, profileID *string, man
 		s.logRejected(ctx, reserved.ID, userID, manifest.Report.Platform, manifest.Report.Type, info.CompressedBytes, "archive_mismatch")
 		return IngestResult{}, ErrArchiveMismatch
 	}
+	if !embeddedManifestMatches(manifestJSON, info.EmbeddedManifest) {
+		s.compensateFailedUpload(ctx, reserved.ID, key)
+		s.logRejected(ctx, reserved.ID, userID, manifest.Report.Platform, manifest.Report.Type, info.CompressedBytes, "manifest_mismatch")
+		return IngestResult{}, ErrArchiveMismatch
+	}
 
 	if err := s.reports.MarkReady(ctx, reserved.ID, BlobInfo{
 		Bucket:            s.store.Bucket(),
@@ -236,21 +242,9 @@ func (s *Service) currentSettings(ctx context.Context) (Settings, error) {
 		return settings, nil
 	}
 
-	existing, err := s.settings.Get(ctx, KeyServerInstanceID)
-	if err != nil {
-		return Settings{}, fmt.Errorf("load diagnostics server instance id: %w", err)
-	}
-	if strings.TrimSpace(existing) != "" {
-		settings.ServerInstanceID = strings.TrimSpace(existing)
-		return settings, nil
-	}
-
-	instanceID, err := newServerInstanceID()
+	instanceID, err := ensureServerInstanceID(ctx, s.settings)
 	if err != nil {
 		return Settings{}, err
-	}
-	if err := s.settings.Set(ctx, KeyServerInstanceID, instanceID); err != nil {
-		return Settings{}, fmt.Errorf("seed diagnostics server instance id: %w", err)
 	}
 	settings.ServerInstanceID = instanceID
 	return settings, nil
@@ -473,4 +467,29 @@ func archiveMatches(archive contract.Archive, info BundleInfo) bool {
 		archive.UncompressedBytes == info.UncompressedBytes &&
 		strings.EqualFold(archive.SHA256, info.SHA256) &&
 		slices.Equal(archive.Entries, info.Entries)
+}
+
+// embeddedManifestMatches reports whether the manifest.json embedded as the
+// archive's first entry equals the received part-1 manifest with its `archive`
+// object removed, per the bundle contract. Both are decoded to JSON before
+// comparison so formatting or key-ordering differences don't matter.
+func embeddedManifestMatches(received, embedded []byte) bool {
+	receivedMap, err := decodeJSONObject(received)
+	if err != nil {
+		return false
+	}
+	delete(receivedMap, "archive")
+	embeddedMap, err := decodeJSONObject(embedded)
+	if err != nil {
+		return false
+	}
+	return reflect.DeepEqual(receivedMap, embeddedMap)
+}
+
+func decodeJSONObject(data []byte) (map[string]any, error) {
+	var obj map[string]any
+	if err := json.Unmarshal(data, &obj); err != nil {
+		return nil, err
+	}
+	return obj, nil
 }

@@ -134,7 +134,7 @@ MetricKit natively (iOS; not tvOS — see Apple design).
 
 ## Architecture overview
 
-```
+```text
  Android / Apple client                          silo-server
 ┌────────────────────────────────┐   ┌──────────────────────────────────────┐
 │ Safe-logging facade → ring     │   │ GET  /api/v1/diagnostics/status      │
@@ -200,7 +200,7 @@ An upload is `multipart/form-data` with exactly two parts, in order:
    Entry names come from a **fixed allowlist**, and each name implies its
    media type — there is no per-entry type metadata to drift:
 
-```
+```jsonc
 manifest.json            (manifest minus the `archive` object; see hashing note)
 device.json              (full device snapshot)
 logs.jsonl               (structured log lines, newest-last)
