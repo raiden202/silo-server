@@ -218,7 +218,9 @@ func TestServiceIngestCompensatesWithDetachedContext(t *testing.T) {
 }
 
 func TestServiceIngestStoresOnlyValidatedProfileAttribution(t *testing.T) {
-	bundle, manifest, _ := testDiagnosticsUpload(t, "server-1", DefaultConsentNoticeVer, "prof_1")
+	// Header-only attribution (manifest carries no profile_id): the header is
+	// the single source, so it is validated and stored.
+	bundle, manifest, _ := testDiagnosticsUpload(t, "server-1", DefaultConsentNoticeVer, "")
 	repo := &fakeDiagnosticReportStore{}
 	store := &fakeDiagnosticObjectStore{bucket: "private"}
 	svc := newTestDiagnosticsService(repo, store)
@@ -234,6 +236,8 @@ func TestServiceIngestStoresOnlyValidatedProfileAttribution(t *testing.T) {
 		t.Fatalf("ProfileID = %v, want prof_header", repo.insertInput.ProfileID)
 	}
 
+	// Manifest-only attribution that fails validation is dropped, not stored.
+	bundle, manifest, _ = testDiagnosticsUpload(t, "server-1", DefaultConsentNoticeVer, "prof_1")
 	repo = &fakeDiagnosticReportStore{}
 	store = &fakeDiagnosticObjectStore{bucket: "private"}
 	svc = newTestDiagnosticsService(repo, store)
@@ -245,6 +249,53 @@ func TestServiceIngestStoresOnlyValidatedProfileAttribution(t *testing.T) {
 	}
 	if repo.insertInput.ProfileID != nil {
 		t.Fatalf("ProfileID = %v, want nil for unvalidated attribution", *repo.insertInput.ProfileID)
+	}
+}
+
+func TestServiceIngestRejectsMismatchedProfileID(t *testing.T) {
+	// The manifest was captured under prof_manifest but the request carries a
+	// different X-Profile-Id (prof_header) because the client switched profiles
+	// between capture and upload. The two sources must not be silently
+	// reconciled; the upload is rejected and no report row is created.
+	bundle, manifest, _ := testDiagnosticsUpload(t, "server-1", DefaultConsentNoticeVer, "prof_manifest")
+	repo := &fakeDiagnosticReportStore{}
+	store := &fakeDiagnosticObjectStore{bucket: "private"}
+	svc := newTestDiagnosticsService(repo, store)
+	// Even a validator that would accept any profile must not paper over the
+	// mismatch: resolution fails before attribution validation runs.
+	svc.SetProfileAttributionValidator(ProfileAttributionValidatorFunc(func(context.Context, int, string) (bool, error) {
+		return true, nil
+	}))
+
+	headerProfileID := "prof_header"
+	_, err := svc.Ingest(context.Background(), 42, &headerProfileID, manifest, bytes.NewReader(bundle))
+	if !errors.Is(err, ErrProfileMismatch) {
+		t.Fatalf("Ingest error = %v, want ErrProfileMismatch", err)
+	}
+	if repo.insertInput.ProfileID != nil {
+		t.Fatalf("ProfileID = %v, want no insert on profile mismatch", *repo.insertInput.ProfileID)
+	}
+	if len(repo.ready) != 0 || len(store.puts) != 0 {
+		t.Fatalf("no report should be stored on mismatch: ready=%v puts=%v", repo.ready, store.puts)
+	}
+}
+
+func TestServiceIngestAcceptsMatchingProfileID(t *testing.T) {
+	// Header and manifest agree: attribution resolves to that single value.
+	bundle, manifest, _ := testDiagnosticsUpload(t, "server-1", DefaultConsentNoticeVer, "prof_1")
+	repo := &fakeDiagnosticReportStore{}
+	store := &fakeDiagnosticObjectStore{bucket: "private"}
+	svc := newTestDiagnosticsService(repo, store)
+	svc.SetProfileAttributionValidator(ProfileAttributionValidatorFunc(func(_ context.Context, userID int, profileID string) (bool, error) {
+		return userID == 42 && profileID == "prof_1", nil
+	}))
+
+	headerProfileID := "prof_1"
+	if _, err := svc.Ingest(context.Background(), 42, &headerProfileID, manifest, bytes.NewReader(bundle)); err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	if repo.insertInput.ProfileID == nil || *repo.insertInput.ProfileID != "prof_1" {
+		t.Fatalf("ProfileID = %v, want prof_1", repo.insertInput.ProfileID)
 	}
 }
 

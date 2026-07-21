@@ -33,6 +33,7 @@ var (
 	ErrStaleConsent           = errors.New("diagnostics consent notice is stale")
 	ErrArchiveMismatch        = errors.New("diagnostics archive metadata mismatch")
 	ErrReportStoreUnavailable = errors.New("diagnostics report store unavailable")
+	ErrProfileMismatch        = errors.New("diagnostics profile id mismatch")
 )
 
 type AvailabilityStatus string
@@ -438,22 +439,38 @@ func manifestHasUnsupportedSchema(data []byte) bool {
 	return header.SchemaVersion != nil && *header.SchemaVersion != contract.SchemaVersion
 }
 
-func normalizedProfileID(profileID *string, fallback string) *string {
-	value := ""
+// resolveProfileID chooses the profile a report is attributed to from the
+// X-Profile-Id header and the manifest's report.profile_id fallback. When both
+// are present they must agree: a header captured under a different profile than
+// the manifest means the client switched profiles between capture and upload,
+// and silently preferring either source would attribute the DB row to one
+// profile while the stored manifest/download still names the other. Reject that
+// as ErrProfileMismatch. Single-source cases (only one present, or both equal)
+// resolve to that value; when neither is present the report is unattributed.
+func resolveProfileID(profileID *string, fallback string) (*string, error) {
+	header := ""
 	if profileID != nil {
-		value = strings.TrimSpace(*profileID)
+		header = strings.TrimSpace(*profileID)
 	}
-	if value == "" {
-		value = strings.TrimSpace(fallback)
+	manifestID := strings.TrimSpace(fallback)
+
+	switch {
+	case header != "" && manifestID != "" && header != manifestID:
+		return nil, fmt.Errorf("%w: header %q, manifest %q", ErrProfileMismatch, header, manifestID)
+	case header != "":
+		return &header, nil
+	case manifestID != "":
+		return &manifestID, nil
+	default:
+		return nil, nil
 	}
-	if value == "" {
-		return nil
-	}
-	return &value
 }
 
 func (s *Service) validatedProfileID(ctx context.Context, userID int, profileID *string, fallback string) (*string, error) {
-	candidate := normalizedProfileID(profileID, fallback)
+	candidate, err := resolveProfileID(profileID, fallback)
+	if err != nil {
+		return nil, err
+	}
 	if candidate == nil {
 		return nil, nil
 	}

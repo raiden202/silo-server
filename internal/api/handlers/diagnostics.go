@@ -321,6 +321,8 @@ func writeDiagnosticsServiceError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusBadRequest, "stale_consent", "Diagnostics consent notice is stale")
 	case errors.Is(err, diagnostics.ErrArchiveMismatch):
 		writeError(w, http.StatusBadRequest, "archive_mismatch", "Diagnostics archive metadata does not match")
+	case errors.Is(err, diagnostics.ErrProfileMismatch):
+		writeError(w, http.StatusBadRequest, "profile_mismatch", "Diagnostics profile does not match the captured report")
 	case errors.Is(err, diagnostics.ErrInvalidBundle):
 		writeError(w, http.StatusBadRequest, "invalid_bundle", "Invalid diagnostics bundle")
 	default:
