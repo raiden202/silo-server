@@ -328,7 +328,7 @@ describe("EpisodeContent", () => {
     expect(mocks.capturedQualityBadgesProps.value).toEqual({
       summary: {
         durationMinutes: 42,
-        resolution: "2160p",
+        resolution: "4K",
         videoRangeLabel: "HDR",
         audioLabel: "EAC3",
       },
