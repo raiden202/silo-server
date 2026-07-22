@@ -3186,6 +3186,7 @@ func applyProbeData(mf *models.MediaFile, probe *ProbeData, probeSource string) 
 			Bitrate:            vt.Bitrate,
 			VideoRange:         vt.VideoRange,
 			VideoRangeType:     vt.VideoRangeType,
+			ColorRange:         vt.ColorRange,
 			ColorPrimaries:     vt.ColorPrimaries,
 			ColorSpace:         vt.ColorSpace,
 			ColorTransfer:      vt.ColorTransfer,

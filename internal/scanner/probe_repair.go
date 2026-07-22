@@ -54,9 +54,21 @@ func NeedsCriticalProbeRepair(file *models.MediaFile) bool {
 		if strings.TrimSpace(file.CodecVideo) == "" || strings.TrimSpace(file.Resolution) == "" {
 			return true
 		}
+		if videoTracksMissingColorRange(file.VideoTracks) {
+			return true
+		}
 	}
 	if file.Chapters == nil {
 		return true
+	}
+	return false
+}
+
+func videoTracksMissingColorRange(tracks []models.VideoTrack) bool {
+	for _, track := range tracks {
+		if strings.TrimSpace(track.ColorRange) == "" {
+			return true
+		}
 	}
 	return false
 }

@@ -890,6 +890,7 @@ func buildMediaStreamsWithSelection(routeItemID, mediaSourceID string, version c
 			AspectRatio:            track.AspectRatio,
 			VideoRange:             compatVideoRange(track, version.HDR),
 			VideoRangeType:         compatVideoRangeType(track, version.HDR),
+			ColorRange:             compatColorRange(track.ColorRange),
 			ColorPrimaries:         track.ColorPrimaries,
 			ColorSpace:             track.ColorSpace,
 			ColorTransfer:          track.ColorTransfer,
@@ -968,6 +969,16 @@ func buildMediaStreamsWithSelection(routeItemID, mediaSourceID string, version c
 	}
 
 	return streams
+}
+
+func compatColorRange(colorRange string) string {
+	colorRange = strings.TrimSpace(colorRange)
+	if strings.EqualFold(colorRange, "unknown") {
+		// The scanner persists this sentinel so legacy probe repair converges,
+		// but Jellyfin omits ColorRange when ffprobe did not provide a value.
+		return ""
+	}
+	return colorRange
 }
 
 func mediaSourceETag(version catalog.FileVersion) string {

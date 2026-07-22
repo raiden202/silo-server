@@ -412,6 +412,7 @@ type SourceDescriptorV3 struct {
 	VideoProfile       string             `json:"video_profile,omitempty"`
 	VideoLevel         int                `json:"video_level,omitempty"`
 	BitDepth           int                `json:"bit_depth,omitempty"`
+	ColorRange         string             `json:"color_range,omitempty"`
 	Width              int                `json:"width,omitempty"`
 	Height             int                `json:"height,omitempty"`
 	FrameRate          float64            `json:"frame_rate,omitempty"`

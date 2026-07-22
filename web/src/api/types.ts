@@ -970,6 +970,7 @@ export interface VersionVideoTrack {
   bitrate?: number;
   video_range?: string;
   video_range_type?: string;
+  color_range?: string;
   color_primaries?: string;
   color_space?: string;
   color_transfer?: string;

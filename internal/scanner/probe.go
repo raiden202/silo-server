@@ -76,6 +76,7 @@ type ffprobeStream struct {
 	StartTime          string              `json:"start_time"`
 	Duration           string              `json:"duration"`
 	BitRate            string              `json:"bit_rate"`
+	ColorRange         string              `json:"color_range"`
 	ColorTransfer      string              `json:"color_transfer"`
 	ColorPrimaries     string              `json:"color_primaries"`
 	ColorSpace         string              `json:"color_space"`
@@ -186,6 +187,9 @@ func convertProbeData(raw *ffprobeOutput) *ProbeData {
 		switch s.CodecType {
 		case "video":
 			dvProfile := dolbyVisionProfileNumber(s.SideDataList)
+			// ffprobe omits unspecified optional fields by default; "unknown" is
+			// FFmpeg's canonical name for AVCOL_RANGE_UNSPECIFIED.
+			colorRange := firstNonEmpty(s.ColorRange, "unknown")
 			track := VideoTrackInfo{
 				Title:              firstNonEmpty(s.Tags["title"], s.CodecLongName, strings.ToUpper(s.CodecName)),
 				Codec:              s.CodecName,
@@ -205,6 +209,7 @@ func convertProbeData(raw *ffprobeOutput) *ProbeData {
 				Bitrate:            parseNumeric(s.BitRate) / 1000,
 				VideoRange:         videoRangeLabel(s),
 				VideoRangeType:     videoRangeType(s),
+				ColorRange:         colorRange,
 				ColorPrimaries:     s.ColorPrimaries,
 				ColorSpace:         s.ColorSpace,
 				ColorTransfer:      s.ColorTransfer,
