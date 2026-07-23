@@ -88,6 +88,7 @@ type Dependencies struct {
 	OnConfigChange               func(fn func(old, updated *config.Config))
 	BootstrapSensitiveConfigured map[string]bool
 	BootstrapSensitiveValues     map[string]string
+	RedisBootstrapAvailable      bool
 	AppContext                   context.Context
 	DB                           *pgxpool.Pool
 	SecretCipher                 *secret.Cipher // at-rest credential cipher (required when DB is set)
@@ -998,6 +999,7 @@ func NewRouter(deps Dependencies) chi.Router {
 		adminHandler.AccessGroups = accessGroupStore
 		adminHandler.BootstrapSensitiveConfigured = deps.BootstrapSensitiveConfigured
 		adminHandler.BootstrapSensitiveValues = deps.BootstrapSensitiveValues
+		adminHandler.RedisBootstrapAvailable = deps.RedisBootstrapAvailable
 		adminHandler.RestartStatus = restartStatus
 		adminHandler.CatalogSearchStatus = catalogSearchService
 		adminHandler.DiagnosticsStore = diagnosticsStore
@@ -2188,7 +2190,7 @@ func NewRouter(deps Dependencies) chi.Router {
 							pluginHandler := handlers.NewPluginHandler(
 								plugins.NewRepositoryStore(deps.DB),
 								plugins.NewInstallationStore(deps.DB),
-								plugins.NewRuntimeConfigStore(deps.DB),
+								plugins.NewRuntimeConfigStore(deps.DB, deps.SecretCipher),
 								deps.PluginService,
 								deps.PluginUserConfig,
 								deps.PluginHTTPProxy,
@@ -2600,8 +2602,10 @@ func NewRouter(deps Dependencies) chi.Router {
 								r.Get("/settings/sections", sectionSettingsHandler.HandleGet)
 								r.Put("/settings/sections", sectionSettingsHandler.HandlePut)
 							}
+							r.Get("/settings/effective", adminHandler.HandleGetEffectiveSettings)
 							r.Get("/settings/{key}", adminHandler.HandleGetSetting)
 							r.Get("/settings", adminHandler.HandleGetSettings)
+							r.Put("/settings", adminHandler.HandleUpdateSettings)
 							r.Put("/settings/{key}", adminHandler.HandleUpdateSetting)
 							if brandingHandler != nil {
 								// Branding image upload/delete (scalar branding
@@ -2624,6 +2628,7 @@ func NewRouter(deps Dependencies) chi.Router {
 								}
 								if settingsRepo != nil {
 									r.Post("/notifications/push/relay/register", applePushHandler.HandleRegisterRelay)
+									r.Delete("/notifications/push/relay", applePushHandler.HandleClearRelay)
 								}
 							}
 							if deps.Notifications != nil && deps.Notifications.ServerChannels != nil {
@@ -2692,7 +2697,7 @@ func NewRouter(deps Dependencies) chi.Router {
 								pluginHandler := handlers.NewPluginHandler(
 									plugins.NewRepositoryStore(deps.DB),
 									plugins.NewInstallationStore(deps.DB),
-									plugins.NewRuntimeConfigStore(deps.DB),
+									plugins.NewRuntimeConfigStore(deps.DB, deps.SecretCipher),
 									deps.PluginService,
 									deps.PluginUserConfig,
 									deps.PluginHTTPProxy,
@@ -2881,7 +2886,9 @@ func NewRouter(deps Dependencies) chi.Router {
 							// config; otherwise disabling rate limiting and restarting would
 							// lock the settings page out of re-enabling it.
 							if settingsRepo != nil {
-								rateLimitHandler := handlers.NewRateLimitHandler(settingsRepo, deps.RateLimitMW, deps.EventBus, restartStatus)
+								rateLimitHandler := handlers.NewRateLimitHandler(
+									settingsRepo, deps.RateLimitMW, deps.EventBus, restartStatus, deps.RedisBootstrapAvailable,
+								)
 								r.Route("/rate-limits", func(r chi.Router) {
 									r.Get("/config", rateLimitHandler.HandleGetConfig)
 									r.Put("/config", rateLimitHandler.HandleUpdateConfig)

@@ -327,9 +327,14 @@ func runCredentialBackfills(ctx context.Context, pool *pgxpool.Pool, cipher *sec
 	if err != nil {
 		slog.ErrorContext(ctx, "secret backfill: arr api keys", "component", "app", "error", err)
 	}
-	if total := settingsN + columnsN + historyServersN + arrN; total > 0 {
+	pluginConfigsN, err := plugins.NewRuntimeConfigStore(pool, cipher).BackfillEncryptedConfigs(ctx)
+	if err != nil {
+		slog.ErrorContext(ctx, "secret backfill: plugin runtime configs", "component", "app", "error", err)
+	}
+	if total := settingsN + columnsN + historyServersN + arrN + pluginConfigsN; total > 0 {
 		slog.InfoContext(ctx, "secret backfill: encrypted plaintext credentials at rest", "component", "app",
-			"settings", settingsN, "columns", columnsN, "history_session_servers", historyServersN, "arr_keys", arrN, "total", total)
+			"settings", settingsN, "columns", columnsN, "history_session_servers", historyServersN,
+			"arr_keys", arrN, "plugin_configs", pluginConfigsN, "total", total)
 	}
 }
 
@@ -721,6 +726,14 @@ func main() {
 		bootstrapSensitiveConfigured["redis.url"] = true
 		bootstrapSensitiveValues["redis.url"] = bc.RedisURL
 	}
+	if rawTrustedProxies := strings.TrimSpace(os.Getenv(clientip.EnvTrustedProxies)); rawTrustedProxies != "" {
+		normalizedTrustedProxies, normalizeErr := clientip.NormalizeCIDRList(rawTrustedProxies)
+		if normalizeErr != nil {
+			log.Fatalf("invalid %s: %v", clientip.EnvTrustedProxies, normalizeErr)
+		}
+		bootstrapSensitiveConfigured[clientip.SettingTrustedProxies] = true
+		bootstrapSensitiveValues[clientip.SettingTrustedProxies] = normalizedTrustedProxies
+	}
 
 	// Shared Redis client for components needing raw Redis beyond the event
 	// bus (websocket handshake tickets, session listing). Nil on Redis-less
@@ -736,6 +749,9 @@ func main() {
 	// OnServerSettingUpdated closure, which only runs on admin requests after
 	// startup completes.
 	var ipResolver *clientip.Resolver
+	normalizedBootstrapRedisURL, bootstrapRedisURLErr := config.NormalizeRedisURL(bc.RedisURL)
+	redisBootstrapAvailable := (normalizedBootstrapRedisURL != "" && bootstrapRedisURLErr == nil) ||
+		(strings.TrimSpace(cfg.Redis.SentinelMaster) != "" && len(cfg.Redis.SentinelAddresses) > 0)
 
 	deps := api.Dependencies{
 		Config:                       cfg,
@@ -743,6 +759,7 @@ func main() {
 		OnConfigChange:               configWatcher.OnChange,
 		BootstrapSensitiveConfigured: bootstrapSensitiveConfigured,
 		BootstrapSensitiveValues:     bootstrapSensitiveValues,
+		RedisBootstrapAvailable:      redisBootstrapAvailable,
 		AppContext:                   appCtx,
 		DB:                           pool,
 		SecretCipher:                 dataCipher,
@@ -948,7 +965,7 @@ func main() {
 		pluginCacheDir := resolvePluginCacheDir()
 		repositoryStore := plugins.NewRepositoryStore(deps.DB)
 		installationStore := plugins.NewInstallationStore(deps.DB)
-		runtimeConfigStore := plugins.NewRuntimeConfigStore(deps.DB)
+		runtimeConfigStore := plugins.NewRuntimeConfigStore(deps.DB, deps.SecretCipher)
 		catalogService := plugins.NewCatalogService(repositoryStore, plugins.CatalogServiceOptions{
 			SiloAPIVersion: plugins.DefaultSiloAPIVersion,
 		})
