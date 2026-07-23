@@ -129,6 +129,9 @@ const mergeEbookProtectedFieldsSQL = `
 	)
 `
 
+// Legacy-lane rows (priority < 0) may only leave the lane through a terminal
+// outcome (Complete/Discard); enqueue, fail, and release must preserve the
+// lane so the paced backfill task stays the sole drain for the backlog.
 var enqueueEnrichmentJobQuery = `
 	INSERT INTO ebook_enrichment_state (
 		content_id, status, priority, next_attempt_at, protected_fields, updated_at
@@ -145,6 +148,7 @@ var enqueueEnrichmentJobQuery = `
 		END,
 		priority = CASE
 			WHEN ebook_enrichment_state.status = 'running' THEN ebook_enrichment_state.priority
+			WHEN ebook_enrichment_state.priority < 0 THEN ebook_enrichment_state.priority
 			ELSE GREATEST(ebook_enrichment_state.priority, EXCLUDED.priority)
 		END,
 		next_attempt_at = CASE
@@ -670,7 +674,7 @@ var failEnrichmentJobQuery = `
 			WHEN requeue_requested THEN now()
 			ELSE now() + $4::interval
 		END,
-		priority = CASE WHEN requeue_requested THEN 100 ELSE priority END,
+		priority = CASE WHEN requeue_requested AND priority >= 0 THEN 100 ELSE priority END,
 		requeue_requested = false,
 		outcome = 'failed',
 		last_error_class = $2,
@@ -720,7 +724,7 @@ var releaseEnrichmentJobQuery = `
 		claim_token = NULL,
 		attempts = GREATEST(attempts - 1, 0),
 		next_attempt_at = CASE WHEN requeue_requested THEN now() ELSE next_attempt_at END,
-		priority = CASE WHEN requeue_requested THEN 100 ELSE priority END,
+		priority = CASE WHEN requeue_requested AND priority >= 0 THEN 100 ELSE priority END,
 		requeue_requested = false,
 		updated_at = now()
 	WHERE content_id = $1

@@ -317,6 +317,7 @@ func TestEnrichmentQueueEnqueueMakesPendingRowsDueAndDefersRunningRequeue(t *tes
 		"ON CONFLICT (content_id) DO UPDATE SET",
 		"WHEN ebook_enrichment_state.status = 'running' THEN ebook_enrichment_state.next_attempt_at",
 		"ELSE now()",
+		"WHEN ebook_enrichment_state.priority < 0 THEN ebook_enrichment_state.priority",
 		"requeue_requested = ebook_enrichment_state.requeue_requested OR ebook_enrichment_state.status = 'running'",
 	} {
 		if !strings.Contains(query, fragment) {
@@ -325,6 +326,28 @@ func TestEnrichmentQueueEnqueueMakesPendingRowsDueAndDefersRunningRequeue(t *tes
 	}
 	if strings.Contains(query, "lease_until =") || strings.Contains(query, "claim_token =") {
 		t.Fatalf("enqueue must not mutate an active lease:\n%s", enqueueEnrichmentJobQuery)
+	}
+}
+
+func TestEnrichmentQueueKeepsLegacyLaneRowsUntilTerminalOutcome(t *testing.T) {
+	enqueue := strings.Join(strings.Fields(enqueueEnrichmentJobQuery), " ")
+	if !strings.Contains(enqueue, "WHEN ebook_enrichment_state.priority < 0 THEN ebook_enrichment_state.priority") {
+		t.Fatalf("enqueue must keep legacy-lane rows in the legacy lane:\n%s", enqueueEnrichmentJobQuery)
+	}
+	for _, tt := range []struct {
+		name  string
+		query string
+	}{
+		{name: "fail", query: failEnrichmentJobQuery},
+		{name: "release", query: releaseEnrichmentJobQuery},
+	} {
+		query := strings.Join(strings.Fields(tt.query), " ")
+		if strings.Contains(query, "WHEN requeue_requested THEN 100") {
+			t.Fatalf("%s requeue must not promote legacy-lane rows without a terminal outcome:\n%s", tt.name, tt.query)
+		}
+		if !strings.Contains(query, "WHEN requeue_requested AND priority >= 0 THEN 100 ELSE priority END") {
+			t.Fatalf("%s requeue must stay within the row's lane:\n%s", tt.name, tt.query)
+		}
 	}
 }
 
@@ -436,7 +459,7 @@ func TestEnrichmentQueueTransitionsKeepDurableRowsAndReleaseLeases(t *testing.T)
 	failure := strings.Join(strings.Fields(failEnrichmentJobQuery), " ")
 	for _, fragment := range []string{
 		"WHEN requeue_requested THEN now()",
-		"WHEN requeue_requested THEN 100 ELSE priority END",
+		"WHEN requeue_requested AND priority >= 0 THEN 100 ELSE priority END",
 		"AND claim_token = $5",
 	} {
 		if !strings.Contains(failure, fragment) {
