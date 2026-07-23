@@ -87,15 +87,15 @@ func TestNormalizeAudio(t *testing.T) {
 		want string
 	}{
 		{"empty", &models.MediaFile{}, ""},
-		{"eac3 Atmos", &models.MediaFile{AudioTracks: []models.AudioTrack{{
+		{"eac3 Atmos stays compact", &models.MediaFile{AudioTracks: []models.AudioTrack{{
 			Codec: "eac3", Profile: "Dolby Digital Plus + Dolby Atmos",
-		}}}, "DD+ Atmos"},
-		{"truehd Atmos", &models.MediaFile{AudioTracks: []models.AudioTrack{{
+		}}}, "Atmos"},
+		{"truehd Atmos stays compact", &models.MediaFile{AudioTracks: []models.AudioTrack{{
 			Codec: "truehd", Title: "Dolby Atmos",
-		}}}, "TrueHD Atmos"},
-		{"JOC identifies DD+ Atmos", &models.MediaFile{AudioTracks: []models.AudioTrack{{
+		}}}, "Atmos"},
+		{"JOC identifies compact Atmos", &models.MediaFile{AudioTracks: []models.AudioTrack{{
 			Codec: "e-ac-3", Profile: "JOC",
-		}}}, "DD+ Atmos"},
+		}}}, "Atmos"},
 		{"unknown Atmos carrier falls back", &models.MediaFile{AudioTracks: []models.AudioTrack{{
 			Codec: "opus", Title: "Atmos",
 		}}}, "Atmos"},
@@ -111,7 +111,7 @@ func TestNormalizeAudio(t *testing.T) {
 			{Codec: "truehd"},
 			{Codec: "eac3", Title: "Atmos"},
 		}}, "TrueHD"},
-		{"file codec fallback", &models.MediaFile{CodecAudio: "EAC3 Atmos"}, "DD+ Atmos"},
+		{"file codec fallback", &models.MediaFile{CodecAudio: "EAC3 Atmos"}, "Atmos"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -449,8 +449,8 @@ func TestBuildSummaryAggregatesNewFields(t *testing.T) {
 	if got.AspectRatio != "16:9" {
 		t.Errorf("AspectRatio = %q, want %q", got.AspectRatio, "16:9")
 	}
-	if got.Audio != "DD+ Atmos" {
-		t.Errorf("Audio = %q, want %q", got.Audio, "DD+ Atmos")
+	if got.Audio != "Atmos" {
+		t.Errorf("Audio = %q, want %q", got.Audio, "Atmos")
 	}
 	if !got.MultiAudio {
 		t.Error("MultiAudio = false, want true")

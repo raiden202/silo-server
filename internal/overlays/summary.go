@@ -214,20 +214,10 @@ func containsAtmos(candidates []string) bool {
 }
 
 func normalizeAudioCandidates(candidates []string) string {
-	details := strings.ToLower(strings.Join(candidates, " "))
 	if containsAtmos(candidates) {
-		switch {
-		case strings.Contains(details, "truehd"):
-			return "TrueHD Atmos"
-		case strings.Contains(details, "eac3"),
-			strings.Contains(details, "e-ac-3"),
-			strings.Contains(details, "ec-3"),
-			strings.Contains(details, "dolby digital plus"),
-			strings.Contains(details, "dd+"):
-			return "DD+ Atmos"
-		default:
-			return "Atmos"
-		}
+		// Overlay summaries are space-constrained card labels. Carrier detail
+		// remains available on the file's audio tracks for detail/player views.
+		return "Atmos"
 	}
 	for _, candidate := range candidates {
 		lower := strings.ToLower(strings.TrimSpace(candidate))

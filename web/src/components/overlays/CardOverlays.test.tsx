@@ -86,7 +86,7 @@ describe("CardOverlays", () => {
     const texts = Array.from(topLeftStack?.querySelectorAll("span.inline-flex") ?? []).map(
       (n) => n.textContent,
     );
-    expect(texts).toEqual(["DD+ Atmos", "4K DV"]);
+    expect(texts).toEqual(["Atmos", "4K DV"]);
   });
 
   it("suppresses the text label when a wordmark icon already spells it", () => {

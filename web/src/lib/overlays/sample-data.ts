@@ -8,7 +8,7 @@ import type { OverlayData } from "./types";
 export const SAMPLE_MOVIE_DATA: OverlayData = {
   resolution: "2160p",
   hdr: "DV HDR10",
-  audio: "DD+ Atmos",
+  audio: "Atmos",
   audio_channels: "7.1",
   video_codec: "H.265",
   container: "MKV",
