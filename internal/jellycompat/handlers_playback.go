@@ -29,6 +29,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/subtitles"
 	"github.com/Silo-Server/silo-server/internal/transcodenode"
 	"github.com/Silo-Server/silo-server/internal/userstore"
+	"github.com/Silo-Server/silo-server/internal/watchsync"
 )
 
 type playbackInfoRequest struct {
@@ -151,6 +152,14 @@ type PlaybackSessionSyncer interface {
 	SyncNow(ctx context.Context) error
 }
 
+// PlaybackWatchScrobbler forwards a playback lifecycle to connected watch
+// providers. The watchsync service implements this interface.
+type PlaybackWatchScrobbler interface {
+	ScrobbleStart(ctx context.Context, event watchsync.ScrobbleEvent) error
+	ScrobblePause(ctx context.Context, event watchsync.ScrobbleEvent) error
+	ScrobbleStop(ctx context.Context, event watchsync.ScrobbleEvent) error
+}
+
 // PlaybackHandler serves Jellyfin playback negotiation endpoints.
 type PlaybackHandler struct {
 	cfg                     *config.Config
@@ -173,12 +182,15 @@ type PlaybackHandler struct {
 	// and node-affinity rule for free. The reconstruction recipe is carried in the
 	// compat playback store (PlaybackSession.Recipe), since Jellyfin clients cannot
 	// round-trip a native stream token.
-	tm            *playback.TranscodeManager
-	SubtitleRepo  subtitles.Repository  // optional; enables downloaded subtitles
-	S3Client      subtitles.S3Client    // optional; for serving S3 subtitles
-	S3Bucket      string                // bucket for subtitle storage
-	SettingsRepo  SettingsReader        // optional; reads watched threshold setting
-	SessionSyncer PlaybackSessionSyncer // optional; enables immediate session sync to shared admin view
+	tm                     *playback.TranscodeManager
+	SubtitleRepo           subtitles.Repository  // optional; enables downloaded subtitles
+	S3Client               subtitles.S3Client    // optional; for serving S3 subtitles
+	S3Bucket               string                // bucket for subtitle storage
+	SettingsRepo           SettingsReader        // optional; reads watched threshold setting
+	SessionSyncer          PlaybackSessionSyncer // optional; enables immediate session sync to shared admin view
+	WatchScrobbler         PlaybackWatchScrobbler
+	StableIdentityResolver watchsync.ScrobbleIdentityResolver
+	terminalFallbackDelay  time.Duration
 	// RecipeNodeStore hands a remote transcode's reconstruction recipe to the
 	// control-plane recipe store (Redis) so a dedicated transcode node that
 	// restarts can rebuild ffmpeg from it. The node-hop token is server-minted and
@@ -292,8 +304,10 @@ func NewPlaybackHandler(
 		// ffmpeg crash: drop the dead transcode and stop the upstream native
 		// session. The recipe stays in the compat store so a resume reconstructs.
 		nodeURL := ""
+		var upstreamSession *playback.Session
 		if h.sessionMgr != nil {
 			if up, err := h.sessionMgr.GetSession(sessionID); err == nil && up != nil {
+				upstreamSession = up
 				nodeURL = up.TranscodeNodeURL
 			}
 		}
@@ -305,6 +319,11 @@ func NewPlaybackHandler(
 		// the dead transcode. The recipe stays in the compat store either way so a
 		// resume reconstructs.
 		if h.sessionMgr != nil && h.tm.CloseTranscodeSessionIf(sessionID, dead, nodeURL) {
+			if h.playbackStore != nil {
+				if playSession, ok := h.playbackStore.FindByUpstreamSessionID(sessionID); ok {
+					h.dispatchCompatScrobble(ctx, compatScrobblePause, playSession, upstreamSession, nil)
+				}
+			}
 			_ = h.sessionMgr.StopSession(sessionID)
 		}
 	}

@@ -20,6 +20,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/subtitles"
 	"github.com/Silo-Server/silo-server/internal/userstore"
 	"github.com/Silo-Server/silo-server/internal/watchstate"
+	"github.com/Silo-Server/silo-server/internal/watchsync"
 )
 
 // Dependencies holds the pluggable pieces used by the compat server.
@@ -92,14 +93,16 @@ type Dependencies struct {
 	// admin live-session table right after compat playback starts/stops, so
 	// the activity dashboard doesn't wait for the periodic reconciler tick.
 	// Optional.
-	SessionSyncer     PlaybackSessionSyncer
-	FileResolver      FilePathResolver
-	UserStoreProvider userstore.UserStoreProvider
-	AccessFilterFn    AccessFilterResolver
-	NodePlanner       nodepool.SessionPlanner
-	JWTSecret         string
-	Recommender       recommendations.Recommender
-	RecWorker         *recommendations.Worker
+	SessionSyncer          PlaybackSessionSyncer
+	FileResolver           FilePathResolver
+	UserStoreProvider      userstore.UserStoreProvider
+	WatchScrobbler         PlaybackWatchScrobbler
+	StableIdentityResolver watchsync.ScrobbleIdentityResolver
+	AccessFilterFn         AccessFilterResolver
+	NodePlanner            nodepool.SessionPlanner
+	JWTSecret              string
+	Recommender            recommendations.Recommender
+	RecWorker              *recommendations.Worker
 
 	// Settings (optional; reads server_settings for watched threshold, etc.)
 	SettingsRepo SettingsReader
@@ -173,6 +176,7 @@ func (s *Server) StartBackgroundTasks(ctx context.Context) {
 		repo := NewSessionRepository(s.deps.DB, s.deps.SecretCipher)
 		StartSessionCleanupWithPlaybackStore(ctx, repo, s.deps.PlaybackStore, 1*time.Hour)
 	}
+	StartTerminalScrobbleRecovery(ctx, s.deps.PlaybackStore, s.deps.WatchScrobbler, 30*time.Second)
 }
 
 // NewDependencies fills in sensible defaults for optional compat dependencies.

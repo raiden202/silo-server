@@ -2451,6 +2451,7 @@ func main() {
 			compatDeps.SeasonRepo = seasonRepo
 			compatDeps.EpisodeRepo = episodeRepo
 			compatDeps.ProviderIDRepo = providerIDRepo
+			compatDeps.StableIdentityResolver = watchstate.NewStableIdentityResolver(itemRepo, episodeRepo, providerIDRepo)
 			compatDeps.DetailSvc = detailSvc
 			compatDeps.FolderRepo = folderRepo
 			compatDeps.SessionMgr = sessionMgr
@@ -2458,6 +2459,9 @@ func main() {
 			compatDeps.WatchCompletionObserver = deps.WatchCompletionObserver
 			compatDeps.SettingsRepo = settingsRepo
 			compatDeps.PersonRepo = personRepo
+			if watchProviderService != nil {
+				compatDeps.WatchScrobbler = watchProviderService
+			}
 			compatSearchService := catalog.NewCatalogSearchService(
 				appCtx,
 				settingsRepo,

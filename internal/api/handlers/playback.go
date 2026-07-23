@@ -1348,28 +1348,7 @@ func (h *PlaybackHandler) scrobbleEventForSession(ctx context.Context, session *
 		DurationSeconds:   duration,
 		OccurredAt:        time.Now().UTC(),
 	}
-	if h.StableIdentityResolver == nil {
-		event.Kind = "movie"
-		return event
-	}
-	identity := h.StableIdentityResolver.ResolveHistoryIdentity(ctx, mediaItemID)
-	event.Kind = identity.StableType
-	if event.Kind == "" {
-		event.Kind = "movie"
-	}
-	event.SeasonNumber = intPtrValue(identity.Season)
-	event.EpisodeNumber = intPtrValue(identity.Episode)
-	if identity.ProviderIDs != nil {
-		event.IMDbID = identity.ProviderIDs["imdb"]
-		event.TMDBID = identity.ProviderIDs["tmdb"]
-		event.TVDBID = identity.ProviderIDs["tvdb"]
-	}
-	if identity.SeriesProviderIDs != nil {
-		event.SeriesIMDbID = identity.SeriesProviderIDs["imdb"]
-		event.SeriesTMDBID = identity.SeriesProviderIDs["tmdb"]
-		event.SeriesTVDBID = identity.SeriesProviderIDs["tvdb"]
-	}
-	return event
+	return watchsync.ResolveScrobbleIdentity(ctx, h.StableIdentityResolver, event)
 }
 
 func (h *PlaybackHandler) scrobbleEventForStoppedSession(
@@ -1404,13 +1383,6 @@ func (h *PlaybackHandler) scrobbleEventForStoppedSession(
 	event.HistoryID = stopResult.HistoryID
 	event.Completed = stopResult.Completed
 	return event, true
-}
-
-func intPtrValue(value *int) int {
-	if value == nil {
-		return 0
-	}
-	return *value
 }
 
 func (h *PlaybackHandler) buildAdminHistoryEntry(
