@@ -910,6 +910,7 @@ func main() {
 			s.SetWorkers(updated.Scanner.Workers)
 		})
 		s.SetLiteraryWorkLinker(literaryWorkService)
+		s.SetEbookEnrichmentQueue(ebooks.NewEnrichmentQueue(deps.DB))
 		deps.Scanner = s
 		deps.ProbeEnsurer = scanner.NewPlaybackProbeEnsurer(fileRepo, ffprobePath, 10*time.Second)
 		slog.Info("scanner initialized")
@@ -2102,6 +2103,7 @@ func main() {
 		}
 		if ebookEnricher != nil {
 			taskMgr.Register(tasks.NewSyncEbookMetadataTask(ebookEnricher))
+			taskMgr.Register(tasks.NewBackfillEbookMetadataTask(ebookEnricher))
 		}
 		if mangaEnricher != nil {
 			taskMgr.Register(tasks.NewSyncMangaMetadataTask(mangaEnricher))
