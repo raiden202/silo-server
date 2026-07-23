@@ -209,8 +209,9 @@ describe("prettyResolution", () => {
 });
 
 describe("combinedDynamicRangeLabel", () => {
-  it("writes out Dolby Vision and collapses other variants to HDR", () => {
-    expect(combinedDynamicRangeLabel("DV HDR10")).toBe("Dolby Vision");
+  it("keeps Dolby Vision compact and collapses other variants to HDR", () => {
+    expect(combinedDynamicRangeLabel("DV HDR10")).toBe("DV");
+    expect(combinedDynamicRangeLabel("Dolby Vision")).toBe("DV");
     expect(combinedDynamicRangeLabel("HDR10")).toBe("HDR");
     expect(combinedDynamicRangeLabel("HLG")).toBe("HDR");
   });

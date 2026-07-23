@@ -51,7 +51,7 @@ describe("CardOverlays", () => {
     const texts = badgeTexts(
       render(<CardOverlays data={SAMPLE_MOVIE_DATA} prefs={buildDefaultPrefs()} />).container,
     );
-    expect(texts).toContain("4K Dolby Vision");
+    expect(texts).toContain("4K DV");
     expect(texts).not.toContain("4K");
     expect(texts).not.toContain("DV HDR10");
   });
@@ -62,7 +62,7 @@ describe("CardOverlays", () => {
     const texts = badgeTexts(
       render(<CardOverlays data={SAMPLE_MOVIE_DATA} prefs={prefs} />).container,
     );
-    expect(texts).toContain("4K Dolby Vision");
+    expect(texts).toContain("4K DV");
     expect(texts).not.toContain("4K");
     expect(texts).not.toContain("DV HDR10");
   });
@@ -75,7 +75,7 @@ describe("CardOverlays", () => {
     );
     expect(texts).toContain("4K");
     expect(texts).toContain("DV HDR10");
-    expect(texts).not.toContain("4K Dolby Vision");
+    expect(texts).not.toContain("4K DV");
   });
 
   it("honors prefs.order within a corner", () => {
@@ -86,7 +86,7 @@ describe("CardOverlays", () => {
     const texts = Array.from(topLeftStack?.querySelectorAll("span.inline-flex") ?? []).map(
       (n) => n.textContent,
     );
-    expect(texts).toEqual(["DD+ Atmos", "4K Dolby Vision"]);
+    expect(texts).toEqual(["DD+ Atmos", "4K DV"]);
   });
 
   it("suppresses the text label when a wordmark icon already spells it", () => {

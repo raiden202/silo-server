@@ -181,11 +181,12 @@ export function prettyResolution(value: string | undefined): string | null {
   return value.toUpperCase();
 }
 
-// Dynamic-range text used inside a combined quality badge. Dolby Vision is
-// written out; other HDR variants keep the compact "HDR" umbrella label.
+// Compact dynamic-range text used inside card overlays. Detail and player
+// surfaces use their own full labels where horizontal space is available.
 export function combinedDynamicRangeLabel(value: string | undefined): string | null {
   if (!value) return null;
-  if (value.includes("DV")) return "Dolby Vision";
+  const normalized = value.toLowerCase();
+  if (normalized.includes("dv") || normalized.includes("dolby vision")) return "DV";
   return "HDR";
 }
 
