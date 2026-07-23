@@ -21,8 +21,13 @@ var ErrTerminalClaimUnavailable = errors.New("compat terminal event claim unavai
 type PlaybackSession struct {
 	ID          string
 	CompatToken string
-	ItemID      string
-	RouteItemID string
+	// ClientDeviceID identifies the Jellyfin client installation that created
+	// this negotiation. Stock Jellyfin Web can issue a second PlaybackInfo
+	// request for the same play before it starts either response; the newer
+	// negotiation replaces an older, still-unstarted one from the same device.
+	ClientDeviceID string
+	ItemID         string
+	RouteItemID    string
 	// ClientPlaySessionID records the client's own generated PlaySessionId
 	// when it differs from ours (Static=true direct play skips PlaybackInfo,
 	// so the client never learns the server id). Playback reports carrying
@@ -81,6 +86,9 @@ type PlaybackMediaSource struct {
 type CompatPlaybackStore interface {
 	// Put stores or replaces a compat playback session.
 	Put(session PlaybackSession)
+	// PutNegotiated stores a PlaybackInfo negotiation and atomically replaces
+	// older, still-unstarted negotiations for the same client device and item.
+	PutNegotiated(session PlaybackSession)
 	// Get returns a session when it exists and is not expired.
 	Get(id string) (*PlaybackSession, bool)
 	// Delete removes a session.
@@ -164,6 +172,16 @@ func (s *PlaybackSessionStore) Put(session PlaybackSession) {
 	s.putNormalized(session)
 }
 
+// PutNegotiated stores a freshly-created PlaybackInfo session. Jellyfin Web
+// may negotiate the same play twice and then request both manifests; retaining
+// both creates two native sessions, while only the newer one receives progress
+// and Stopped reports. Replacing only unstarted sessions keeps real concurrent
+// playback intact while preventing the abandoned negotiation from later
+// publishing a stale pause.
+func (s *PlaybackSessionStore) PutNegotiated(session PlaybackSession) {
+	s.putNegotiatedNormalized(session)
+}
+
 // putNormalized stores or replaces a compat playback session and returns the
 // stored copy with normalized timestamps (CreatedAt/UpdatedAt/ExpiresAt). The
 // durable wrapper uses the return value to persist the same timestamps the cache
@@ -173,14 +191,43 @@ func (s *PlaybackSessionStore) putNormalized(session PlaybackSession) PlaybackSe
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if session.CreatedAt.IsZero() {
-		session.CreatedAt = s.now()
+	session = s.normalizeSession(session)
+	s.sessions[session.ID] = session
+	return session
+}
+
+func (s *PlaybackSessionStore) putNegotiatedNormalized(session PlaybackSession) (PlaybackSession, []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	session = s.normalizeSession(session)
+	removed := make([]string, 0, 1)
+	if session.CompatToken != "" && session.ClientDeviceID != "" && session.RouteItemID != "" {
+		for id, existing := range s.sessions {
+			if id == session.ID || existing.Terminal || existing.UpstreamSessionID != "" {
+				continue
+			}
+			if existing.CompatToken == session.CompatToken &&
+				existing.ClientDeviceID == session.ClientDeviceID &&
+				mediaSourceIDsEqual(existing.RouteItemID, session.RouteItemID) {
+				delete(s.sessions, id)
+				removed = append(removed, id)
+			}
+		}
 	}
-	session.UpdatedAt = s.now()
+	s.sessions[session.ID] = session
+	return session, removed
+}
+
+func (s *PlaybackSessionStore) normalizeSession(session PlaybackSession) PlaybackSession {
+	now := s.now()
+	if session.CreatedAt.IsZero() {
+		session.CreatedAt = now
+	}
+	session.UpdatedAt = now
 	if session.ExpiresAt.IsZero() {
 		session.ExpiresAt = session.CreatedAt.Add(s.ttl)
 	}
-	s.sessions[session.ID] = session
 	return session
 }
 

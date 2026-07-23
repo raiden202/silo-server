@@ -127,6 +127,119 @@ func (d *DurableCompatPlaybackStore) Put(session PlaybackSession) {
 	}
 }
 
+// PutNegotiated persists a new PlaybackInfo session while removing older,
+// unstarted negotiations for the same compat token, client device, and item.
+// The advisory transaction lock makes the replacement atomic across Silo
+// processes; the in-memory mutation is likewise atomic for the local process.
+func (d *DurableCompatPlaybackStore) PutNegotiated(session PlaybackSession) {
+	if d.pool == nil {
+		d.mem.PutNegotiated(session)
+		return
+	}
+
+	scope := "negotiated\x00" + session.CompatToken + "\x00" + session.ClientDeviceID + "\x00" + session.RouteItemID
+	unlockSession := d.lockSessionMutation(scope)
+	defer unlockSession()
+	d.cacheMutationMu.RLock()
+	stored, locallyRemoved := d.mem.putNegotiatedNormalized(session)
+	defer d.finishCacheMutation(stored.ID, stored.CompatToken)
+	d.markIDValidated(stored.ID)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	durablyRemoved, err := d.replaceUnstartedNegotiation(ctx, stored)
+	if err != nil {
+		d.markUnpersisted(stored.ID)
+		slog.WarnContext(ctx, "persist negotiated compat playback session failed",
+			"component", "jellycompat",
+			"error", err,
+			"play_session_id", stored.ID,
+		)
+	} else {
+		d.clearUnpersisted(stored.ID)
+	}
+
+	removed := make(map[string]struct{}, len(locallyRemoved)+len(durablyRemoved))
+	for _, id := range locallyRemoved {
+		removed[id] = struct{}{}
+	}
+	for _, id := range durablyRemoved {
+		removed[id] = struct{}{}
+	}
+	for id := range removed {
+		d.invalidateValidation(id, "")
+		d.clearUnpersisted(id)
+		d.clearPendingUpdates(id)
+		d.bumpCacheGenerations(id, "")
+	}
+	d.invalidateValidation("", stored.CompatToken)
+}
+
+func (d *DurableCompatPlaybackStore) replaceUnstartedNegotiation(
+	ctx context.Context,
+	session PlaybackSession,
+) ([]string, error) {
+	tx, err := d.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var removed []string
+	if session.CompatToken != "" && session.ClientDeviceID != "" && session.RouteItemID != "" {
+		scope := session.CompatToken + "\x00" + session.ClientDeviceID + "\x00" + session.RouteItemID
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, scope); err != nil {
+			return nil, err
+		}
+		rows, err := tx.Query(ctx, `
+			DELETE FROM jellycompat_playback_sessions
+			WHERE id <> $1
+				AND compat_token = $2
+				AND data->>'ClientDeviceID' = $3
+				AND data->>'RouteItemID' = $4
+				AND COALESCE(data->>'UpstreamSessionID', '') = ''
+				AND COALESCE((data->>'Terminal')::boolean, false) = false
+				AND expires_at > $5
+			RETURNING id
+		`, session.ID, session.CompatToken, session.ClientDeviceID, session.RouteItemID, d.now())
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			removed = append(removed, id)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
+
+	data, err := json.Marshal(session)
+	if err != nil {
+		return nil, err
+	}
+	expiresAt := session.ExpiresAt
+	if expiresAt.IsZero() {
+		expiresAt = d.now().Add(d.ttl)
+	}
+	if _, err := tx.Exec(
+		ctx, upsertSessionQuery,
+		session.ID, session.CompatToken, session.UserID, data, expiresAt,
+	); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return removed, nil
+}
+
 // Get periodically revalidates the durable row before returning an active
 // session. Query failures preserve a still-valid cache entry: a temporary DB
 // outage must not interrupt an already-playing stream.

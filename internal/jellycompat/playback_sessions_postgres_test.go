@@ -86,6 +86,41 @@ func TestDurableCompatPlaybackStore_SurvivesRestart(t *testing.T) {
 	}
 }
 
+func TestDurableCompatPlaybackStorePutNegotiatedReplacesAcrossInstances(t *testing.T) {
+	pool := newCompatTestPool(t)
+	ctx := context.Background()
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	firstID := "compat-negotiated-first-" + suffix
+	secondID := "compat-negotiated-second-" + suffix
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM jellycompat_playback_sessions WHERE id = ANY($1)`, []string{firstID, secondID})
+	})
+
+	first := NewDurableCompatPlaybackStore(pool, time.Hour, nil)
+	first.PutNegotiated(PlaybackSession{
+		ID:             firstID,
+		CompatToken:    "negotiated-token-" + suffix,
+		ClientDeviceID: "web-device",
+		RouteItemID:    "route-1",
+	})
+
+	second := NewDurableCompatPlaybackStore(pool, time.Hour, nil)
+	second.PutNegotiated(PlaybackSession{
+		ID:             secondID,
+		CompatToken:    "negotiated-token-" + suffix,
+		ClientDeviceID: "web-device",
+		RouteItemID:    "route-1",
+	})
+
+	fresh := NewDurableCompatPlaybackStore(pool, time.Hour, nil)
+	if _, ok := fresh.Get(firstID); ok {
+		t.Fatal("superseded negotiation remained durable")
+	}
+	if _, ok := fresh.Get(secondID); !ok {
+		t.Fatal("replacement negotiation was not durable")
+	}
+}
+
 // M5: an empty compat token must never trigger a DB scan — FindByRoute returns
 // the in-memory result only. With a non-nil pool but no live DB, a scan attempt
 // would block/error on the pool; instead the empty-token path returns cleanly

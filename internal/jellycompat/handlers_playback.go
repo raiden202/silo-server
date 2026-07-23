@@ -710,9 +710,14 @@ func (h *PlaybackHandler) HandlePlaybackInfo(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	h.playbackStore.Put(PlaybackSession{
+	clientDeviceID := firstNonEmpty(
+		firstMediaBrowserAuthorizationValue(r, "DeviceId"),
+		newCaseInsensitiveQuery(r.URL.Query()).Get("DeviceId"),
+	)
+	h.playbackStore.PutNegotiated(PlaybackSession{
 		ID:                 playSessionID,
 		CompatToken:        session.Token,
+		ClientDeviceID:     clientDeviceID,
 		ItemID:             detail.ContentID,
 		RouteItemID:        routeItemID,
 		UserID:             session.PseudoUserID.String(),
