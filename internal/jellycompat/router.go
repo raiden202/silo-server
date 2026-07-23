@@ -120,6 +120,8 @@ func NewRouter(deps Dependencies) chi.Router {
 	playbackHandler.SettingsRepo = deps.SettingsRepo
 	playbackHandler.RecipeNodeStore = deps.RecipeNodeStore
 	playbackHandler.SessionSyncer = deps.SessionSyncer
+	playbackHandler.WatchScrobbler = deps.WatchScrobbler
+	playbackHandler.StableIdentityResolver = deps.StableIdentityResolver
 	if subtitleRepo != nil {
 		playbackHandler.SubtitleRepo = subtitleRepo
 		playbackHandler.S3Client = deps.S3Client
