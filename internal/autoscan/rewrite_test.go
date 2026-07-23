@@ -78,6 +78,35 @@ func TestApplyRewritesUNCPath(t *testing.T) {
 	}
 }
 
+// TestApplyRewritesPreservesTrailingSlash verifies a trailing separator on the
+// incoming path survives normalization and rewriting. It is semantic for
+// legacy-scope changes: filepath.Dir("/x/Show/") is the directory itself while
+// filepath.Dir("/x/Show") is its parent, so dropping it would widen a targeted
+// directory notification into a parent/library scan.
+func TestApplyRewritesPreservesTrailingSlash(t *testing.T) {
+	rw := []PathRewrite{{From: "/data/tv", To: "/mnt/media/tv"}}
+	if got := applyRewrites("/data/tv/Show/", rw); got != "/mnt/media/tv/Show/" {
+		t.Fatalf("rewritten dir: got %q", got)
+	}
+	// Unmatched paths keep it too.
+	if got := applyRewrites("/other/Show/", rw); got != "/other/Show/" {
+		t.Fatalf("unmatched dir: got %q", got)
+	}
+	// Windows separator form: trailing backslash counts as a trailing separator.
+	unc := []PathRewrite{{From: `\\NAS\Media\TV`, To: "/mnt/media/tv"}}
+	if got := applyRewrites(`\\NAS\Media\TV\Show\`, unc); got != "/mnt/media/tv/Show/" {
+		t.Fatalf("UNC dir: got %q", got)
+	}
+	// Files without a trailing separator stay without one.
+	if got := applyRewrites("/data/tv/Show/E01.mkv", rw); got != "/mnt/media/tv/Show/E01.mkv" {
+		t.Fatalf("file: got %q", got)
+	}
+	// Bare root never doubles.
+	if got := applyRewrites("/", nil); got != "/" {
+		t.Fatalf("root: got %q", got)
+	}
+}
+
 // TestApplyRewritesMostSpecificWins verifies the longest matching From wins
 // regardless of slice ordering: a broad rule must not shadow a nested one.
 func TestApplyRewritesMostSpecificWins(t *testing.T) {
