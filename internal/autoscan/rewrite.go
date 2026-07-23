@@ -10,7 +10,7 @@ func normalizeSeparators(path string) string {
 }
 
 // applyRewrites returns path with the MOST-SPECIFIC matching prefix rewrite
-// applied, or path unchanged when none match.
+// applied, or the normalized path unchanged when none match.
 //
 // "Most-specific" means the longest matching From wins, not the first one in the
 // slice. A first-match strategy lets a broad rewrite (From="/data") shadow a
@@ -18,6 +18,12 @@ func normalizeSeparators(path string) string {
 // be listed first; the arr plugin review flagged exactly this. Selecting the
 // longest matching prefix makes the result independent of rule ordering.
 func applyRewrites(path string, rewrites []PathRewrite) string {
+	// Normalize the incoming path the SAME way the stored From is normalized
+	// below. Separator swapping alone is not enough: a Windows UNC path like
+	// `\\NAS\Media\TV\...` becomes `//NAS/Media/TV/...`, while normalizePath
+	// collapses the From's leading `//` to `/NAS/Media/TV` — an asymmetry that
+	// made UNC roots unmatchable by any rewrite rule.
+	path = normalizePath(path)
 	bestIdx := -1
 	bestLen := -1
 	var bestTrimmed string
@@ -44,5 +50,7 @@ func applyRewrites(path string, rewrites []PathRewrite) string {
 	if bestIdx < 0 {
 		return path
 	}
-	return strings.TrimSpace(rewrites[bestIdx].To) + strings.TrimPrefix(path, bestTrimmed)
+	// Normalize the joined result too: a To stored with a trailing slash would
+	// otherwise yield a doubled separator at the join point.
+	return normalizePath(strings.TrimSpace(rewrites[bestIdx].To) + strings.TrimPrefix(path, bestTrimmed))
 }
