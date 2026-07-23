@@ -6,6 +6,7 @@ import {
   formatMbpsFromKbps,
   formatSampleRate,
 } from "@/lib/mediaFormat";
+import { videoRangeLabel } from "@/lib/videoRange";
 import type {
   PlaybackSessionPlaybackInfo,
   PlayMethod,
@@ -147,6 +148,10 @@ export function buildPlaybackInfoSections({
           value: formatVideoRangeType(currentSourceVersion, videoTrack),
         },
         {
+          label: "Color range",
+          value: formatColorRange(videoTrack?.color_range),
+        },
+        {
           label: "Audio codec",
           value: formatOriginalAudioCodec(currentSourceVersion, audioTrack),
         },
@@ -223,7 +228,7 @@ function formatRequestedSourceVersion(version: PlayerFileVersion): string {
   const parts = [
     version.resolution?.trim(),
     formatCodecLabel(version.codec_video),
-    version.hdr ? "HDR" : null,
+    videoRangeLabel(version) || null,
   ].filter(Boolean);
   return parts.join(" ");
 }
@@ -333,13 +338,23 @@ export function formatVideoRangeType(
   if (track?.video_range) {
     return track.video_range;
   }
-  if (version?.hdr) {
-    return "HDR";
-  }
   if (version) {
-    return "SDR";
+    return videoRangeLabel(version) || "SDR";
   }
   return "—";
+}
+
+export function formatColorRange(value?: string): string {
+  switch (value?.trim().toLowerCase()) {
+    case "tv":
+      return "Limited (tv)";
+    case "pc":
+      return "Full (pc)";
+    case "unknown":
+      return "Unknown";
+    default:
+      return "—";
+  }
 }
 
 export function formatOriginalAudioCodec(

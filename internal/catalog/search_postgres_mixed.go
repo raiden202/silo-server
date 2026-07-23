@@ -69,22 +69,18 @@ const mixedSearchOrder = `exact_title_match DESC, contiguous_title_match DESC, y
 	phrase_rank DESC, title_rank DESC, title_prefix_rank DESC, overview_rank DESC,
 	LOWER(title) ASC, content_id ASC`
 
-// buildMixedSearchSQLWithTotal builds one ranked candidate set from the two
+// buildMixedSearchSQLFromParsed builds one ranked candidate set from the two
 // physical catalog sources. The scored CTE deliberately carries only ranking
 // fields; the wide MediaItem projection is hydrated after LIMIT/OFFSET so a
 // broad match never sorts posters, arrays, or metadata blobs for every hit.
-func (r *ItemRepository) buildMixedSearchSQLWithTotal(
-	query string,
+func (r *ItemRepository) buildMixedSearchSQLFromParsed(
+	parsed parsedSearchQuery,
 	itemTypes []string,
 	limit, offset int,
 	filter AccessFilter,
 	includeTotal bool,
 ) (dataSQL, countSQL string, args []any) {
-	parsed := parseSearchQuery(query)
-	searchText := parsed.Text
-	if searchText == "" {
-		searchText = collapseSearchWhitespace(strings.ReplaceAll(strings.TrimSpace(query), "\"", " "))
-	}
+	searchText := searchTextFromParsed(parsed)
 	if searchText == "" {
 		return "", "", nil
 	}

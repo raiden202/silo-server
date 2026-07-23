@@ -422,6 +422,7 @@ export interface HistoryImportRun {
   progress_updated: number;
   history_created: number;
   watchlist_added: number;
+  favorites_imported: number;
   skipped: number;
   warnings: string[];
   unmatched_samples: HistoryImportUnmatchedSample[];
@@ -969,6 +970,7 @@ export interface VersionVideoTrack {
   bitrate?: number;
   video_range?: string;
   video_range_type?: string;
+  color_range?: string;
   color_primaries?: string;
   color_space?: string;
   color_transfer?: string;
@@ -1268,6 +1270,7 @@ export interface EpisodeListItem {
   still_thumbhash: string;
   user_data?: LeafItemUserData;
   files: EpisodeFile[];
+  overlay_summary?: OverlaySummary | null;
 }
 
 export interface EpisodesResponse {
@@ -2423,6 +2426,11 @@ export interface AdminSession {
   requested_video_resolution?: string;
   video_decision?: string;
   audio_decision?: string;
+  /** Server-computed activity bucket: direct | remux | transcode | audio.
+   * Absent when the per-stream decisions are unknown. */
+  effective_play_method?: string;
+  /** Server-side identification of Jellyfin-ecosystem clients (the JF pill). */
+  is_jellyfin_client?: boolean;
 }
 
 export interface OperationalLogEntry {
@@ -2465,6 +2473,126 @@ export interface OperationalLogListResponse {
 export interface AuditLogListResponse {
   entries: AuditLogEntry[];
   next_cursor?: string;
+}
+
+export type DiagnosticAvailabilityStatus = "available" | "disabled" | "storage_unavailable";
+
+export interface DiagnosticStatus {
+  status: DiagnosticAvailabilityStatus;
+  server_instance_id: string;
+  accepted_schema_versions: number[];
+  max_bundle_bytes: number;
+  max_manifest_bytes: number;
+  retention_days: number;
+  consent_notice_version: number;
+}
+
+export type DiagnosticReportState = "receiving" | "ready" | "failed";
+export type DiagnosticReportType =
+  | "crash"
+  | "anr"
+  | "native_crash"
+  | "hang"
+  | "abnormal_exit"
+  | "manual";
+export type DiagnosticPlatform = "android" | "android-tv" | "ios" | "tvos";
+
+export interface ClientDiagnosticManifest {
+  schema_version: number;
+  report: {
+    type: DiagnosticReportType;
+    captured_at: string;
+    capture_session_id: string;
+    app_version: string;
+    app_build: string;
+    platform: DiagnosticPlatform;
+    os_version: string;
+    profile_id?: string;
+    [key: string]: unknown;
+  };
+  destination: {
+    server_instance_id: string;
+    [key: string]: unknown;
+  };
+  consent: {
+    mode: "prompt" | "always" | "manual";
+    notice_version: number;
+    [key: string]: unknown;
+  };
+  crash?: {
+    summary: string;
+    stack_excerpt?: string;
+    thread?: string;
+    foreground?: boolean;
+    source: "ueh" | "exit_info" | "metrickit" | "exit_sentinel";
+    provenance: "pre_failure" | "post_restart" | "metric_reporting_period";
+    occurred_at: string;
+    [key: string]: unknown;
+  };
+  device_summary: {
+    manufacturer: string;
+    model: string;
+    os: string;
+    form_factor: string;
+    [key: string]: unknown;
+  };
+  playback_session_ids: string[];
+  log_summary: {
+    lines: number;
+    bytes_gz: number;
+    dropped_lines: number;
+    categories: string[];
+    debug_logging: boolean;
+    [key: string]: unknown;
+  };
+  archive: {
+    entries: string[];
+    bytes: number;
+    uncompressed_bytes: number;
+    sha256: string;
+    [key: string]: unknown;
+  };
+  [key: string]: unknown;
+}
+
+// DiagnosticReportSummary is the shape returned by the admin list endpoint,
+// which omits the full manifest JSONB for cheap paging. `app_build` is projected
+// out of the manifest server-side so rows can still show the build number.
+export interface DiagnosticReportSummary {
+  id: string;
+  short_id: string;
+  user_id: number;
+  profile_id?: string;
+  state: DiagnosticReportState;
+  captured_at: string;
+  received_at: string;
+  report_type: DiagnosticReportType;
+  platform: DiagnosticPlatform;
+  app_version: string;
+  app_build: string;
+  crash_summary?: string;
+  playback_session_ids: string[];
+  blob_bucket?: string;
+  blob_key?: string;
+  blob_bytes?: number;
+  uncompressed_bytes?: number;
+  blob_sha256?: string;
+}
+
+// DiagnosticReport is the full detail shape (GetByID), which additionally
+// includes the parsed manifest for the detail pane.
+export interface DiagnosticReport extends DiagnosticReportSummary {
+  manifest: ClientDiagnosticManifest;
+}
+
+export interface DiagnosticReportListResponse {
+  reports: DiagnosticReportSummary[];
+  next_cursor?: string;
+}
+
+export interface DiagnosticDownloadResponse {
+  download_url: string;
+  expires_at: string;
 }
 
 export type AdminLogStream = "app" | "audit";
@@ -2888,8 +3016,10 @@ export interface LibraryMountCheckRoot {
     | "not_directory"
     | "stat_failed"
     | "read_failed"
+    | "probe_timeout"
     | null;
   error_message: string | null;
+  suspect_empty: boolean;
 }
 
 export interface LibraryMountCheckResponse {
@@ -3449,6 +3579,12 @@ export interface PluginSettingsSummary {
   user_config_schema: PluginConfigSchema[];
   routes: PluginRoute[];
   assets: PluginAsset[];
+  /**
+   * Optional slash-delimited grouping path from the plugin manifest
+   * (e.g. "Tools/Utilities") that groups the plugin's entries in the
+   * Apps sidebar section. Absent when the manifest declares no category.
+   */
+  category?: string;
 }
 
 export interface PluginSettingsListResponse {
@@ -4328,6 +4464,8 @@ export interface ApplyItemImageResponse {
   content_id: string;
   stored_path: string;
   thumbhash: string;
+  image_url?: string;
+  revision?: string;
 }
 
 export interface UnmatchedLibraryItem {

@@ -50,6 +50,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/clientip"
 	"github.com/Silo-Server/silo-server/internal/config"
 	"github.com/Silo-Server/silo-server/internal/database"
+	"github.com/Silo-Server/silo-server/internal/diagnostics"
 	"github.com/Silo-Server/silo-server/internal/downloads"
 	"github.com/Silo-Server/silo-server/internal/ebooks"
 	evt "github.com/Silo-Server/silo-server/internal/events"
@@ -67,6 +68,11 @@ import (
 	"github.com/Silo-Server/silo-server/internal/markers"
 	"github.com/Silo-Server/silo-server/internal/mdblist"
 	"github.com/Silo-Server/silo-server/internal/metadata"
+
+	// Built-in metadata providers self-register into the metadata package's
+	// builtin registry on import; buildProviders resolves their seeded chain
+	// entries in-process (no gRPC).
+	_ "github.com/Silo-Server/silo-server/internal/metadata/nfo"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/nodeconfig"
 	"github.com/Silo-Server/silo-server/internal/nodepool"
@@ -188,6 +194,9 @@ func configureOperationalLogging(
 ) (opslog.Writer, *opslog.Repo, *partman.Manager) {
 	if err := opslog.SeedDefaults(ctx, settingsRepo); err != nil {
 		log.Fatalf("seed opslog defaults: %v", err)
+	}
+	if err := diagnostics.SeedDefaults(ctx, settingsRepo); err != nil {
+		log.Fatalf("seed diagnostics defaults: %v", err)
 	}
 	opsPM := partman.NewManager(pool, "operational_logs", partman.Daily, 3)
 	if err := opsPM.EnsureFuturePartitions(ctx); err != nil {
@@ -665,6 +674,9 @@ func main() {
 			// start, so this node can rebuild a Jellyfin transcode after its own
 			// restart (the node hop token is recipe-less). Shares the offload Redis.
 			srv.SetRecipeStore(noderecipe.NewStore(redisClient, 0))
+			// Reclaim orphaned transcode dirs at boot and hourly thereafter, bound
+			// to appCtx so it stops on shutdown.
+			srv.StartOrphanSweeper(appCtx)
 			handler = srv.Handler()
 		}
 
@@ -996,6 +1008,11 @@ func main() {
 					}
 					out := make([]pluginhost.InstalledPluginRecord, 0, len(installations))
 					for _, installation := range installations {
+						// The reserved builtin row is not a plugin; keep it out
+						// of the host's installed-plugin listing.
+						if installation.IsBuiltin() {
+							continue
+						}
 						capabilities, err := installationStore.ListCapabilities(ctx, installation.ID)
 						if err != nil {
 							return nil, err
@@ -1145,6 +1162,17 @@ func main() {
 	var mangaEnricher *manga.Enricher
 	if needsWorkers && deps.DB != nil && deps.FileRepo != nil {
 		chainRepo := metadata.NewChainRepository(deps.DB)
+		// Make every existing library chain aware of the built-in providers
+		// before serving: materialize legacy content_level='' chains per level,
+		// then append registered builtins disabled (idempotent; also the repair
+		// path after a stale chain-editor save drops a builtin row). Runs before
+		// the metadata service exists, so no chain cache to invalidate here.
+		syncCtx, syncCancel := context.WithTimeout(appCtx, 30*time.Second)
+		syncErr := metadata.SyncBuiltinProviderChains(syncCtx, chainRepo)
+		syncCancel()
+		if syncErr != nil {
+			log.Fatalf("sync builtin provider chains: %v", syncErr)
+		}
 		skippedRootRepo = metadata.NewSkippedRootRepository(deps.DB)
 		itemRepo = catalog.NewItemRepository(deps.DB).WithActiveSearchProvider(activeCatalogSearchProvider)
 		episodeRepo = catalog.NewEpisodeRepository(deps.DB)
@@ -1252,6 +1280,7 @@ func main() {
 		// admin image applies can succeed even if automatic metadata caching is off.
 		if deps.S3Public != nil {
 			imageCacher := imagecache.New(deps.S3Public)
+			imageCacher.SetArtworkRevisionTracker(catalog.NewArtworkRevisionTracker(deps.DB))
 			metadataService.SetImageCacher(imageCacher)
 			imageCacheJobs := metadata.NewImageCacheJobRepository(deps.DB)
 			metadataService.SetImageCacheJobEnqueuer(imageCacheJobs)
@@ -1268,6 +1297,11 @@ func main() {
 					People:              personRepo,
 				},
 			)
+			// Local file:// artwork (NFO sidecars): confine reads to the owning
+			// library's roots and sweep stale hashed local/ prefixes on re-cache.
+			// The processor host must mount the libraries, like the metadata worker.
+			metadataImageCacheProcessor.SetLibraryRootResolver(deps.FolderRepo)
+			metadataImageCacheProcessor.SetImagePrefixDeleter(deps.S3Public)
 			metadataService.SetAutoCacheImages(cfg.Metadata.CacheImages)
 			metadataImageCacheProcessor.SetEnabled(cfg.Metadata.CacheImages)
 			configWatcher.OnChange(func(_, updated *config.Config) {
@@ -1550,6 +1584,7 @@ func main() {
 
 	// Step 6: Create playback session manager and wire into dependencies.
 	sessionMgr := playback.NewSessionManager(6, 2) // defaults from plan: max_streams=6, max_transcodes=2
+	var compatTerminalRecoveryReady <-chan struct{}
 	if userStoreProvider != nil {
 		deps.UserStoreProvider = userStoreProvider
 	}
@@ -1561,6 +1596,13 @@ func main() {
 			WithWatchState(watchstate.NewService(userStoreProvider).WithStableIdentityResolver(historyIdentity)).
 			WithUserStoreProvider(userStoreProvider)
 		backgroundInit = append(backgroundInit, func(ctx context.Context) {
+			if compatTerminalRecoveryReady != nil {
+				select {
+				case <-compatTerminalRecoveryReady:
+				case <-ctx.Done():
+					return
+				}
+			}
 			if err := watchProviderService.SweepOpenScrobbles(ctx); err != nil {
 				slog.WarnContext(ctx, "failed to sweep open watch provider scrobbles", "component", "app", "error", err)
 			}
@@ -1879,6 +1921,11 @@ func main() {
 			taskMgr.Register(tasks.NewScanLibrariesTask(deps.FolderRepo, deps.LibraryScanQueue, deps.EventBus))
 		}
 		taskMgr.Register(tasks.NewCleanupOrphanedMediaItemsTask(catalog.NewOrphanedProvisionalCleaner(deps.DB)))
+		if deps.S3Public != nil {
+			taskMgr.Register(tasks.NewCleanupArtworkRevisionsTask(
+				metadata.NewArtworkRevisionGarbageCollector(deps.DB, deps.S3Public),
+			))
+		}
 		catalogSearchIndexer := catalog.NewCatalogSearchIndexer(deps.DB, settingsRepo)
 		taskMgr.Register(tasks.NewSyncCatalogSearchIndexTask(catalogSearchIndexer))
 		taskMgr.Register(tasks.NewRebuildCatalogSearchIndexTask(catalogSearchIndexer))
@@ -1895,6 +1942,15 @@ func main() {
 		}
 		taskMgr.Register(tasks.NewActivityLogCleanupTask(deps.DB, settingsRepo, activityPM))
 		taskMgr.Register(tasks.NewOperationalLogCleanupTask(deps.DB, settingsRepo, opsPM))
+		var diagnosticsStore diagnostics.ObjectStore
+		if deps.S3Private != nil {
+			diagnosticsStore = diagnostics.NewS3ObjectStore(deps.S3Private)
+		}
+		taskMgr.Register(tasks.NewClientDiagnosticsCleanupTask(
+			diagnostics.NewPostgresRepository(deps.DB),
+			settingsRepo,
+			diagnosticsStore,
+		))
 		taskMgr.Register(tasks.NewPolicyDecisionLogCleanupTask(deps.DB, settingsRepo, policyPM))
 		if deps.FileRepo != nil {
 			// Download prepare-to-file pipeline (Phase 3): a durable, leased encode
@@ -2359,6 +2415,7 @@ func main() {
 	if (mode == "integrated" || mode == "api") && cfg.JellyfinCompat.Enabled && cfg.JellyfinCompat.Listen != "" {
 		compatDeps := jellycompat.Dependencies{
 			Config:           cfg,
+			AppContext:       appCtx,
 			LiveConfig:       configWatcher.Config,
 			DB:               deps.DB,
 			SecretCipher:     dataCipher,
@@ -2402,6 +2459,7 @@ func main() {
 			compatDeps.SeasonRepo = seasonRepo
 			compatDeps.EpisodeRepo = episodeRepo
 			compatDeps.ProviderIDRepo = providerIDRepo
+			compatDeps.StableIdentityResolver = watchstate.NewStableIdentityResolver(itemRepo, episodeRepo, providerIDRepo)
 			compatDeps.DetailSvc = detailSvc
 			compatDeps.FolderRepo = folderRepo
 			compatDeps.SessionMgr = sessionMgr
@@ -2409,6 +2467,9 @@ func main() {
 			compatDeps.WatchCompletionObserver = deps.WatchCompletionObserver
 			compatDeps.SettingsRepo = settingsRepo
 			compatDeps.PersonRepo = personRepo
+			if watchProviderService != nil {
+				compatDeps.WatchScrobbler = watchProviderService
+			}
 			compatSearchService := catalog.NewCatalogSearchService(
 				appCtx,
 				settingsRepo,
@@ -2488,7 +2549,7 @@ func main() {
 
 		compat := jellycompat.NewServerWithDependencies(compatDeps)
 		compatServer = compat
-		compat.StartBackgroundTasks(context.Background())
+		compatTerminalRecoveryReady = compat.StartBackgroundTasks(context.Background())
 		compatSrv = compat.HTTPServer()
 		compatSrv.ReadTimeout = 30 * time.Second
 		compatSrv.WriteTimeout = 0
@@ -2784,6 +2845,12 @@ func reloadPluginImageResolvers(
 		if installation == nil {
 			continue
 		}
+		// Builtin installations resolve in-process metadata providers only;
+		// registering them here would claim their capability id as a gRPC
+		// image-resolver scheme with no binary behind it.
+		if installation.IsBuiltin() {
+			continue
+		}
 		capabilities, err := store.ListCapabilities(ctx, installation.ID)
 		if err != nil {
 			return fmt.Errorf("list image resolver capabilities for installation %d: %w", installation.ID, err)
@@ -2968,6 +3035,11 @@ func reloadMarkerPluginProviders(
 	nextPriority := 1000
 	for _, installation := range installations {
 		if installation == nil {
+			continue
+		}
+		// Builtin installations expose no marker providers; defense in depth
+		// alongside the capability-type filter below.
+		if installation.IsBuiltin() {
 			continue
 		}
 		capabilities, err := store.ListCapabilities(ctx, installation.ID)

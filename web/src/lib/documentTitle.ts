@@ -44,6 +44,7 @@ const ADMIN_TITLES: Record<string, string> = {
   "api-keys": "Admin API Keys",
   collections: "Admin Collections",
   devices: "Admin Devices",
+  diagnostics: "Admin Client Diagnostics",
   history: "Admin Playback History",
   "history-import": "Admin History Import",
   "marker-history": "Admin Marker History",

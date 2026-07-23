@@ -28,34 +28,55 @@ func init() {
 
 // TranscodeOpts holds configuration for an HLS transcode session.
 type TranscodeOpts struct {
-	InputPath          string
-	OutputDir          string // e.g., /tmp/silo-transcode/{session_id}/
-	SessionID          string
-	SourceVideoCodec   string
-	SeekSeconds        float64
-	TargetResolution   string // e.g., 1080p, 720p
-	TargetCodecVideo   string // e.g., h264 (or hevc if allowed)
-	TargetCodecAudio   string // e.g., aac
-	SegmentDuration    int    // seconds, default 6
-	StartSegmentNumber int    // -hls_segment_start_number, default 0
-	FFmpegPath         string // optional explicit ffmpeg binary path
-	HWAccel            string // auto, qsv, vaapi, nvenc, none
-	HWDevice           string // e.g., /dev/dri/renderD128 (default if empty)
-	SubtitleTrackIndex int    // -1 = no subtitles
-	SubtitleBurnIn     bool
+	InputPath string
+	OutputDir string // e.g., /tmp/silo-transcode/{session_id}/
+	// OutputSubdir is the signed, root-relative reconstruction directory. Empty
+	// retains the legacy flat {session_id} layout.
+	OutputSubdir         string
+	TranscodeTransportID string
+	SessionID            string
+	SourceVideoCodec     string
+	VideoBitstreamFilter string // validated copy-mode BSF, e.g. dovi_rpu=strip=1
+	SeekSeconds          float64
+	// StreamOriginSeconds is the keyframe timestamp at which a copy-video
+	// stream actually begins. SeekSeconds remains the client-requested -ss so
+	// FFmpeg performs exactly one demuxer seek; this origin keeps response and
+	// reconstruction timelines aligned with the resulting media pre-roll.
+	StreamOriginSeconds float64
+	// CopySeekAnchorResolved distinguishes a valid zero-second origin from
+	// older/shared recipes that never resolved a copy seek anchor.
+	CopySeekAnchorResolved bool
+	TargetResolution       string // e.g., 1080p, 720p
+	TargetCodecVideo       string // e.g., h264 (or hevc if allowed)
+	TargetCodecAudio       string // e.g., aac
+	SegmentDuration        int    // seconds, default 6
+	StartSegmentNumber     int    // -hls_segment_start_number, default 0
+	FFmpegPath             string // optional explicit ffmpeg binary path
+	HWAccel                string // auto, qsv, vaapi, nvenc, none
+	HWDevice               string // e.g., /dev/dri/renderD128 (default if empty)
+	SubtitleTrackIndex     int    // -1 = no subtitles
+	SubtitleBurnIn         bool
 	// SubtitleCodec is the probed codec of the burn-in track (e.g. "subrip",
 	// "hdmv_pgs_subtitle"). Bitmap codecs (PGS/DVD/DVB) select the overlay
 	// filter_complex pipeline; text codecs use the libass subtitles filter.
 	// Empty preserves the legacy text path for callers minted before the field.
-	SubtitleCodec     string
-	AudioTrackIndex   int     // -1 = default (first track), >= 0 = specific track
-	TargetBitrateKbps int     // max video bitrate in kbps; 0 = CRF-only (no cap)
-	TotalDuration     float64 // total media duration in seconds (for VOD manifest)
-	FastStart         bool    // use superfast preset for faster first-segment production
-	NodeType          string
-	ExecutionMode     string
-	FFmpegLogSink     FFmpegLogSink
+	SubtitleCodec   string
+	AudioTrackIndex int // -1 = default (first track), >= 0 = specific track
+	// TargetAudioChannels caps the re-encoded channel count. 0 (or anything
+	// below 3) keeps the historical stereo downmix; 6 preserves 5.1 from a
+	// surround source. Ignored for copy/passthrough audio targets.
+	TargetAudioChannels int
+	TargetBitrateKbps   int     // max video bitrate in kbps; 0 = CRF-only (no cap)
+	TotalDuration       float64 // total media duration in seconds (for VOD manifest)
+	FastStart           bool    // use superfast preset for faster first-segment production
+	NodeType            string
+	ExecutionMode       string
+	FFmpegLogSink       FFmpegLogSink
 }
+
+// DV7ToHDR10BitstreamFilter strips Dolby Vision RPU metadata during a
+// copy-mode HLS remux; the enhancement layer is dropped by stream mapping.
+const DV7ToHDR10BitstreamFilter = "dovi_rpu=strip=1"
 
 // TranscodeSession manages a running ffmpeg HLS transcode process.
 type TranscodeSession struct {
@@ -142,6 +163,10 @@ const (
 
 // StartTranscode launches an ffmpeg process that produces HLS segments.
 func StartTranscode(ctx context.Context, opts TranscodeOpts) (*TranscodeSession, error) {
+	if opts.VideoBitstreamFilter != "" &&
+		(opts.VideoBitstreamFilter != DV7ToHDR10BitstreamFilter || !strings.EqualFold(opts.TargetCodecVideo, "copy")) {
+		return nil, fmt.Errorf("unsupported video bitstream filter recipe")
+	}
 	if opts.SegmentDuration <= 0 {
 		opts.SegmentDuration = defaultSegmentDuration
 	}
@@ -290,6 +315,9 @@ func buildFFmpegArgs(opts TranscodeOpts) []string {
 	// Video codec and encoding settings.
 	if isVideoCopy {
 		args = append(args, "-c:v", "copy")
+		if opts.VideoBitstreamFilter == DV7ToHDR10BitstreamFilter {
+			args = append(args, "-bsf:v", opts.VideoBitstreamFilter)
+		}
 	} else {
 		args = appendVideoArgs(args, opts)
 	}
@@ -632,13 +660,25 @@ func appendVideoFilterArgs(args []string, opts TranscodeOpts) []string {
 	return args
 }
 
+// TranscodesAudio reports whether a transcode with the given target audio
+// codec re-encodes the audio stream. Only an explicit "copy" passes audio
+// through; an empty codec runs ffmpeg's AAC default (see appendAudioArgs), so
+// every consumer of the session's audio decision — live stream state, recipe
+// cards, and the compat mirror — must share this predicate or the activity
+// bucket flips between remux and audio across restarts.
+func TranscodesAudio(targetCodecAudio string) bool {
+	return !strings.EqualFold(targetCodecAudio, "copy")
+}
+
 // appendAudioArgs adds audio codec arguments. Supports "copy" for passthrough,
 // plus opus / aac / eac3 / ac3 as re-encode targets. EAC3 and AC3 are useful
 // when we must transcode video but want to preserve surround channels for an
 // HDMI receiver — both are legal in HLS fMP4 (not MPEG-TS; ensure the HLS
 // packager is fMP4 when emitting these).
 func appendAudioArgs(args []string, opts TranscodeOpts) []string {
-	codec := opts.TargetCodecAudio
+	// Case-insensitive so the switch agrees with TranscodesAudio for any
+	// client-supplied spelling.
+	codec := strings.ToLower(opts.TargetCodecAudio)
 	if codec == "" {
 		codec = "aac"
 	}
@@ -656,7 +696,14 @@ func appendAudioArgs(args []string, opts TranscodeOpts) []string {
 		// Legacy Dolby Digital; universal AVR support.
 		args = append(args, "-c:a", "ac3", "-b:a", "448k")
 	default:
-		args = append(args, "-c:a", "aac", "-b:a", "192k", "-ac", "2")
+		// Preserve surround from multichannel sources when the planner asked
+		// for it (AAC 5.1 decodes universally in Media3); the historical
+		// default stays a stereo 192k downmix.
+		if opts.TargetAudioChannels >= 6 {
+			args = append(args, "-c:a", "aac", "-b:a", "384k", "-ac", "6")
+		} else {
+			args = append(args, "-c:a", "aac", "-b:a", "192k", "-ac", "2")
+		}
 	}
 
 	return args
@@ -1494,6 +1541,28 @@ func (s *TranscodeSession) cleanStaleSegments(startSegment int) {
 // copy-mode sessions, stale segments at or after the restart point are
 // cleaned to prevent serving data from the wrong timeline position.
 func (s *TranscodeSession) Restart(ctx context.Context, seekSeconds float64, startSegment int) error {
+	return s.restart(ctx, seekSeconds, startSegment, 0, false)
+}
+
+// RestartWithCopySeekAnchor restarts a copy-video stream with the keyframe
+// origin resolved for this specific seek. Keeping this metadata explicit
+// prevents a prior seek's origin from being reused after an audio switch.
+func (s *TranscodeSession) RestartWithCopySeekAnchor(
+	ctx context.Context,
+	seekSeconds float64,
+	startSegment int,
+	streamOriginSeconds float64,
+) error {
+	return s.restart(ctx, seekSeconds, startSegment, streamOriginSeconds, true)
+}
+
+func (s *TranscodeSession) restart(
+	ctx context.Context,
+	seekSeconds float64,
+	startSegment int,
+	streamOriginSeconds float64,
+	copySeekAnchorResolved bool,
+) error {
 	s.mu.Lock()
 	// Single-flight: a second caller arriving while a restart is in
 	// progress must not kill the process the first restart just started.
@@ -1535,6 +1604,14 @@ func (s *TranscodeSession) Restart(ctx context.Context, seekSeconds float64, sta
 
 	opts.SeekSeconds = seekSeconds
 	opts.StartSegmentNumber = startSegment
+	if strings.EqualFold(opts.TargetCodecVideo, "copy") {
+		// A seek restart describes a new emitted timeline. Never retain the
+		// previous copy seek's keyframe origin when the caller has not resolved
+		// a replacement; falling back to SeekSeconds is conservative and matches
+		// the behavior of recipes created before copy anchors were introduced.
+		opts.StreamOriginSeconds = streamOriginSeconds
+		opts.CopySeekAnchorResolved = copySeekAnchorResolved
+	}
 	opts.FastStart = false // seek-restarts use veryfast for better quality
 
 	args := buildFFmpegArgs(opts)
@@ -1832,6 +1909,9 @@ func (s *TranscodeSession) SegmentStartTime(segNum int) (float64, bool, error) {
 	s.mu.Lock()
 	manifestPath := filepath.Join(s.outputDir, "stream.m3u8")
 	baseSeekSeconds := s.opts.SeekSeconds
+	if strings.EqualFold(s.opts.TargetCodecVideo, "copy") && s.opts.CopySeekAnchorResolved {
+		baseSeekSeconds = s.opts.StreamOriginSeconds
+	}
 	s.mu.Unlock()
 
 	manifest, err := os.ReadFile(manifestPath)

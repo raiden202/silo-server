@@ -32,6 +32,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/catalogseed"
 	"github.com/Silo-Server/silo-server/internal/clientip"
 	"github.com/Silo-Server/silo-server/internal/config"
+	"github.com/Silo-Server/silo-server/internal/diagnostics"
 	"github.com/Silo-Server/silo-server/internal/downloads"
 	evt "github.com/Silo-Server/silo-server/internal/events"
 	"github.com/Silo-Server/silo-server/internal/historyimport"
@@ -50,6 +51,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/notifications"
 	"github.com/Silo-Server/silo-server/internal/opslog"
 	"github.com/Silo-Server/silo-server/internal/playback"
+	"github.com/Silo-Server/silo-server/internal/playback/planstore"
 	"github.com/Silo-Server/silo-server/internal/plugins"
 	"github.com/Silo-Server/silo-server/internal/policy"
 	"github.com/Silo-Server/silo-server/internal/ratelimit"
@@ -253,14 +255,22 @@ func NewRouter(deps Dependencies) chi.Router {
 	// acting-admin profile policy, degrading admin routes to the plain
 	// role check.
 	var checkPrimaryProfile apimw.PrimaryProfileChecker
+	// lookupProfile resolves a profile for the given user, returning nil when it
+	// does not exist. Shared by the acting-admin primary check and the
+	// diagnostics profile-attribution validator so both read profile state
+	// (IsPrimary, IsChild) the same way.
+	var lookupProfile func(ctx context.Context, userID int, profileID string) (*userstore.Profile, error)
 	if deps.UserStoreProvider != nil {
 		userStores := deps.UserStoreProvider
-		checkPrimaryProfile = func(ctx context.Context, userID int, profileID string) (bool, bool, error) {
+		lookupProfile = func(ctx context.Context, userID int, profileID string) (*userstore.Profile, error) {
 			store, err := userStores.ForUser(ctx, userID)
 			if err != nil {
-				return false, false, err
+				return nil, err
 			}
-			profile, err := store.GetProfile(ctx, profileID)
+			return store.GetProfile(ctx, profileID)
+		}
+		checkPrimaryProfile = func(ctx context.Context, userID int, profileID string) (bool, bool, error) {
+			profile, err := lookupProfile(ctx, userID, profileID)
 			if err != nil {
 				return false, false, err
 			}
@@ -306,6 +316,39 @@ func NewRouter(deps Dependencies) chi.Router {
 	var accessGroupStore *access.GroupStore
 	if deps.DB != nil {
 		accessGroupStore = access.NewGroupStore(deps.DB)
+	}
+	var diagnosticsStore diagnostics.ObjectStore
+	if deps.S3Private != nil {
+		diagnosticsStore = diagnostics.NewS3ObjectStore(deps.S3Private)
+	}
+	var diagnosticsHandler *handlers.DiagnosticsHandler
+	if deps.DB != nil {
+		diagnosticsService := diagnostics.NewService(
+			diagnostics.NewPostgresRepository(deps.DB),
+			settingsRepo,
+			diagnosticsStore,
+			slog.Default(),
+		)
+		if lookupProfile != nil {
+			// Attribute reports only to a profile that belongs to the account and
+			// is not a child profile; child profiles must not perform diagnostics
+			// actions per the design, so reject their attribution here.
+			diagnosticsService.SetProfileAttributionValidator(diagnostics.NewProfileAttributionValidator(
+				func(ctx context.Context, userID int, profileID string) (bool, bool, error) {
+					profile, err := lookupProfile(ctx, userID, profileID)
+					if err != nil {
+						return false, false, err
+					}
+					if profile == nil {
+						return false, false, nil
+					}
+					return true, profile.IsChild, nil
+				},
+			))
+		}
+		diagnosticsHandler = handlers.NewDiagnosticsHandler(
+			diagnosticsService,
+		)
 	}
 
 	// Build auth handler and auth middleware if DB and config are available.
@@ -805,6 +848,12 @@ func NewRouter(deps Dependencies) chi.Router {
 		} else {
 			playbackHandler = handlers.NewPlaybackHandler(deps.SessionMgr)
 		}
+		if deps.DB != nil {
+			playbackHandler.PlanStoreV3 = planstore.NewPostgres(deps.DB)
+		}
+		// Maintenance also bounds the in-memory fallback store: without it a
+		// DB-less deployment accumulates attempts and replans forever.
+		playbackHandler.StartV3Maintenance(deps.AppContext)
 
 		// Wire UserStoreProvider for progress/history persistence.
 		if deps.UserStoreProvider != nil {
@@ -850,11 +899,13 @@ func NewRouter(deps Dependencies) chi.Router {
 			playbackHandler.PlaybackConfig = func() config.PlaybackConfig {
 				return deps.CurrentConfig().Playback
 			}
-			if cleaned, err := playbackHandler.CleanupOrphanedTranscodes(); err != nil {
-				slog.Warn("playback transcode cleanup failed", "dir", deps.Config.Playback.TranscodeDir, "error", err)
-			} else if cleaned > 0 {
-				slog.Info("playback transcode cleanup removed orphaned dirs", "dir", deps.Config.Playback.TranscodeDir, "count", cleaned)
-			}
+			// In integrated mode this and the jellycompat sweep both scan the same
+			// TranscodeDir but each snapshots only its own manager's live set, so a
+			// >24h idle dir owned by the other manager can be reaped. Bounded and
+			// safe: active dirs stay mtime-fresh (spared) and either side rebuilds
+			// from its token/recipe, so the worst case is a wasted rebuild. A shared
+			// active-set source across both managers would remove even that.
+			playback.StartPeriodicOrphanCleanup(deps.AppContext, "api", deps.Config.Playback.TranscodeDir, playbackHandler.CleanupOrphanedTranscodes, playback.OrphanCleanupInterval)
 		}
 		playbackHandler.ProbeEnsurer = deps.ProbeEnsurer
 		playbackHandler.ChapterThumbnailQueuer = deps.ChapterThumbnailQueuer
@@ -949,6 +1000,7 @@ func NewRouter(deps Dependencies) chi.Router {
 		adminHandler.BootstrapSensitiveValues = deps.BootstrapSensitiveValues
 		adminHandler.RestartStatus = restartStatus
 		adminHandler.CatalogSearchStatus = catalogSearchService
+		adminHandler.DiagnosticsStore = diagnosticsStore
 		if settingsRepo != nil {
 			adminHandler.SettingsRepo = settingsRepo
 		}
@@ -1028,6 +1080,7 @@ func NewRouter(deps Dependencies) chi.Router {
 			deps.PluginImageResolver,
 			detailSvc,
 		)
+		adminImageHandler.EventsHub = deps.EventsHub
 	}
 
 	var adminIntroHandler *handlers.AdminIntroHandler
@@ -1757,6 +1810,28 @@ func NewRouter(deps Dependencies) chi.Router {
 			})
 		}
 
+		// Client diagnostics are account-scoped and must work before profile
+		// selection, so this route intentionally uses auth only plus the
+		// generic rate limiter, not viewer/profile middleware.
+		if diagnosticsHandler != nil && authMiddleware != nil {
+			r.Group(func(r chi.Router) {
+				r.Use(authMiddleware.RequireAuth)
+				// Demo mode blocks non-admin report uploads (a write to the
+				// private bucket and DB); the read-only status endpoint stays
+				// available because DemoGuard always lets GETs through.
+				if demoGuard != nil {
+					r.Use(demoGuard.Guard)
+				}
+				if deps.RateLimitMW != nil {
+					r.Use(deps.RateLimitMW.Handler)
+				}
+				r.Route("/diagnostics", func(r chi.Router) {
+					r.Get("/status", diagnosticsHandler.HandleStatus)
+					r.Post("/reports", diagnosticsHandler.HandleUpload)
+				})
+			})
+		}
+
 		// All remaining routes require auth.
 		if authMiddleware != nil {
 			r.Group(func(r chi.Router) {
@@ -1817,6 +1892,10 @@ func NewRouter(deps Dependencies) chi.Router {
 						r.Get("/preferences", notificationsHandler.HandleGetPreferences)
 						r.Put("/preferences", notificationsHandler.HandleUpdatePreferences)
 						r.Get("/push/apple/display/{delivery_id}", notificationsHandler.HandleApplePushDisplay)
+						// Platform-generic registration used by the Android
+						// client; Apple keeps its dedicated route above.
+						r.Post("/push/devices", notificationsHandler.HandleRegisterPushDevice)
+						r.Delete("/push/devices/{device_id}", notificationsHandler.HandleUnregisterPushDevice)
 						r.Get("/email-preferences", notificationsHandler.HandleGetEmailPreferences)
 						r.Put("/email-preferences", notificationsHandler.HandleUpdateEmailPreferences)
 						r.Put("/email-preferences/address", notificationsHandler.HandleRequestEmailAddress)
@@ -2279,6 +2358,7 @@ func NewRouter(deps Dependencies) chi.Router {
 					playbackHandler.FFmpegLogSink = deps.FFmpegLogSink
 
 					r.Route("/playback", func(r chi.Router) {
+						r.Get("/capability", playbackHandler.HandlePlaybackCapabilityV3)
 						// HLS transcode delivery — no profile auth needed;
 						// session ID (UUID) serves as the access token, same
 						// pattern as /stream/{session_id}.
@@ -2292,6 +2372,8 @@ func NewRouter(deps Dependencies) chi.Router {
 						r.Group(func(r chi.Router) {
 							r.Use(apimw.RequireProfile)
 							r.Post("/start", playbackHandler.HandleStartPlayback)
+							r.Post("/{session_id}/replan", playbackHandler.HandleReplanPlaybackV3)
+							r.Post("/route-events", playbackHandler.HandlePlaybackRouteEventV3)
 							r.Post("/{session_id}/progress", playbackHandler.HandleUpdateProgress)
 							r.Patch("/{session_id}/audio", playbackHandler.HandleChangeAudioTrack)
 							r.Delete("/{session_id}", playbackHandler.HandleStopPlayback)
@@ -2475,6 +2557,7 @@ func NewRouter(deps Dependencies) chi.Router {
 							}
 
 							r.Get("/sessions", adminHandler.HandleListSessions)
+							r.Get("/sessions/capabilities", adminHandler.HandleGetSessionsCapabilities)
 							r.Get("/playback-history", adminHandler.HandleListPlaybackHistory)
 							r.Get("/unmatched", adminHandler.HandleListUnmatched)
 							r.Get("/stats", adminHandler.HandleGetStats)
@@ -2537,6 +2620,7 @@ func NewRouter(deps Dependencies) chi.Router {
 								applePushHandler := handlers.NewAdminApplePushHandler(deps.Notifications, settingsRepo)
 								if deps.Notifications != nil {
 									r.Post("/notifications/push/apple/test", applePushHandler.HandleTest)
+									r.Post("/notifications/push/fcm/test", applePushHandler.HandleTestAndroid)
 								}
 								if settingsRepo != nil {
 									r.Post("/notifications/push/relay/register", applePushHandler.HandleRegisterRelay)
@@ -2863,6 +2947,9 @@ func NewRouter(deps Dependencies) chi.Router {
 								r.Get("/logs/app", adminLogsHandler.HandleListOperationalLogs)
 								r.Get("/logs/audit", adminLogsHandler.HandleListAuditLogs)
 								r.Get("/logs/ws", adminLogsHandler.HandleLogStreamWebSocket)
+							}
+							if diagnosticsHandler != nil {
+								handlers.RegisterAdminDiagnosticsRoutes(r, diagnosticsHandler)
 							}
 							if adminPlaybackControlHandler != nil {
 								r.Post("/sessions/{session_id}/pause", adminPlaybackControlHandler.HandlePauseSession)

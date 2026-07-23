@@ -43,6 +43,7 @@
     "pdfjs-dist": "^5.7.284",
     "radix-ui": "^1.4.3",
     "react": "^19.0.0",
+    "react-day-picker": "^10.0.1",
     "react-dom": "^19.0.0",
     "react-qr-code": "^2.0.18",
     "react-router": "^7.15.1",
