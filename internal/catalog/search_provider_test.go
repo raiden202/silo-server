@@ -446,8 +446,11 @@ func TestCatalogSearchEpisodeDocumentsNeverCarryVectors(t *testing.T) {
 	if count != 1 || docs[0].Vectors == nil {
 		t.Fatalf("media vector assignment = count %d, vectors %#v", count, docs[0].Vectors)
 	}
-	if docs[1].Vectors != nil {
-		t.Fatalf("episode vectors = %#v, want omitted", docs[1].Vectors)
+	// Episodes must carry the explicit `_vectors.<embedder>: null` opt-out:
+	// omitting _vectors entirely fails indexing under a userProvided embedder.
+	episodeVector, ok := docs[1].Vectors[DefaultMeilisearchEmbedder]
+	if !ok || episodeVector != nil {
+		t.Fatalf("episode vectors = %#v, want explicit nil opt-out", docs[1].Vectors)
 	}
 }
 

@@ -810,13 +810,14 @@ func (i *CatalogSearchIndexer) attachDocumentVectors(ctx context.Context, docs [
 			ids = append(ids, doc.ContentID)
 		}
 	}
-	if len(ids) == 0 {
-		return nil
+	var vectors map[string][]float32
+	if len(ids) > 0 {
+		if vectors, err = loadCatalogSearchVectors(ctx, i.pool, ids); err != nil {
+			return err
+		}
 	}
-	vectors, err := loadCatalogSearchVectors(ctx, i.pool, ids)
-	if err != nil {
-		return err
-	}
+	// Always run the per-document pass: even an episode-only batch needs the
+	// explicit `_vectors.<embedder>: null` opt-out on every document.
 	setCatalogSearchDocumentVectors(docs, vectors, embedder)
 	return nil
 }
@@ -862,7 +863,11 @@ func setCatalogSearchDocumentVectors(docs []catalogSearchDocument, vectors map[s
 	count := 0
 	for idx := range docs {
 		if docs[idx].Type == "episode" {
-			docs[idx].Vectors = nil
+			// Episodes are keyword-only, but a userProvided embedder requires
+			// every document to either supply vectors or opt out explicitly
+			// with `_vectors.<embedder>: null`; omitting _vectors entirely
+			// fails the whole indexing task.
+			docs[idx].Vectors = map[string][]float32{embedder: nil}
 			continue
 		}
 		vector := vectors[docs[idx].ContentID]
