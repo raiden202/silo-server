@@ -2,6 +2,7 @@ package jellycompat
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -93,6 +94,15 @@ func (h *PlaybackHandler) dispatchCompatScrobbleEvent(
 	action compatScrobbleAction,
 	event watchsync.ScrobbleEvent,
 ) error {
+	return h.dispatchCompatScrobbleEventConfirmed(ctx, action, event, false)
+}
+
+func (h *PlaybackHandler) dispatchCompatScrobbleEventConfirmed(
+	ctx context.Context,
+	action compatScrobbleAction,
+	event watchsync.ScrobbleEvent,
+	confirmStop bool,
+) error {
 	if h == nil || h.WatchScrobbler == nil {
 		return nil
 	}
@@ -103,7 +113,13 @@ func (h *PlaybackHandler) dispatchCompatScrobbleEvent(
 	case compatScrobblePause:
 		err = h.WatchScrobbler.ScrobblePause(scrobbleCtx, event)
 	case compatScrobbleStop:
-		err = h.WatchScrobbler.ScrobbleStop(scrobbleCtx, event)
+		if confirmer, ok := h.WatchScrobbler.(PlaybackWatchStopConfirmer); confirmStop && ok {
+			err = confirmer.ScrobbleStopConfirmed(scrobbleCtx, event)
+		} else if confirmStop {
+			err = errors.New("watch scrobbler does not support confirmed stops")
+		} else {
+			err = h.WatchScrobbler.ScrobbleStop(scrobbleCtx, event)
+		}
 	default:
 		err = h.WatchScrobbler.ScrobbleStart(scrobbleCtx, event)
 	}

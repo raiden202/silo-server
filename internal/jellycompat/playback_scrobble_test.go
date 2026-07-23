@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/watchsync"
 )
@@ -40,6 +41,30 @@ type poisonBatchCompatWatchScrobbler struct {
 	stopCalls            atomic.Int32
 }
 
+type confirmingCompatWatchScrobbler struct {
+	confirmedErr    error
+	confirmedCalls  int
+	normalStopCalls int
+}
+
+type unconfirmedCompatWatchScrobbler struct{}
+
+type contextErrorFileResolver struct{}
+
+func (contextErrorFileResolver) GetByID(ctx context.Context, _ int) (*models.MediaFile, error) {
+	return nil, ctx.Err()
+}
+
+type cancelingErrorFileResolver struct {
+	cancel context.CancelFunc
+	err    error
+}
+
+func (r cancelingErrorFileResolver) GetByID(context.Context, int) (*models.MediaFile, error) {
+	r.cancel()
+	return nil, r.err
+}
+
 func (*failingCompatWatchScrobbler) ScrobbleStart(context.Context, watchsync.ScrobbleEvent) error {
 	return nil
 }
@@ -51,6 +76,10 @@ func (*failingCompatWatchScrobbler) ScrobblePause(context.Context, watchsync.Scr
 func (s *failingCompatWatchScrobbler) ScrobbleStop(context.Context, watchsync.ScrobbleEvent) error {
 	s.stopCalls.Add(1)
 	return errors.New("queue unavailable")
+}
+
+func (s *failingCompatWatchScrobbler) ScrobbleStopConfirmed(ctx context.Context, event watchsync.ScrobbleEvent) error {
+	return s.ScrobbleStop(ctx, event)
 }
 
 func (*poisonBatchCompatWatchScrobbler) ScrobbleStart(context.Context, watchsync.ScrobbleEvent) error {
@@ -66,6 +95,40 @@ func (s *poisonBatchCompatWatchScrobbler) ScrobbleStop(_ context.Context, event 
 	if event.PlaybackSessionID != s.deliverableSessionID {
 		return errors.New("poison terminal event")
 	}
+	return nil
+}
+
+func (s *poisonBatchCompatWatchScrobbler) ScrobbleStopConfirmed(ctx context.Context, event watchsync.ScrobbleEvent) error {
+	return s.ScrobbleStop(ctx, event)
+}
+
+func (*confirmingCompatWatchScrobbler) ScrobbleStart(context.Context, watchsync.ScrobbleEvent) error {
+	return nil
+}
+
+func (*confirmingCompatWatchScrobbler) ScrobblePause(context.Context, watchsync.ScrobbleEvent) error {
+	return nil
+}
+
+func (s *confirmingCompatWatchScrobbler) ScrobbleStop(context.Context, watchsync.ScrobbleEvent) error {
+	s.normalStopCalls++
+	return nil
+}
+
+func (s *confirmingCompatWatchScrobbler) ScrobbleStopConfirmed(context.Context, watchsync.ScrobbleEvent) error {
+	s.confirmedCalls++
+	return s.confirmedErr
+}
+
+func (unconfirmedCompatWatchScrobbler) ScrobbleStart(context.Context, watchsync.ScrobbleEvent) error {
+	return nil
+}
+
+func (unconfirmedCompatWatchScrobbler) ScrobblePause(context.Context, watchsync.ScrobbleEvent) error {
+	return nil
+}
+
+func (unconfirmedCompatWatchScrobbler) ScrobbleStop(context.Context, watchsync.ScrobbleEvent) error {
 	return nil
 }
 
@@ -115,6 +178,10 @@ func (s *channelCompatWatchScrobbler) ScrobbleStop(_ context.Context, event watc
 	return nil
 }
 
+func (s *channelCompatWatchScrobbler) ScrobbleStopConfirmed(ctx context.Context, event watchsync.ScrobbleEvent) error {
+	return s.ScrobbleStop(ctx, event)
+}
+
 func (s *recordingCompatWatchScrobbler) ScrobbleStart(_ context.Context, event watchsync.ScrobbleEvent) error {
 	s.calls = append(s.calls, compatScrobbleCall{action: "start", event: event})
 	return nil
@@ -128,6 +195,10 @@ func (s *recordingCompatWatchScrobbler) ScrobblePause(_ context.Context, event w
 func (s *recordingCompatWatchScrobbler) ScrobbleStop(_ context.Context, event watchsync.ScrobbleEvent) error {
 	s.calls = append(s.calls, compatScrobbleCall{action: "stop", event: event})
 	return nil
+}
+
+func (s *recordingCompatWatchScrobbler) ScrobbleStopConfirmed(ctx context.Context, event watchsync.ScrobbleEvent) error {
+	return s.ScrobbleStop(ctx, event)
 }
 
 func TestEnsureUpstreamPlaybackStartsWatchProviderScrobble(t *testing.T) {
@@ -199,6 +270,66 @@ func TestFailedTranscodeStartupClosesWatchProviderScrobble(t *testing.T) {
 	}
 	if len(scrobbler.calls) != 2 || scrobbler.calls[1].action != "stop" {
 		t.Fatalf("failed transcode scrobbles = %+v, want start then stop", scrobbler.calls)
+	}
+}
+
+func TestCanceledTranscodeStartupKeepsWatchProviderSessionRetryable(t *testing.T) {
+	mgr := &testCompatSessionManager{}
+	h, store := newActiveEncodingsHandler(mgr)
+	scrobbler := &recordingCompatWatchScrobbler{}
+	h.WatchScrobbler = scrobbler
+	h.fileResolver = contextErrorFileResolver{}
+	source := PlaybackMediaSource{ID: "source-1", FileID: 42, Version: testCompatVersion()}
+	store.Put(PlaybackSession{
+		ID:           "play-1",
+		CompatToken:  "token-1",
+		ItemID:       "movie-1",
+		MediaSources: []PlaybackMediaSource{source},
+	})
+	compatSession := &Session{Token: "token-1", StreamAppUserID: 7, ProfileID: "profile-1"}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := h.ensureTranscodeManifest(ctx, compatSession, "play-1", source); !errors.Is(err, context.Canceled) {
+		t.Fatalf("ensureTranscodeManifest error = %v, want context canceled", err)
+	}
+	if len(scrobbler.calls) != 1 || scrobbler.calls[0].action != "start" {
+		t.Fatalf("canceled transcode scrobbles = %+v, want start without terminal stop", scrobbler.calls)
+	}
+	if _, ok := store.Get("play-1"); !ok {
+		t.Fatal("canceled transcode attempt removed the retryable play session")
+	}
+	if len(mgr.stopCalls) != 0 {
+		t.Fatalf("canceled transcode stopped upstream sessions: %v", mgr.stopCalls)
+	}
+}
+
+func TestFailedTranscodeStartupStillClosesWhenRequestCancelsAfterFailure(t *testing.T) {
+	mgr := &testCompatSessionManager{}
+	h, store := newActiveEncodingsHandler(mgr)
+	scrobbler := &recordingCompatWatchScrobbler{}
+	h.WatchScrobbler = scrobbler
+	source := PlaybackMediaSource{ID: "source-1", FileID: 42, Version: testCompatVersion()}
+	store.Put(PlaybackSession{
+		ID:           "play-1",
+		CompatToken:  "token-1",
+		ItemID:       "movie-1",
+		MediaSources: []PlaybackMediaSource{source},
+	})
+	compatSession := &Session{Token: "token-1", StreamAppUserID: 7, ProfileID: "profile-1"}
+	startupErr := errors.New("file lookup failed")
+	ctx, cancel := context.WithCancel(context.Background())
+	h.fileResolver = cancelingErrorFileResolver{cancel: cancel, err: startupErr}
+
+	if _, err := h.ensureTranscodeManifest(ctx, compatSession, "play-1", source); !errors.Is(err, startupErr) {
+		t.Fatalf("ensureTranscodeManifest error = %v, want file lookup failure", err)
+	}
+	if len(scrobbler.calls) != 2 || scrobbler.calls[0].action != "start" ||
+		scrobbler.calls[1].action != "stop" {
+		t.Fatalf("failed transcode scrobbles = %+v, want start then stop", scrobbler.calls)
+	}
+	if _, ok := store.Get("play-1"); ok {
+		t.Fatal("failed transcode left the play session retryable after a genuine startup error")
 	}
 }
 
@@ -701,6 +832,134 @@ func TestTerminalScrobbleRecoveryDeliversPersistedEventAfterRestart(t *testing.T
 	}
 }
 
+func TestTerminalScrobbleRecoveryWaitsForConfirmedProviderStop(t *testing.T) {
+	store := NewPlaybackSessionStore(time.Hour, nil)
+	store.Put(PlaybackSession{ID: "play-1", CompatToken: "token-1"})
+	event := watchsync.ScrobbleEvent{PlaybackSessionID: "upstream-1"}
+	if _, err := store.StageTerminal("play-1", "token-1", event, true); err != nil {
+		t.Fatalf("stage terminal event: %v", err)
+	}
+	scrobbler := &confirmingCompatWatchScrobbler{confirmedErr: errors.New("provider unavailable")}
+	handler := &PlaybackHandler{playbackStore: store, WatchScrobbler: scrobbler}
+
+	if err := recoverPendingTerminalScrobbles(context.Background(), handler); err != nil {
+		t.Fatalf("recover terminal events: %v", err)
+	}
+	if scrobbler.confirmedCalls != 1 {
+		t.Fatalf("confirmed stop calls = %d, want 1", scrobbler.confirmedCalls)
+	}
+	if _, ok := store.GetFinalizable("play-1", "token-1"); !ok {
+		t.Fatal("failed confirmed stop deleted the durable terminal event")
+	}
+
+	scrobbler.confirmedErr = nil
+	if err := recoverPendingTerminalScrobbles(context.Background(), handler); err != nil {
+		t.Fatalf("retry terminal event: %v", err)
+	}
+	if _, ok := store.GetFinalizable("play-1", "token-1"); ok {
+		t.Fatal("successful confirmed stop left the terminal event pending")
+	}
+}
+
+func TestTerminalScrobbleRecoveryRetainsEventWithoutConfirmationSupport(t *testing.T) {
+	store := NewPlaybackSessionStore(time.Hour, nil)
+	store.Put(PlaybackSession{ID: "play-1", CompatToken: "token-1"})
+	event := watchsync.ScrobbleEvent{PlaybackSessionID: "upstream-1"}
+	if _, err := store.StageTerminal("play-1", "token-1", event, true); err != nil {
+		t.Fatalf("stage terminal event: %v", err)
+	}
+	handler := &PlaybackHandler{
+		playbackStore:  store,
+		WatchScrobbler: unconfirmedCompatWatchScrobbler{},
+	}
+
+	if err := recoverPendingTerminalScrobbles(context.Background(), handler); err != nil {
+		t.Fatalf("recover terminal events: %v", err)
+	}
+	if _, ok := store.GetFinalizable("play-1", "token-1"); !ok {
+		t.Fatal("authoritative event was deleted without confirmed provider delivery")
+	}
+}
+
+func TestTerminalScrobbleRecoveryKeepsFallbackReplaceable(t *testing.T) {
+	store := NewPlaybackSessionStore(time.Hour, nil)
+	store.Put(PlaybackSession{ID: "play-1", CompatToken: "token-1"})
+	event := watchsync.ScrobbleEvent{
+		PlaybackSessionID: "upstream-1",
+		OccurredAt:        time.Now().Add(-time.Minute),
+	}
+	if _, err := store.StageTerminal("play-1", "token-1", event, false); err != nil {
+		t.Fatalf("stage fallback terminal event: %v", err)
+	}
+	scrobbler := &confirmingCompatWatchScrobbler{}
+	handler := &PlaybackHandler{
+		playbackStore:         store,
+		WatchScrobbler:        scrobbler,
+		terminalFallbackDelay: time.Second,
+	}
+
+	if err := recoverPendingTerminalScrobbles(context.Background(), handler); err != nil {
+		t.Fatalf("recover fallback terminal event: %v", err)
+	}
+	if scrobbler.normalStopCalls != 1 || scrobbler.confirmedCalls != 0 {
+		t.Fatalf(
+			"fallback stop calls = normal:%d confirmed:%d, want ordinary delivery only",
+			scrobbler.normalStopCalls, scrobbler.confirmedCalls,
+		)
+	}
+	terminal, ok := store.GetFinalizable("play-1", "token-1")
+	if !ok || !terminal.TerminalFallbackSent || terminal.TerminalAuthoritative {
+		t.Fatalf("fallback terminal state = %+v, %v; want replaceable fallback", terminal, ok)
+	}
+}
+
+func TestStartTerminalScrobbleRecoverySignalsInitialScanCompletion(t *testing.T) {
+	store := NewPlaybackSessionStore(time.Hour, nil)
+	store.Put(PlaybackSession{ID: "play-1", CompatToken: "token-1"})
+	event := watchsync.ScrobbleEvent{PlaybackSessionID: "upstream-1"}
+	if _, err := store.StageTerminal("play-1", "token-1", event, true); err != nil {
+		t.Fatalf("stage terminal event: %v", err)
+	}
+	scrobbler := &channelCompatWatchScrobbler{stopEvents: make(chan watchsync.ScrobbleEvent, 1)}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	initialScanDone := StartTerminalScrobbleRecovery(ctx, store, scrobbler, time.Hour)
+	select {
+	case <-initialScanDone:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for initial terminal recovery")
+	}
+
+	if _, ok := store.GetFinalizable("play-1", "token-1"); ok {
+		t.Fatal("initial terminal recovery was still pending after completion signal")
+	}
+}
+
+func TestInitialTerminalScrobbleRecoveryDrainsMultipleBatches(t *testing.T) {
+	store := NewPlaybackSessionStore(time.Hour, nil)
+	for i := 0; i <= compatTerminalRecoveryBatchSize; i++ {
+		id := fmt.Sprintf("play-%03d", i)
+		store.Put(PlaybackSession{ID: id, CompatToken: "token-1"})
+		event := watchsync.ScrobbleEvent{PlaybackSessionID: "upstream-" + id}
+		if _, err := store.StageTerminal(id, "token-1", event, true); err != nil {
+			t.Fatalf("stage terminal event %s: %v", id, err)
+		}
+	}
+	scrobbler := &recordingCompatWatchScrobbler{}
+	handler := &PlaybackHandler{playbackStore: store, WatchScrobbler: scrobbler}
+
+	if err := recoverInitialPendingTerminalScrobbles(context.Background(), handler); err != nil {
+		t.Fatalf("recover initial terminal events: %v", err)
+	}
+	if len(scrobbler.calls) != compatTerminalRecoveryBatchSize+1 {
+		t.Fatalf(
+			"recovered terminal calls = %d, want %d",
+			len(scrobbler.calls), compatTerminalRecoveryBatchSize+1,
+		)
+	}
+}
+
 func TestTerminalScrobbleRecoveryHonorsFallbackGracePeriod(t *testing.T) {
 	store := NewPlaybackSessionStore(time.Hour, nil)
 	store.Put(PlaybackSession{ID: "play-1", CompatToken: "token-1"})
@@ -715,7 +974,7 @@ func TestTerminalScrobbleRecoveryHonorsFallbackGracePeriod(t *testing.T) {
 	handler := &PlaybackHandler{
 		playbackStore:         store,
 		WatchScrobbler:        scrobbler,
-		terminalFallbackDelay: 100 * time.Millisecond,
+		terminalFallbackDelay: time.Second,
 	}
 
 	if err := recoverPendingTerminalScrobbles(context.Background(), handler); err != nil {
@@ -728,7 +987,7 @@ func TestTerminalScrobbleRecoveryHonorsFallbackGracePeriod(t *testing.T) {
 	}
 	select {
 	case <-scrobbler.stopEvents:
-	case <-time.After(time.Second):
+	case <-time.After(2 * time.Second):
 		t.Fatal("fallback was not delivered after grace period")
 	}
 }

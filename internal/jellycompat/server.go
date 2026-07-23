@@ -171,12 +171,15 @@ func (s *Server) SessionStore() *SessionStore {
 
 // StartBackgroundTasks starts background goroutines tied to the server lifecycle.
 // Call this once after constructing the server; goroutines stop when ctx is cancelled.
-func (s *Server) StartBackgroundTasks(ctx context.Context) {
+// The returned channel closes after the initial terminal recovery scan so
+// callers can order broader stale-session sweeps behind authoritative compat
+// recovery without delaying HTTP startup.
+func (s *Server) StartBackgroundTasks(ctx context.Context) <-chan struct{} {
 	if s.deps.DB != nil {
 		repo := NewSessionRepository(s.deps.DB, s.deps.SecretCipher)
 		StartSessionCleanupWithPlaybackStore(ctx, repo, s.deps.PlaybackStore, 1*time.Hour)
 	}
-	StartTerminalScrobbleRecovery(ctx, s.deps.PlaybackStore, s.deps.WatchScrobbler, 30*time.Second)
+	return StartTerminalScrobbleRecovery(ctx, s.deps.PlaybackStore, s.deps.WatchScrobbler, 30*time.Second)
 }
 
 // NewDependencies fills in sensible defaults for optional compat dependencies.

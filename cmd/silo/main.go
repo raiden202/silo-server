@@ -1584,6 +1584,7 @@ func main() {
 
 	// Step 6: Create playback session manager and wire into dependencies.
 	sessionMgr := playback.NewSessionManager(6, 2) // defaults from plan: max_streams=6, max_transcodes=2
+	var compatTerminalRecoveryReady <-chan struct{}
 	if userStoreProvider != nil {
 		deps.UserStoreProvider = userStoreProvider
 	}
@@ -1595,6 +1596,13 @@ func main() {
 			WithWatchState(watchstate.NewService(userStoreProvider).WithStableIdentityResolver(historyIdentity)).
 			WithUserStoreProvider(userStoreProvider)
 		backgroundInit = append(backgroundInit, func(ctx context.Context) {
+			if compatTerminalRecoveryReady != nil {
+				select {
+				case <-compatTerminalRecoveryReady:
+				case <-ctx.Done():
+					return
+				}
+			}
 			if err := watchProviderService.SweepOpenScrobbles(ctx); err != nil {
 				slog.WarnContext(ctx, "failed to sweep open watch provider scrobbles", "component", "app", "error", err)
 			}
@@ -2541,7 +2549,7 @@ func main() {
 
 		compat := jellycompat.NewServerWithDependencies(compatDeps)
 		compatServer = compat
-		compat.StartBackgroundTasks(context.Background())
+		compatTerminalRecoveryReady = compat.StartBackgroundTasks(context.Background())
 		compatSrv = compat.HTTPServer()
 		compatSrv.ReadTimeout = 30 * time.Second
 		compatSrv.WriteTimeout = 0

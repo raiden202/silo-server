@@ -160,6 +160,13 @@ type PlaybackWatchScrobbler interface {
 	ScrobbleStop(ctx context.Context, event watchsync.ScrobbleEvent) error
 }
 
+// PlaybackWatchStopConfirmer is implemented by watch-sync services that can
+// wait for a terminal stop to be accepted by every provider. Jellycompat uses
+// it before deleting its durable terminal record.
+type PlaybackWatchStopConfirmer interface {
+	ScrobbleStopConfirmed(ctx context.Context, event watchsync.ScrobbleEvent) error
+}
+
 // PlaybackHandler serves Jellyfin playback negotiation endpoints.
 type PlaybackHandler struct {
 	cfg                     *config.Config

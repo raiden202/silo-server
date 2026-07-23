@@ -1079,7 +1079,12 @@ func (h *PlaybackHandler) deliverCompatTerminal(
 		return
 	}
 
-	err = h.dispatchCompatScrobbleEvent(ctx, compatScrobbleStop, *playSession.TerminalScrobbleEvent)
+	err = h.dispatchCompatScrobbleEventConfirmed(
+		ctx,
+		compatScrobbleStop,
+		*playSession.TerminalScrobbleEvent,
+		playSession.TerminalAuthoritative,
+	)
 	if err != nil {
 		h.playbackStore.ReleaseTerminalClaim(
 			playSessionID, compatToken, ownedClaimUntil, playSession.TerminalClaimVersion, false,
@@ -1541,7 +1546,10 @@ func (h *PlaybackHandler) ensureTranscodeManifest(ctx context.Context, compatSes
 
 	transcodeSession, err := h.ensureTranscodeSession(ctx, playSessionID, playSession.UpstreamSessionID, source)
 	if err != nil {
-		h.teardownPlaySession(ctx, playSession, nil, nil)
+		requestErr := ctx.Err()
+		if requestErr == nil || !errors.Is(err, requestErr) {
+			h.teardownPlaySession(ctx, playSession, nil, nil)
+		}
 		return nil, err
 	}
 
