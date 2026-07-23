@@ -248,7 +248,7 @@ func (d *DurableCompatPlaybackStore) Get(id string) (*PlaybackSession, bool) {
 		return d.mem.Get(id)
 	}
 	cached, cachedOK := d.mem.Get(id)
-	if cachedOK && !d.shouldRevalidateID(id) {
+	if cachedOK && cached.UpstreamSessionID != "" && !d.shouldRevalidateID(id) {
 		return cached, cachedOK
 	}
 	if !cachedOK {

@@ -51,6 +51,20 @@ func recoverPendingTerminalScrobbles(ctx context.Context, handler *PlaybackHandl
 		return err
 	}
 	for _, session := range pending {
+		if !session.TerminalAuthoritative && session.TerminalScrobbleEvent != nil {
+			deliverAfter := session.TerminalScrobbleEvent.OccurredAt.Add(handler.compatTerminalFallbackDelay())
+			if delay := time.Until(deliverAfter); delay > 0 {
+				handler.scheduleCompatTerminalDelivery(
+					session.ID,
+					session.CompatToken,
+					false,
+					session.ExpiresAt,
+					delay,
+					0,
+				)
+				continue
+			}
+		}
 		handler.deliverCompatTerminal(
 			ctx,
 			session.ID,

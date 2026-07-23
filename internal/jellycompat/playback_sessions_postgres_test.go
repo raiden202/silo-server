@@ -86,6 +86,42 @@ func TestDurableCompatPlaybackStore_SurvivesRestart(t *testing.T) {
 	}
 }
 
+func TestDurableCompatPlaybackStoreRevalidatesUnstartedNegotiationAcrossInstances(t *testing.T) {
+	pool := newCompatTestPool(t)
+	ctx := context.Background()
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	firstID := "compat-first-" + suffix
+	secondID := "compat-second-" + suffix
+	t.Cleanup(func() {
+		_, _ = pool.Exec(
+			ctx,
+			`DELETE FROM jellycompat_playback_sessions WHERE id = ANY($1)`,
+			[]string{firstID, secondID},
+		)
+	})
+	first := PlaybackSession{
+		ID:             firstID,
+		CompatToken:    "owner-" + suffix,
+		ClientDeviceID: "device-1",
+		RouteItemID:    "route-1",
+	}
+	seed := NewDurableCompatPlaybackStore(pool, time.Hour, nil)
+	seed.PutNegotiated(first)
+
+	stale := NewDurableCompatPlaybackStore(pool, time.Hour, nil)
+	if _, ok := stale.Get(firstID); !ok {
+		t.Fatal("first negotiation was not cached")
+	}
+	replacer := NewDurableCompatPlaybackStore(pool, time.Hour, nil)
+	second := first
+	second.ID = secondID
+	replacer.PutNegotiated(second)
+
+	if _, ok := stale.Get(firstID); ok {
+		t.Fatal("superseded unstarted negotiation remained routable from another instance's cache")
+	}
+}
+
 func TestDurableCompatPlaybackStorePutNegotiatedReplacesAcrossInstances(t *testing.T) {
 	pool := newCompatTestPool(t)
 	ctx := context.Background()

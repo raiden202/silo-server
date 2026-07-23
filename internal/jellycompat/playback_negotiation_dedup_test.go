@@ -58,6 +58,16 @@ func TestPlaybackSessionStorePutNegotiatedPreservesDistinctOrStartedPlays(t *tes
 				UpstreamSessionID: "upstream-first",
 			},
 		},
+		{
+			name: "terminal session",
+			first: PlaybackSession{
+				ID:             "first",
+				CompatToken:    "token",
+				ClientDeviceID: "web-device",
+				RouteItemID:    "route",
+				Terminal:       true,
+			},
+		},
 	}
 
 	for _, tc := range tests {
@@ -71,7 +81,7 @@ func TestPlaybackSessionStorePutNegotiatedPreservesDistinctOrStartedPlays(t *tes
 				RouteItemID:    "route",
 			})
 
-			if _, ok := store.Get("first"); !ok {
+			if _, ok := store.GetFinalizable("first", "token"); !ok {
 				t.Fatal("distinct or already-started play was replaced")
 			}
 			if _, ok := store.Get("second"); !ok {

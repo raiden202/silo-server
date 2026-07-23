@@ -337,10 +337,9 @@ func TestHandlePlaybackReport_StopViaAliasTearsDown(t *testing.T) {
 	}
 }
 
-// TestHandlePlaybackReport_StopViaUniqueRouteTearsDown proves a client that
-// replaces its PlaySessionId can still finalize the single caller-owned play
-// identified by its item/source route.
-func TestHandlePlaybackReport_StopViaUniqueRouteTearsDown(t *testing.T) {
+// TestHandlePlaybackReport_StopViaUniqueRouteDoesNotTearDown proves a delayed
+// Stopped report cannot use a same-item route to tear down a newer play.
+func TestHandlePlaybackReport_StopViaUniqueRouteDoesNotTearDown(t *testing.T) {
 	handler, mgr, encodedItemID, sourceID := newReportLivenessHandler("upstream-1", true)
 
 	req := httptest.NewRequest(http.MethodPost, "/Sessions/Playing/Stopped", strings.NewReader(
@@ -353,14 +352,14 @@ func TestHandlePlaybackReport_StopViaUniqueRouteTearsDown(t *testing.T) {
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
-	if len(mgr.stopCalls) != 1 || mgr.stopCalls[0] != "upstream-1" {
-		t.Fatalf("StopSession calls = %v, want upstream-1", mgr.stopCalls)
+	if len(mgr.stopCalls) != 0 {
+		t.Fatalf("StopSession calls = %v, want none", mgr.stopCalls)
 	}
-	if _, ok := handler.playbackStore.Get("play-1"); ok {
-		t.Fatal("unique route-only Stopped report left the play session in place")
+	if _, ok := handler.playbackStore.Get("play-1"); !ok {
+		t.Fatal("route-only Stopped report tore down the active play session")
 	}
-	if len(mgr.progressUpdates) != 1 || mgr.progressUpdates[0].sessionID != "upstream-1" {
-		t.Fatalf("progress updates = %+v, want one update on upstream-1", mgr.progressUpdates)
+	if len(mgr.progressUpdates) != 0 {
+		t.Fatalf("progress updates = %+v, want none", mgr.progressUpdates)
 	}
 }
 

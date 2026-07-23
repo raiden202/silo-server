@@ -223,24 +223,31 @@ func (h *PlaybackHandler) HandleMasterManifest(w http.ResponseWriter, r *http.Re
 			writeCompatUpstreamError(w, err)
 			return
 		}
+		failRemoteStart := func() {
+			h.teardownPlaySession(context.WithoutCancel(r.Context()), playSession, nil, nil)
+		}
 		upstreamSession, upstreamErr := h.sessionMgr.GetSession(playSession.UpstreamSessionID)
 		if upstreamErr == nil {
 			plan := h.NodePlanner.PlanSession(playSession.UpstreamSessionID, upstreamSession.TranscodeNodeURL, true, source.Version.Bitrate)
 			if tcNode := plan.TranscodeNode; tcNode != nil {
 				if h.fileResolver == nil {
+					failRemoteStart()
 					writeError(w, http.StatusInternalServerError, "ServerError", "File resolver not available")
 					return
 				}
 				file, fileErr := h.fileResolver.GetByID(r.Context(), source.FileID)
 				if fileErr != nil {
+					failRemoteStart()
 					writeError(w, http.StatusNotFound, "NotFound", "Media file not found")
 					return
 				}
 				if err := h.sessionMgr.SetTranscodeNodeURL(playSession.UpstreamSessionID, tcNode.URL); err != nil {
+					failRemoteStart()
 					writeError(w, http.StatusInternalServerError, "ServerError", "Failed to bind transcode node")
 					return
 				}
 				if err := h.startRemoteTranscode(r.Context(), playSession.ID, playSession.UpstreamSessionID, *source, file, playSession.InitialSeekSeconds, tcNode.URL); err != nil {
+					failRemoteStart()
 					if errors.Is(err, errTranscode4KDisallowed) {
 						writeError(w, http.StatusForbidden, "Forbidden", "4K video transcoding is disabled on this server")
 						return
@@ -250,6 +257,7 @@ func (h *PlaybackHandler) HandleMasterManifest(w http.ResponseWriter, r *http.Re
 				}
 				redirectURL, redirectErr := h.buildProxyRedirectURL(playSession.ID, playSession.UpstreamSessionID, string(playback.PlayTranscode), file, *source, tcNode.URL, 0, plan.ProxyNode)
 				if redirectErr != nil {
+					failRemoteStart()
 					writeError(w, http.StatusInternalServerError, "ServerError", "Failed to sign proxy stream URL")
 					return
 				}
@@ -262,6 +270,9 @@ func (h *PlaybackHandler) HandleMasterManifest(w http.ResponseWriter, r *http.Re
 	// In distributed mode admins can disable the local fallback so the API
 	// server never transcodes when no eligible node exists.
 	if h.NodePlanner != nil && !nodepool.LocalTranscodeFallbackAllowed(r.Context(), h.SettingsRepo) {
+		if playSession.UpstreamSessionID != "" {
+			h.teardownPlaySession(context.WithoutCancel(r.Context()), playSession, nil, nil)
+		}
 		writeError(w, http.StatusServiceUnavailable, "NoTranscodeNode",
 			"No transcode node is available and local transcode fallback is disabled")
 		return
@@ -1172,16 +1183,12 @@ func (h *PlaybackHandler) handlePlaybackReport(w http.ResponseWriter, r *http.Re
 			playSession, ok = nil, false
 		}
 	}
-	if !ok {
+	if !ok && !stop {
 		for _, routeID := range []string{req.ItemID, req.MediaSourceID} {
 			if routeID == "" {
 				continue
 			}
-			if stop {
-				playSession, _, ok = h.playbackStore.FindFinalizableByRoute(session.Token, routeID)
-			} else {
-				playSession, _, ok = h.playbackStore.FindByRoute(session.Token, routeID)
-			}
+			playSession, _, ok = h.playbackStore.FindByRoute(session.Token, routeID)
 			if ok && reportMatchesPlaySession(playSession, req) {
 				break
 			}
@@ -1294,9 +1301,10 @@ func (h *PlaybackHandler) handlePlaybackReport(w http.ResponseWriter, r *http.Re
 		}
 	}
 	if stop {
-		// Direct ids and aliases are caller-owned; route-only stopped reports are
-		// accepted only when FindFinalizableByRoute proves the token-scoped match
-		// is unique.
+		// Direct ids and recorded aliases are per-play, caller-owned identifiers.
+		// Route-only matching is intentionally excluded for Stopped reports: a
+		// delayed stop for an earlier play of the same item must never tear down
+		// the current play.
 		source := findMediaSource(playSession, req.MediaSourceID)
 		fallback := compatScrobbleFallbackSession(
 			session, playSession, source, positionSeconds, positionReported, req.IsPaused,
@@ -1446,7 +1454,7 @@ func (h *PlaybackHandler) ensureUpstreamPlayback(ctx context.Context, compatSess
 		transcodeNodeURL := ""
 		if current, err := h.sessionMgr.GetSession(oldUpstreamSessionID); err == nil {
 			transcodeNodeURL = current.TranscodeNodeURL
-			h.dispatchCompatScrobble(ctx, compatScrobblePause, playSession, current, nil)
+			h.dispatchCompatScrobble(ctx, compatScrobbleStop, playSession, current, nil)
 		}
 		_ = h.sessionMgr.StopSession(oldUpstreamSessionID)
 		h.tm.CloseTranscodeSession(oldUpstreamSessionID, transcodeNodeURL)
@@ -1533,6 +1541,7 @@ func (h *PlaybackHandler) ensureTranscodeManifest(ctx context.Context, compatSes
 
 	transcodeSession, err := h.ensureTranscodeSession(ctx, playSessionID, playSession.UpstreamSessionID, source)
 	if err != nil {
+		h.teardownPlaySession(ctx, playSession, nil, nil)
 		return nil, err
 	}
 
@@ -1560,6 +1569,7 @@ func (h *PlaybackHandler) ensureTranscodeManifest(ctx context.Context, compatSes
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case <-deadline:
+			h.teardownPlaySession(ctx, playSession, nil, nil)
 			return nil, playback.ErrManifestNotReady
 		case <-time.After(pollInterval):
 		}
