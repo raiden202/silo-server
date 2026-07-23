@@ -115,16 +115,41 @@ export function isOverlaySuppressed(id: OverlayId, prefs: CardOverlayPrefs): boo
   return false;
 }
 
+function implicitlyCombinesVideoBadges(
+  prefs: CardOverlayPrefs,
+  position: OverlayPosition,
+): boolean {
+  if (prefs.items.resolution_hdr?.enabled) return false;
+  const resolution = prefs.items.resolution;
+  const hdr = prefs.items.hdr;
+  return (
+    resolution?.enabled === true &&
+    hdr?.enabled === true &&
+    resolution.position === position &&
+    hdr.position === position
+  );
+}
+
 // Returns enabled overlays for a position, in the user's chosen order
 // (falling back to registry order for any unranked ids).
 export function orderedOverlaysForPosition(prefs: CardOverlayPrefs, position: OverlayPosition) {
-  const enabled = OVERLAY_REGISTRY.filter(
-    (def) =>
+  const implicitCombined = implicitlyCombinesVideoBadges(prefs, position);
+  const enabled = OVERLAY_REGISTRY.filter((def) => {
+    if (implicitCombined && def.id === "resolution_hdr") return true;
+    if (implicitCombined && (def.id === "resolution" || def.id === "hdr")) return false;
+    return (
       prefs.items[def.id]?.enabled &&
       prefs.items[def.id]?.position === position &&
-      !isOverlaySuppressed(def.id, prefs),
-  );
+      !isOverlaySuppressed(def.id, prefs)
+    );
+  });
   if (prefs.order.length === 0) return enabled;
   const orderIndex = new Map<OverlayId, number>(prefs.order.map((id, i) => [id, i]));
-  return [...enabled].sort((a, b) => (orderIndex.get(a.id) ?? 999) - (orderIndex.get(b.id) ?? 999));
+  const rank = (id: OverlayId): number => {
+    if (implicitCombined && id === "resolution_hdr") {
+      return Math.min(orderIndex.get("resolution") ?? 999, orderIndex.get("hdr") ?? 999);
+    }
+    return orderIndex.get(id) ?? 999;
+  };
+  return [...enabled].sort((a, b) => rank(a.id) - rank(b.id));
 }

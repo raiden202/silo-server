@@ -170,37 +170,70 @@ func hdrTypeFromTracks(tracks []models.VideoTrack) string {
 }
 
 func normalizeAudio(file *models.MediaFile) string {
-	defaultCandidates := make([]string, 0, 3)
-	candidates := make([]string, 0, len(file.AudioTracks)*3+1)
+	defaultTracks := make([]models.AudioTrack, 0, 1)
 	for _, track := range file.AudioTracks {
 		if track.Default {
-			defaultCandidates = append(defaultCandidates, track.Title, track.EmbeddedTitle, track.Codec)
+			defaultTracks = append(defaultTracks, track)
 		}
-		candidates = append(candidates, track.Title, track.EmbeddedTitle, track.Codec)
 	}
-	if len(defaultCandidates) > 0 {
-		defaultCandidates = append(defaultCandidates, file.CodecAudio)
-	}
-	if len(defaultCandidates) > 0 {
-		if label := normalizeAudioCandidates(defaultCandidates); label != "" {
+	if len(defaultTracks) > 0 {
+		if label := normalizeAudioTracks(defaultTracks); label != "" {
 			return label
 		}
 	}
-	if label := normalizeAudioCandidates(candidates); label != "" {
+	if label := normalizeAudioTracks(file.AudioTracks); label != "" {
 		return label
 	}
 
 	return normalizeAudioCandidates([]string{file.CodecAudio})
 }
 
+func normalizeAudioTracks(tracks []models.AudioTrack) string {
+	// Keep fields grouped by track so an Atmos hint cannot inherit the codec
+	// from a different language track.
+	for _, track := range tracks {
+		if label := normalizeAudioCandidates(audioTrackCandidates(track)); label != "" {
+			return label
+		}
+	}
+	return ""
+}
+
+func audioTrackCandidates(track models.AudioTrack) []string {
+	return []string{track.Title, track.EmbeddedTitle, track.Profile, track.Layout, track.Codec}
+}
+
+func containsAtmos(candidates []string) bool {
+	for _, candidate := range candidates {
+		lower := strings.ToLower(strings.TrimSpace(candidate))
+		if strings.Contains(lower, "atmos") || strings.Contains(lower, "joc") {
+			return true
+		}
+	}
+	return false
+}
+
 func normalizeAudioCandidates(candidates []string) string {
+	details := strings.ToLower(strings.Join(candidates, " "))
+	if containsAtmos(candidates) {
+		switch {
+		case strings.Contains(details, "truehd"):
+			return "TrueHD Atmos"
+		case strings.Contains(details, "eac3"),
+			strings.Contains(details, "e-ac-3"),
+			strings.Contains(details, "ec-3"),
+			strings.Contains(details, "dolby digital plus"),
+			strings.Contains(details, "dd+"):
+			return "DD+ Atmos"
+		default:
+			return "Atmos"
+		}
+	}
 	for _, candidate := range candidates {
 		lower := strings.ToLower(strings.TrimSpace(candidate))
 		switch {
 		case lower == "":
 			continue
-		case strings.Contains(lower, "atmos"):
-			return "Atmos"
 		case strings.Contains(lower, "truehd"):
 			return "TrueHD"
 		case strings.Contains(lower, "dts-hd"), strings.Contains(lower, "dts:x"), strings.Contains(lower, "dtsx"):

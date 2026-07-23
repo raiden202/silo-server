@@ -80,6 +80,48 @@ func TestNormalizeAudioChannels(t *testing.T) {
 	}
 }
 
+func TestNormalizeAudio(t *testing.T) {
+	cases := []struct {
+		name string
+		file *models.MediaFile
+		want string
+	}{
+		{"empty", &models.MediaFile{}, ""},
+		{"eac3 Atmos", &models.MediaFile{AudioTracks: []models.AudioTrack{{
+			Codec: "eac3", Profile: "Dolby Digital Plus + Dolby Atmos",
+		}}}, "DD+ Atmos"},
+		{"truehd Atmos", &models.MediaFile{AudioTracks: []models.AudioTrack{{
+			Codec: "truehd", Title: "Dolby Atmos",
+		}}}, "TrueHD Atmos"},
+		{"JOC identifies DD+ Atmos", &models.MediaFile{AudioTracks: []models.AudioTrack{{
+			Codec: "e-ac-3", Profile: "JOC",
+		}}}, "DD+ Atmos"},
+		{"unknown Atmos carrier falls back", &models.MediaFile{AudioTracks: []models.AudioTrack{{
+			Codec: "opus", Title: "Atmos",
+		}}}, "Atmos"},
+		{"default non-Atmos track wins", &models.MediaFile{AudioTracks: []models.AudioTrack{
+			{Codec: "truehd", Title: "Atmos"},
+			{Codec: "eac3", Default: true},
+		}}, "EAC3"},
+		{"first recognizable default track wins", &models.MediaFile{AudioTracks: []models.AudioTrack{
+			{Codec: "eac3", Default: true},
+			{Codec: "truehd", Title: "Atmos", Default: true},
+		}}, "EAC3"},
+		{"track association is preserved", &models.MediaFile{AudioTracks: []models.AudioTrack{
+			{Codec: "truehd"},
+			{Codec: "eac3", Title: "Atmos"},
+		}}, "TrueHD"},
+		{"file codec fallback", &models.MediaFile{CodecAudio: "EAC3 Atmos"}, "DD+ Atmos"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := normalizeAudio(tc.file); got != tc.want {
+				t.Errorf("normalizeAudio = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestNormalizeContainer(t *testing.T) {
 	cases := []struct {
 		in, want string
@@ -383,7 +425,7 @@ func TestBuildSummaryAggregatesNewFields(t *testing.T) {
 			AspectRatio: "16:9",
 		}},
 		AudioTracks: []models.AudioTrack{
-			{Language: "eng", Channels: 8, Default: true, Title: "Atmos"},
+			{Language: "eng", Channels: 8, Default: true, Codec: "eac3", Title: "Atmos"},
 			{Language: "spa", Channels: 6},
 		},
 		SubtitleTracks: []models.SubtitleTrack{{Language: "eng"}},
@@ -407,8 +449,8 @@ func TestBuildSummaryAggregatesNewFields(t *testing.T) {
 	if got.AspectRatio != "16:9" {
 		t.Errorf("AspectRatio = %q, want %q", got.AspectRatio, "16:9")
 	}
-	if got.Audio != "Atmos" {
-		t.Errorf("Audio = %q, want %q", got.Audio, "Atmos")
+	if got.Audio != "DD+ Atmos" {
+		t.Errorf("Audio = %q, want %q", got.Audio, "DD+ Atmos")
 	}
 	if !got.MultiAudio {
 		t.Error("MultiAudio = false, want true")

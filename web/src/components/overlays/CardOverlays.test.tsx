@@ -47,15 +47,35 @@ describe("CardOverlays", () => {
     expect(badgeTexts(container)).toEqual(["4K"]);
   });
 
+  it("combines standalone resolution and hdr when they share a corner", () => {
+    const texts = badgeTexts(
+      render(<CardOverlays data={SAMPLE_MOVIE_DATA} prefs={buildDefaultPrefs()} />).container,
+    );
+    expect(texts).toContain("4K Dolby Vision");
+    expect(texts).not.toContain("4K");
+    expect(texts).not.toContain("DV HDR10");
+  });
+
   it("suppresses standalone resolution and hdr when the combined badge is enabled", () => {
     const prefs = buildDefaultPrefs();
     prefs.items.resolution_hdr = { ...prefs.items.resolution_hdr, enabled: true };
     const texts = badgeTexts(
       render(<CardOverlays data={SAMPLE_MOVIE_DATA} prefs={prefs} />).container,
     );
-    expect(texts).toContain("4K DV");
+    expect(texts).toContain("4K Dolby Vision");
     expect(texts).not.toContain("4K");
     expect(texts).not.toContain("DV HDR10");
+  });
+
+  it("keeps standalone resolution and hdr when they use different corners", () => {
+    const prefs = buildDefaultPrefs();
+    prefs.items.hdr = { ...prefs.items.hdr, position: "top-right" };
+    const texts = badgeTexts(
+      render(<CardOverlays data={SAMPLE_MOVIE_DATA} prefs={prefs} />).container,
+    );
+    expect(texts).toContain("4K");
+    expect(texts).toContain("DV HDR10");
+    expect(texts).not.toContain("4K Dolby Vision");
   });
 
   it("honors prefs.order within a corner", () => {
@@ -66,7 +86,7 @@ describe("CardOverlays", () => {
     const texts = Array.from(topLeftStack?.querySelectorAll("span.inline-flex") ?? []).map(
       (n) => n.textContent,
     );
-    expect(texts).toEqual(["Atmos", "DV HDR10", "4K"]);
+    expect(texts).toEqual(["DD+ Atmos", "4K Dolby Vision"]);
   });
 
   it("suppresses the text label when a wordmark icon already spells it", () => {

@@ -181,11 +181,11 @@ export function prettyResolution(value: string | undefined): string | null {
   return value.toUpperCase();
 }
 
-// Compact HDR suffix used for combined Resolution+HDR badges. Any Dolby
-// Vision variant collapses to "DV"; any other HDR variant to "HDR".
-export function compactHdrSuffix(value: string | undefined): string | null {
+// Dynamic-range text used inside a combined quality badge. Dolby Vision is
+// written out; other HDR variants keep the compact "HDR" umbrella label.
+export function combinedDynamicRangeLabel(value: string | undefined): string | null {
   if (!value) return null;
-  if (value.includes("DV")) return "DV";
+  if (value.includes("DV")) return "Dolby Vision";
   return "HDR";
 }
 

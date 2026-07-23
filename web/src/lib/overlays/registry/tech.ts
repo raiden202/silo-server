@@ -1,4 +1,4 @@
-import { compactHdrSuffix, prettyResolution } from "@/lib/mediaFormat";
+import { combinedDynamicRangeLabel, prettyResolution } from "@/lib/mediaFormat";
 import type { OverlayDef, OverlayIconId } from "../types";
 
 // Tech overlays — derived from the media file (codec, container, resolution,
@@ -55,15 +55,15 @@ export const TECH_OVERLAYS: readonly OverlayDef[] = [
     id: "resolution_hdr",
     category: "tech",
     label: "Resolution + HDR (combined)",
-    description: 'Single badge combining resolution and dynamic range (e.g. "4K DV", "1080p HDR")',
+    description:
+      'Single badge combining resolution and dynamic range (e.g. "4K Dolby Vision", "1080p HDR")',
     defaultPosition: "top-left",
     defaultEnabled: false,
     iconCapable: true,
     getValue: (d) => {
       const res = prettyResolution(d.resolution);
-      if (!res) return null;
-      const hdr = compactHdrSuffix(d.hdr);
-      return hdr ? `${res} ${hdr}` : res;
+      const hdr = combinedDynamicRangeLabel(d.hdr);
+      return [res, hdr].filter(Boolean).join(" ") || null;
     },
     // Only the DV circle mark works next to a combined label; a wordmark
     // (HDR10) would visually duplicate the label's HDR suffix.

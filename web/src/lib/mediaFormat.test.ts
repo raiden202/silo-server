@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  compactHdrSuffix,
+  combinedDynamicRangeLabel,
   dolbyVisionLabel,
   formatAudioTrackLabel,
   formatBitrate,
@@ -208,14 +208,14 @@ describe("prettyResolution", () => {
   });
 });
 
-describe("compactHdrSuffix", () => {
-  it("collapses Dolby Vision variants to DV and others to HDR", () => {
-    expect(compactHdrSuffix("DV HDR10")).toBe("DV");
-    expect(compactHdrSuffix("HDR10")).toBe("HDR");
-    expect(compactHdrSuffix("HLG")).toBe("HDR");
+describe("combinedDynamicRangeLabel", () => {
+  it("writes out Dolby Vision and collapses other variants to HDR", () => {
+    expect(combinedDynamicRangeLabel("DV HDR10")).toBe("Dolby Vision");
+    expect(combinedDynamicRangeLabel("HDR10")).toBe("HDR");
+    expect(combinedDynamicRangeLabel("HLG")).toBe("HDR");
   });
 
   it("returns null for missing values", () => {
-    expect(compactHdrSuffix(undefined)).toBeNull();
+    expect(combinedDynamicRangeLabel(undefined)).toBeNull();
   });
 });
