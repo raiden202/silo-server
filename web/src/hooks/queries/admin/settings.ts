@@ -2,6 +2,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/api/client";
 import type {
   AdminSettingUpdateResponse,
+  AdminSettingsUpdateResponse,
   AdminSettingsConnectionCheckRequest,
   ConnectionCheckResponse,
   JellyfinCompatSettingsPatch,
@@ -77,8 +78,48 @@ export interface CatalogSearchStatus {
 export function useAdminServerSettings() {
   return useQuery({
     queryKey: adminKeys.serverSettings(),
-    queryFn: () => api<ServerSettings>("/admin/settings").then((d) => d ?? {}),
+    queryFn: () => api<ServerSettings>("/admin/settings/effective").then((d) => d ?? {}),
     staleTime: 30_000,
+  });
+}
+
+export function useUpdateServerSettings() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (values: Record<string, string>) =>
+      api<AdminSettingsUpdateResponse>("/admin/settings", {
+        method: "PUT",
+        body: JSON.stringify({ values }),
+      }),
+    onSuccess: async (_data, values) => {
+      const keys = Object.keys(values);
+      const invalidations = [
+        queryClient.invalidateQueries({ queryKey: adminKeys.serverSettings() }),
+        queryClient.invalidateQueries({
+          queryKey: [...adminKeys.serverSettings(), "sensitive-status"] as const,
+        }),
+      ];
+      if (keys.some((key) => key.startsWith("jellyfin_compat."))) {
+        invalidations.push(
+          queryClient.invalidateQueries({ queryKey: adminKeys.jellyfinCompatStatus() }),
+        );
+      }
+      if (keys.some((key) => key.startsWith("catalog.search."))) {
+        invalidations.push(
+          queryClient.invalidateQueries({ queryKey: adminKeys.catalogSearchStatus() }),
+        );
+      }
+      if (keys.some((key) => key.startsWith("branding.") || key.startsWith("ui.admin_"))) {
+        invalidations.push(
+          queryClient.invalidateQueries({ queryKey: themeKeys.adminCss() }),
+          queryClient.invalidateQueries({ queryKey: themeKeys.branding() }),
+        );
+      }
+      await Promise.all(invalidations);
+    },
+    onError: (err) => {
+      toast.error(err instanceof Error ? err.message : "Failed to update settings");
+    },
   });
 }
 

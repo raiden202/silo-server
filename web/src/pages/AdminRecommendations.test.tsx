@@ -23,7 +23,7 @@ vi.mock("@/hooks/queries/admin/settings", () => ({
     isPending: false,
     mutateAsync: (...args: unknown[]) => mocks.checkConnectionMutateAsync(...args),
   }),
-  useUpdateServerSetting: () => ({
+  useUpdateServerSettings: () => ({
     isPending: false,
     mutate: (...args: unknown[]) => mocks.updateMutate(...args),
     mutateAsync: (...args: unknown[]) => mocks.updateMutateAsync(...args),
@@ -125,7 +125,7 @@ describe("AdminRecommendations", () => {
       success: true,
       message: "Embedding connection successful.",
     });
-    mocks.updateMutateAsync.mockResolvedValue(undefined);
+    mocks.updateMutateAsync.mockResolvedValue({ restart_required: true });
   });
 
   afterEach(async () => {
@@ -146,20 +146,11 @@ describe("AdminRecommendations", () => {
 
     await click(findButton(container, "Gemini"));
 
-    expect(mocks.updateMutateAsync.mock.calls).toEqual([
-      [
-        {
-          key: "recommendations.embedding_base_url",
-          value: "https://generativelanguage.googleapis.com",
-        },
-      ],
-      [
-        {
-          key: "recommendations.embedding_model",
-          value: "gemini-embedding-001",
-        },
-      ],
-    ]);
+    expect(mocks.updateMutateAsync).toHaveBeenCalledOnce();
+    expect(mocks.updateMutateAsync).toHaveBeenCalledWith({
+      "recommendations.embedding_base_url": "https://generativelanguage.googleapis.com",
+      "recommendations.embedding_model": "gemini-embedding-001",
+    });
 
     const baseUrlInput = container.querySelector<HTMLInputElement>(
       'input[id="recommendations.embedding_base_url"]',

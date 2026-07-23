@@ -10,7 +10,11 @@ import AdminSettingsLayout from "./AdminSettingsLayout";
 // The layout only needs the active tab's component to render; a loading form
 // keeps every settings page on its skeleton state so no other hooks fire.
 vi.mock("@/hooks/useSettingsForm", () => ({
-  useSettingsForm: () => ({ isLoading: true }),
+  useSettingsForm: () => ({
+    isLoading: true,
+    sensitiveConfigured: [],
+    sensitiveManagedByEnv: [],
+  }),
 }));
 
 function renderLayout(search = "") {
@@ -51,9 +55,11 @@ describe("AdminSettingsLayout", () => {
 
     for (const label of [
       "General",
+      "Branding",
       "Theming",
       "Card Overlays",
       "Scanner &amp; Matcher",
+      "Search",
       "Intro Markers",
       "Subtitles",
       "AI Services",
