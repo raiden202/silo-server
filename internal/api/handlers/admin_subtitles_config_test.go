@@ -184,6 +184,70 @@ func TestUpdateSubtitleProviderDisablesLiveProvider(t *testing.T) {
 	}
 }
 
+func TestUpdateLegacySubtitleProviderPreservesV1Compatibility(t *testing.T) {
+	repo := newAdminSubtitleConfigRepo()
+	handler := NewAdminSubtitleHandler(repo)
+	body, _ := json.Marshal(updateSubtitleProviderRequest{
+		Enabled: true,
+		APIKey:  subtitleTestCredential("legacy"),
+	})
+	req := withSubtitleRouteParam(
+		newAdminSubtitleRequest(http.MethodPut, "/admin/subtitle-providers/legacy-provider", body),
+		"provider", "legacy-provider",
+	)
+	rec := httptest.NewRecorder()
+
+	handler.HandleUpdateProvider(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+	if got := repo.providerConfig("legacy-provider"); !got.Enabled ||
+		got.APIKey != subtitleTestCredential("legacy") {
+		t.Fatalf("stored legacy provider = %#v", got)
+	}
+	var response struct {
+		AppliedLive bool `json:"applied_live"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.AppliedLive {
+		t.Fatal("legacy provider reported as applied live")
+	}
+}
+
+func TestLegacySubtitleProviderConnectionFailureKeepsHTTP200(t *testing.T) {
+	repo := newAdminSubtitleConfigRepo()
+	repo.configs["legacy-provider"] = subtitles.ProviderConfig{
+		ProviderName: "legacy-provider",
+		Enabled:      true,
+		APIKey:       subtitleTestCredential("legacy"),
+	}
+	handler := NewAdminSubtitleHandler(repo)
+	req := withSubtitleRouteParam(
+		newAdminSubtitleRequest(http.MethodPost, "/admin/subtitle-providers/legacy-provider/test", nil),
+		"provider", "legacy-provider",
+	)
+	rec := httptest.NewRecorder()
+
+	handler.HandleTestProvider(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+	var response struct {
+		Success bool   `json:"success"`
+		Error   string `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Success || response.Error == "" {
+		t.Fatalf("response = %#v, want a 200 failure payload", response)
+	}
+}
+
 func TestUpdateSubtitleProviderExplicitlyClearsCredentialsAndDisablesLiveProvider(t *testing.T) {
 	repo := newAdminSubtitleConfigRepo()
 	repo.configs["subdl"] = subtitles.ProviderConfig{

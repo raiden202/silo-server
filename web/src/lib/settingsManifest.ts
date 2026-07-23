@@ -68,6 +68,14 @@ const definitions: SettingDefinition[] = [
     defaultValue: "false",
   },
   {
+    key: "playback.auto_skip_credits",
+    scope: "device",
+    label: "Auto-skip credits",
+    description: "Move through end credits automatically on this device when a skip is available.",
+    control: "switch",
+    defaultValue: "false",
+  },
+  {
     key: "playback.auto_play_next",
     scope: "device",
     label: "Auto-play next episode",

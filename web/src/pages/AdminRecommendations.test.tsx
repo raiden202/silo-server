@@ -125,7 +125,7 @@ describe("AdminRecommendations", () => {
       success: true,
       message: "Embedding connection successful.",
     });
-    mocks.updateMutateAsync.mockResolvedValue({ restart_required: true });
+    mocks.updateMutateAsync.mockResolvedValue({ values: {}, restart_required: true });
   });
 
   afterEach(async () => {
@@ -142,6 +142,13 @@ describe("AdminRecommendations", () => {
   }
 
   it("applies a provider preset to the embedding settings", async () => {
+    mocks.updateMutateAsync.mockResolvedValueOnce({
+      values: {
+        "recommendations.embedding_base_url": "https://generativelanguage.googleapis.com/canonical",
+        "recommendations.embedding_model": "canonical-gemini-model",
+      },
+      restart_required: true,
+    });
     await render();
 
     await click(findButton(container, "Gemini"));
@@ -159,9 +166,8 @@ describe("AdminRecommendations", () => {
       'input[id="recommendations.embedding_model"]',
     );
 
-    expect(baseUrlInput?.value).toBe("https://generativelanguage.googleapis.com");
-    expect(modelInput?.value).toBe("gemini-embedding-001");
-    expect(findButton(container, "Gemini")?.getAttribute("aria-pressed")).toBe("true");
+    expect(baseUrlInput?.value).toBe("https://generativelanguage.googleapis.com/canonical");
+    expect(modelInput?.value).toBe("canonical-gemini-model");
   });
 
   it("checks the current unsaved embedding draft", async () => {

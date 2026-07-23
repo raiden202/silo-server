@@ -308,7 +308,7 @@ func TestRateLimitHandlerRejectsMalformedPersistedRedisURL(t *testing.T) {
 	}
 }
 
-func TestRateLimitHandlerRejectsNonCanonicalPersistedRedisURLEvenWithBootstrap(t *testing.T) {
+func TestRateLimitHandlerAcceptsBootstrapRedisDespiteStalePersistedURL(t *testing.T) {
 	store := newFakeRateLimitStore()
 	store.values["redis.url"] = " redis://cache.example.invalid:6379 "
 	h := NewRateLimitHandler(store, nil, nil, NewServerRestartStatusTracker(), true)
@@ -319,11 +319,11 @@ func TestRateLimitHandlerRejectsNonCanonicalPersistedRedisURLEvenWithBootstrap(t
 	rec := httptest.NewRecorder()
 	h.HandleUpdateConfig(rec, req)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("PUT status = %d, want 400; body = %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, want 200; body = %s", rec.Code, rec.Body.String())
 	}
-	if store.setManyCalls != 0 {
-		t.Fatalf("invalid Redis selection wrote settings: SetMany=%d", store.setManyCalls)
+	if store.values["ratelimit.backend"] != "redis" {
+		t.Fatalf("ratelimit.backend = %q, want redis", store.values["ratelimit.backend"])
 	}
 }
 

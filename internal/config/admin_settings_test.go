@@ -1,6 +1,11 @@
+//nolint:goconst // Settings contract tests intentionally repeat literal keys in input and expected maps.
 package config
 
-import "testing"
+import (
+	"reflect"
+	"strings"
+	"testing"
+)
 
 func TestEffectiveAdminSettingsUsesRuntimeDefaults(t *testing.T) {
 	effective := EffectiveAdminSettings(map[string]string{
@@ -84,6 +89,117 @@ func TestEffectiveAdminSettingsEmptyCanonicalS3ValuesUseLegacyFallbacks(t *testi
 	if got := effective["s3.public_token_ttl"]; got != "3600" {
 		t.Fatalf("s3.public_token_ttl = %q, want legacy 3600", got)
 	}
+}
+
+func TestEffectiveAdminSettingsProjectsRuntimeLegacyFallbacks(t *testing.T) {
+	stored := map[string]string{
+		"s3.operational_endpoint":         "https://s3.example.invalid",
+		"s3.operational_public_endpoint":  "https://cdn.example.invalid",
+		"s3.operational_region":           "us-test-1",
+		"s3.operational_path_style":       "false",
+		"s3.operational_bucket":           "legacy-bucket",
+		"s3.operational_key_prefix":       "legacy-prefix",
+		"s3.operational_access_key":       "legacy-access",
+		"s3.operational_secret_key":       "legacy-secret",
+		"s3.operational_url_auth":         "presigned",
+		"s3.operational_token_secret":     "legacy-token",
+		"s3.operational_token_param":      "signature",
+		"s3.operational_token_ttl":        "3600",
+		"subtitle_ai.base_url":            "https://legacy-ai.example.invalid",
+		"subtitle_ai.api_key":             "legacy-ai-key",
+		"subtitle_ai.chat_model":          "legacy-chat-model",
+		"subtitle_ai.max_concurrent_jobs": "7",
+		"ai.max_concurrent_jobs":          "0",
+	}
+
+	effective := EffectiveAdminSettings(stored)
+	expected := map[string]string{
+		"s3.public_endpoint":      stored["s3.operational_endpoint"],
+		"s3.public_read_endpoint": stored["s3.operational_public_endpoint"],
+		"s3.public_region":        stored["s3.operational_region"],
+		"s3.public_path_style":    stored["s3.operational_path_style"],
+		"s3.public_bucket":        stored["s3.operational_bucket"],
+		"s3.public_key_prefix":    stored["s3.operational_key_prefix"],
+		"s3.public_access_key":    stored["s3.operational_access_key"],
+		"s3.public_secret_key":    stored["s3.operational_secret_key"],
+		"s3.public_url_auth":      stored["s3.operational_url_auth"],
+		"s3.public_token_secret":  stored["s3.operational_token_secret"],
+		"s3.public_token_param":   stored["s3.operational_token_param"],
+		"s3.public_token_ttl":     stored["s3.operational_token_ttl"],
+		"s3.private_endpoint":     stored["s3.operational_endpoint"],
+		"s3.private_region":       stored["s3.operational_region"],
+		"s3.private_path_style":   stored["s3.operational_path_style"],
+		"s3.private_bucket":       stored["s3.operational_bucket"],
+		"s3.private_key_prefix":   stored["s3.operational_key_prefix"],
+		"s3.private_access_key":   stored["s3.operational_access_key"],
+		"s3.private_secret_key":   stored["s3.operational_secret_key"],
+		"ai.base_url":             stored["subtitle_ai.base_url"],
+		"ai.api_key":              stored["subtitle_ai.api_key"],
+		"ai.chat_model":           stored["subtitle_ai.chat_model"],
+		"ai.max_concurrent_jobs":  stored["subtitle_ai.max_concurrent_jobs"],
+	}
+	for key, want := range expected {
+		if got := effective[key]; got != want {
+			t.Errorf("%s = %q, want legacy fallback %q", key, got, want)
+		}
+	}
+}
+
+func TestEffectiveAdminSettingsUsesRuntimeDefaultForNonpositiveCanonicalAIConcurrency(t *testing.T) {
+	for _, canonical := range []string{"0", "-1"} {
+		t.Run(canonical, func(t *testing.T) {
+			effective := EffectiveAdminSettings(map[string]string{
+				"ai.max_concurrent_jobs": canonical,
+			})
+			if got := effective["ai.max_concurrent_jobs"]; got != "2" {
+				t.Fatalf("ai.max_concurrent_jobs = %q, want runtime default 2", got)
+			}
+		})
+	}
+}
+
+func TestAdminSettingDefaultsAlignWithConfigRuntimeDefaults(t *testing.T) {
+	baseline, err := LoadFromDB(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	normalizeEffectiveRuntimeDefaults(baseline)
+
+	for key, value := range adminSettingDefaults {
+		t.Run(key, func(t *testing.T) {
+			withExplicitDefault, err := LoadFromDB(map[string]string{key: value})
+			if err != nil {
+				t.Fatal(err)
+			}
+			normalizeEffectiveRuntimeDefaults(withExplicitDefault)
+			if !reflect.DeepEqual(withExplicitDefault, baseline) {
+				t.Fatalf("admin default %q does not match the runtime default", value)
+			}
+		})
+	}
+}
+
+func normalizeEffectiveRuntimeDefaults(cfg *Config) {
+	if cfg.S3.Public.URLAuth == "" {
+		cfg.S3.Public.URLAuth = "presigned"
+	}
+	if cfg.S3.Public.TokenParam == "" {
+		cfg.S3.Public.TokenParam = "verify"
+	}
+	if cfg.S3.Public.TokenTTL <= 0 {
+		cfg.S3.Public.TokenTTL = 10800
+	}
+	// The client IP loader treats an empty value as its built-in private-range
+	// default. Normalize formatting as well so equivalent CIDR lists compare.
+	cfg.ClientIP.TrustedProxies = strings.ReplaceAll(
+		firstConfiguredString(
+			map[string]string{"trusted": cfg.ClientIP.TrustedProxies},
+			adminSettingDefaults["clientip.trusted_proxies"],
+			"trusted",
+		),
+		" ",
+		"",
+	)
 }
 
 func TestNormalizeAdminSettingRejectsInvalidValues(t *testing.T) {

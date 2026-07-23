@@ -84,17 +84,6 @@ func updateServerSettingsAtomically(
 	return errors.New("settings store does not support atomic updates")
 }
 
-func updateSingleServerSettingAtomically(
-	ctx context.Context,
-	store ServerSettingsStore,
-	update func(current map[string]string) (map[string]string, error),
-) error {
-	if updater, ok := store.(serverSettingsAtomicUpdater); ok {
-		return updater.UpdateAtomic(ctx, update)
-	}
-	return errors.New("settings store does not support atomic updates")
-}
-
 type DiagnosticsEnablementStore interface {
 	PutStream(ctx context.Context, bucket, key string, r io.Reader, contentType string) error
 	DeleteObject(ctx context.Context, bucket, key string) error
@@ -2250,7 +2239,11 @@ func (h *AdminHandler) normalizeBatchSetting(ctx context.Context, key, value str
 		diagnostics.KeyMaxReportsPerUserDay,
 		diagnostics.KeyRetentionDays,
 		diagnostics.KeyMaxBytesPerUser:
-		normalized, err = h.normalizeDiagnosticsNumericSetting(ctx, key, normalized)
+		var numericValue int64
+		numericValue, err = normalizeDiagnosticsNumericSettingValue(key, normalized)
+		if err == nil {
+			normalized = strconv.FormatInt(numericValue, 10)
+		}
 	case diagnostics.KeyConsentNoticeVersion:
 		var n int
 		n, err = strconv.Atoi(normalized)
@@ -2295,7 +2288,7 @@ func validateProspectiveAdminSettings(values map[string]string, redisBootstrapAv
 	if _, err := catalog.CatalogSearchSettingsFromMap(values); err != nil {
 		return err
 	}
-	return nil
+	return validateProspectiveDiagnosticsSettings(values)
 }
 
 var adminSettingDependencyGroups = [][]string{
@@ -2313,6 +2306,13 @@ var adminSettingDependencyGroups = [][]string{
 	{"download.max_per_period", "download.period_duration"},
 	{"matcher.enable_tv_series_root_queue", "matcher.enable_tv_series_group_queue"},
 	{"ai.max_concurrent_jobs", "subtitle_ai.max_concurrent_jobs"},
+	{
+		diagnostics.KeyMaxBundleBytes,
+		diagnostics.KeyMaxUncompressedBytes,
+		diagnostics.KeyMaxReportsPerUserDay,
+		diagnostics.KeyRetentionDays,
+		diagnostics.KeyMaxBytesPerUser,
+	},
 }
 
 // adminSettingsValidationSnapshot validates exactly the requested changes and
@@ -2326,6 +2326,7 @@ func adminSettingsValidationSnapshot(
 	changed map[string]string,
 ) map[string]string {
 	snapshot := config.EffectiveAdminSettings(nil)
+	effectiveProspective := config.EffectiveAdminSettings(prospective)
 	for key, value := range changed {
 		snapshot[key] = value
 	}
@@ -2341,21 +2342,45 @@ func adminSettingsValidationSnapshot(
 			continue
 		}
 		for _, key := range group {
-			snapshot[key] = prospective[key]
+			snapshot[key] = effectiveProspective[key]
 		}
 	}
 
-	// Operational S3 values are legacy fallbacks, not peers. Explicit
-	// public/private values win independently, so changing one explicit value
-	// must not pull an irrelevant malformed fallback (or the other explicit
-	// value) into validation. When the fallback itself changes, reproduce the
-	// real precedence by including both possible explicit selectors.
-	if _, touched := changed["s3.operational_path_style"]; touched {
-		snapshot["s3.public_path_style"] = prospective["s3.public_path_style"]
-		snapshot["s3.private_path_style"] = prospective["s3.private_path_style"]
+	// Operational S3 values are legacy fallbacks shared by the public and
+	// private configurations. When one changes, validate the canonical values
+	// that LoadFromDB will actually consume, including unchanged legacy peers.
+	legacyS3Changed := false
+	for key := range changed {
+		if strings.HasPrefix(key, "s3.operational_") {
+			legacyS3Changed = true
+			break
+		}
 	}
-	if _, touched := changed["s3.operational_token_ttl"]; touched {
-		snapshot["s3.public_token_ttl"] = prospective["s3.public_token_ttl"]
+	if legacyS3Changed {
+		//nolint:goconst // Keep the complete canonical validation set readable as a contract.
+		for _, key := range []string{
+			"s3.public_endpoint",
+			"s3.public_read_endpoint",
+			"s3.public_region",
+			"s3.public_path_style",
+			"s3.public_bucket",
+			"s3.public_key_prefix",
+			"s3.public_access_key",
+			"s3.public_secret_key",
+			"s3.public_url_auth",
+			"s3.public_token_secret",
+			"s3.public_token_param",
+			"s3.public_token_ttl",
+			"s3.private_endpoint",
+			"s3.private_region",
+			"s3.private_path_style",
+			"s3.private_bucket",
+			"s3.private_key_prefix",
+			"s3.private_access_key",
+			"s3.private_secret_key",
+		} {
+			snapshot[key] = effectiveProspective[key]
+		}
 	}
 	return snapshot
 }
@@ -2775,7 +2800,7 @@ func (h *AdminHandler) HandleUpdateSetting(w http.ResponseWriter, r *http.Reques
 		effectiveChanged bool
 		validationErr    error
 	)
-	err := updateSingleServerSettingAtomically(r.Context(), h.SettingsRepo,
+	err := updateServerSettingsAtomically(r.Context(), h.SettingsRepo,
 		func(stored map[string]string) (map[string]string, error) {
 			prospective := maps.Clone(stored)
 			prospective[key] = req.Value
@@ -2851,14 +2876,9 @@ func (h *AdminHandler) validateDiagnosticsUploadsEnabled(ctx context.Context) er
 }
 
 func (h *AdminHandler) normalizeDiagnosticsNumericSetting(ctx context.Context, key, raw string) (string, error) {
-	const (
-		mib = int64(1024 * 1024)
-		gib = int64(1024 * mib)
-	)
-
-	value, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+	value, err := normalizeDiagnosticsNumericSettingValue(key, raw)
 	if err != nil {
-		return "", fmt.Errorf("%s must be an integer", key)
+		return "", err
 	}
 
 	settings := diagnostics.DefaultSettings()
@@ -2872,9 +2892,6 @@ func (h *AdminHandler) normalizeDiagnosticsNumericSetting(ctx context.Context, k
 
 	switch key {
 	case diagnostics.KeyMaxBundleBytes:
-		if value < mib || value > 256*mib {
-			return "", fmt.Errorf("%s must be between 1 MiB (%d bytes) and 256 MiB (%d bytes)", key, mib, 256*mib)
-		}
 		if value > settings.MaxUncompressedBytes {
 			return "", fmt.Errorf("%s must not exceed %s (%d bytes)", key, diagnostics.KeyMaxUncompressedBytes, settings.MaxUncompressedBytes)
 		}
@@ -2884,21 +2901,12 @@ func (h *AdminHandler) normalizeDiagnosticsNumericSetting(ctx context.Context, k
 			return "", fmt.Errorf("%s must not exceed %s (%d bytes)", key, diagnostics.KeyMaxBytesPerUser, settings.MaxBytesPerUser)
 		}
 	case diagnostics.KeyMaxUncompressedBytes:
-		if value < settings.MaxBundleBytes || value > gib {
-			return "", fmt.Errorf("%s must be between %s (%d bytes) and 1 GiB (%d bytes)", key, diagnostics.KeyMaxBundleBytes, settings.MaxBundleBytes, gib)
+		if value < settings.MaxBundleBytes {
+			return "", fmt.Errorf("%s must be at least %s (%d bytes)", key, diagnostics.KeyMaxBundleBytes, settings.MaxBundleBytes)
 		}
-	case diagnostics.KeyMaxReportsPerUserDay:
-		if value < 1 || value > 1000 {
-			return "", fmt.Errorf("%s must be between 1 and 1000", key)
-		}
-	case diagnostics.KeyRetentionDays:
-		if value < 1 || value > 365 {
-			return "", fmt.Errorf("%s must be between 1 and 365", key)
-		}
+	case diagnostics.KeyMaxReportsPerUserDay, diagnostics.KeyRetentionDays:
+		// These settings have only independent bounds, which were checked above.
 	case diagnostics.KeyMaxBytesPerUser:
-		if value < 10*mib || value > 10*gib {
-			return "", fmt.Errorf("%s must be between 10 MiB (%d bytes) and 10 GiB (%d bytes)", key, 10*mib, 10*gib)
-		}
 		// The per-user cap must leave room for at least one max-size bundle, or
 		// /diagnostics/status would advertise a bundle size InsertReceiving always
 		// rejects as quota_exceeded.
@@ -2910,4 +2918,100 @@ func (h *AdminHandler) normalizeDiagnosticsNumericSetting(ctx context.Context, k
 	}
 
 	return strconv.FormatInt(value, 10), nil
+}
+
+const (
+	diagnosticsMiB = int64(1024 * 1024)
+	diagnosticsGiB = 1024 * diagnosticsMiB
+)
+
+func normalizeDiagnosticsNumericSettingValue(key, raw string) (int64, error) {
+	value, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer", key)
+	}
+
+	switch key {
+	case diagnostics.KeyMaxBundleBytes:
+		if value < diagnosticsMiB || value > 256*diagnosticsMiB {
+			return 0, fmt.Errorf(
+				"%s must be between 1 MiB (%d bytes) and 256 MiB (%d bytes)",
+				key,
+				diagnosticsMiB,
+				256*diagnosticsMiB,
+			)
+		}
+	case diagnostics.KeyMaxUncompressedBytes:
+		if value < diagnosticsMiB || value > diagnosticsGiB {
+			return 0, fmt.Errorf(
+				"%s must be between 1 MiB (%d bytes) and 1 GiB (%d bytes)",
+				key,
+				diagnosticsMiB,
+				diagnosticsGiB,
+			)
+		}
+	case diagnostics.KeyMaxReportsPerUserDay:
+		if value < 1 || value > 1000 {
+			return 0, fmt.Errorf("%s must be between 1 and 1000", key)
+		}
+	case diagnostics.KeyRetentionDays:
+		if value < 1 || value > 365 {
+			return 0, fmt.Errorf("%s must be between 1 and 365", key)
+		}
+	case diagnostics.KeyMaxBytesPerUser:
+		if value < 10*diagnosticsMiB || value > 10*diagnosticsGiB {
+			return 0, fmt.Errorf(
+				"%s must be between 10 MiB (%d bytes) and 10 GiB (%d bytes)",
+				key,
+				10*diagnosticsMiB,
+				10*diagnosticsGiB,
+			)
+		}
+	default:
+		return 0, fmt.Errorf("unsupported diagnostics numeric setting %s", key)
+	}
+	return value, nil
+}
+
+func validateProspectiveDiagnosticsSettings(values map[string]string) error {
+	settings := diagnostics.DefaultSettings()
+	targets := []struct {
+		key    string
+		assign func(int64)
+	}{
+		{diagnostics.KeyMaxBundleBytes, func(value int64) { settings.MaxBundleBytes = value }},
+		{diagnostics.KeyMaxUncompressedBytes, func(value int64) { settings.MaxUncompressedBytes = value }},
+		{diagnostics.KeyMaxReportsPerUserDay, func(value int64) { settings.MaxReportsPerUserDay = int(value) }},
+		{diagnostics.KeyRetentionDays, func(value int64) { settings.RetentionDays = int(value) }},
+		{diagnostics.KeyMaxBytesPerUser, func(value int64) { settings.MaxBytesPerUser = value }},
+	}
+	for _, target := range targets {
+		raw := values[target.key]
+		if raw == "" {
+			continue
+		}
+		value, err := normalizeDiagnosticsNumericSettingValue(target.key, raw)
+		if err != nil {
+			return err
+		}
+		target.assign(value)
+	}
+
+	if settings.MaxBundleBytes > settings.MaxUncompressedBytes {
+		return fmt.Errorf(
+			"%s must not exceed %s (%d bytes)",
+			diagnostics.KeyMaxBundleBytes,
+			diagnostics.KeyMaxUncompressedBytes,
+			settings.MaxUncompressedBytes,
+		)
+	}
+	if settings.MaxBundleBytes > settings.MaxBytesPerUser {
+		return fmt.Errorf(
+			"%s must not exceed %s (%d bytes)",
+			diagnostics.KeyMaxBundleBytes,
+			diagnostics.KeyMaxBytesPerUser,
+			settings.MaxBytesPerUser,
+		)
+	}
+	return nil
 }

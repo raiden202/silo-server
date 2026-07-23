@@ -280,6 +280,47 @@ func TestAdminUpdateSettingsCanRepairLegacyInvalidRelationship(t *testing.T) {
 	}
 }
 
+func TestAdminUpdateSettingsValidatesResolvedLegacyS3Values(t *testing.T) {
+	tests := []struct {
+		name    string
+		initial map[string]string
+		body    string
+	}{
+		{
+			name: "canonical endpoint with legacy bucket",
+			initial: map[string]string{
+				"s3.operational_bucket": "legacy-bucket",
+			},
+			body: `{"values":{"s3.public_endpoint":"https://s3.example.invalid"}}`,
+		},
+		{
+			name: "legacy endpoint with unchanged legacy bucket",
+			initial: map[string]string{
+				"s3.operational_bucket": "legacy-bucket",
+			},
+			body: `{"values":{"s3.operational_endpoint":"https://s3.example.invalid"}}`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			settings := &fakeServerSettingsStore{values: tc.initial}
+			handler := &AdminHandler{SettingsRepo: settings}
+			req := httptest.NewRequest(http.MethodPut, "/admin/settings", strings.NewReader(tc.body))
+			rec := httptest.NewRecorder()
+
+			handler.HandleUpdateSettings(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+			}
+			if settings.setManyCalls != 1 {
+				t.Fatalf("SetMany calls = %d, want 1", settings.setManyCalls)
+			}
+		})
+	}
+}
+
 func TestAdminUpdateSettingsExplicitS3ValueDoesNotPullOperationalFallback(t *testing.T) {
 	tests := []struct {
 		name    string

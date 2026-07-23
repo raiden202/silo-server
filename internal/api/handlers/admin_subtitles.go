@@ -69,10 +69,7 @@ func (h *AdminSubtitleHandler) HandleUpdateProvider(w http.ResponseWriter, r *ht
 		writeError(w, http.StatusBadRequest, "bad_request", "Invalid provider name")
 		return
 	}
-	if !knownSubtitleProvider(providerName) {
-		writeError(w, http.StatusNotFound, "not_found", "Unknown subtitle provider")
-		return
-	}
+	knownProvider := knownSubtitleProvider(providerName)
 
 	var req updateSubtitleProviderRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -89,12 +86,14 @@ func (h *AdminSubtitleHandler) HandleUpdateProvider(w http.ResponseWriter, r *ht
 			writeError(w, http.StatusInternalServerError, "update_error", "Failed to clear provider credentials")
 			return
 		}
-		if err := h.reloadProviderFromRepository(r.Context(), providerName); err != nil {
-			writeError(w, http.StatusInternalServerError, "update_error", "Credentials cleared but latest provider config could not be applied")
-			return
+		if knownProvider {
+			if err := h.reloadProviderFromRepository(r.Context(), providerName); err != nil {
+				writeError(w, http.StatusInternalServerError, "update_error", "Credentials cleared but latest provider config could not be applied")
+				return
+			}
 		}
-		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"status": "ok", "applied_live": h.manager != nil,
+		writeJSON(w, http.StatusOK, map[string]interface{}{ //nolint:goconst // JSON response keys stay inline.
+			"status": "ok", "applied_live": knownProvider && h.manager != nil,
 		})
 		return
 	}
@@ -106,7 +105,7 @@ func (h *AdminSubtitleHandler) HandleUpdateProvider(w http.ResponseWriter, r *ht
 	}
 	req = preserveSubtitleProviderFields(stored, req)
 
-	if req.Enabled {
+	if req.Enabled && knownProvider {
 		_, err = h.providerFactory(subtitleProviderConfigFromRequest(providerName, req))
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "invalid_provider_config", err.Error())
@@ -127,13 +126,15 @@ func (h *AdminSubtitleHandler) HandleUpdateProvider(w http.ResponseWriter, r *ht
 		return
 	}
 
-	if err := h.reloadProviderFromRepository(r.Context(), providerName); err != nil {
-		writeError(w, http.StatusInternalServerError, "update_error", "Provider saved but latest config could not be applied")
-		return
+	if knownProvider {
+		if err := h.reloadProviderFromRepository(r.Context(), providerName); err != nil {
+			writeError(w, http.StatusInternalServerError, "update_error", "Provider saved but latest config could not be applied")
+			return
+		}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"status": "ok", "applied_live": h.manager != nil,
+		"status": "ok", "applied_live": knownProvider && h.manager != nil,
 	})
 }
 
@@ -174,10 +175,6 @@ func (h *AdminSubtitleHandler) HandleTestProvider(w http.ResponseWriter, r *http
 	providerName, err := decodedURLParam(r, "provider")
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", "Invalid provider name")
-		return
-	}
-	if !knownSubtitleProvider(providerName) {
-		writeError(w, http.StatusNotFound, "not_found", "Unknown subtitle provider")
 		return
 	}
 
@@ -255,15 +252,12 @@ func preserveSubtitleProviderFields(stored *subtitles.ProviderConfig, req update
 }
 
 func subtitleProviderConfigFromRequest(providerName string, req updateSubtitleProviderRequest) *subtitles.ProviderConfig {
-	first := req.APIKey
-	second := req.Username
-	third := req.Password
 	return &subtitles.ProviderConfig{
 		ProviderName: providerName,
 		Enabled:      req.Enabled,
-		APIKey:       first,
-		Username:     second,
-		Password:     third,
+		APIKey:       req.APIKey,
+		Username:     req.Username,
+		Password:     req.Password,
 	}
 }
 

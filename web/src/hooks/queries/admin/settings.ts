@@ -2,6 +2,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/api/client";
 import type {
   AdminSettingUpdateResponse,
+  AdminServerStatus,
   AdminSettingsUpdateResponse,
   AdminSettingsConnectionCheckRequest,
   ConnectionCheckResponse,
@@ -83,6 +84,14 @@ export function useAdminServerSettings() {
   });
 }
 
+export function useAdminServerStatus() {
+  return useQuery({
+    queryKey: adminKeys.serverStatus(),
+    queryFn: () => api<AdminServerStatus>("/admin/server/status"),
+    staleTime: 15_000,
+  });
+}
+
 export function useUpdateServerSettings() {
   const queryClient = useQueryClient();
   return useMutation({
@@ -95,6 +104,7 @@ export function useUpdateServerSettings() {
       const keys = Object.keys(values);
       const invalidations = [
         queryClient.invalidateQueries({ queryKey: adminKeys.serverSettings() }),
+        queryClient.invalidateQueries({ queryKey: adminKeys.serverStatus() }),
         queryClient.invalidateQueries({
           queryKey: [...adminKeys.serverSettings(), "sensitive-status"] as const,
         }),
@@ -134,6 +144,7 @@ export function useUpdateServerSetting() {
     onSuccess: async (_data, variables) => {
       const invalidations = [
         queryClient.invalidateQueries({ queryKey: adminKeys.serverSettings() }),
+        queryClient.invalidateQueries({ queryKey: adminKeys.serverStatus() }),
         queryClient.invalidateQueries({
           queryKey: [...adminKeys.serverSettings(), "sensitive-status"] as const,
         }),
@@ -212,6 +223,7 @@ export function useUpdateJellyfinCompatSettings() {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: adminKeys.jellyfinCompatStatus() }),
         queryClient.invalidateQueries({ queryKey: adminKeys.serverSettings() }),
+        queryClient.invalidateQueries({ queryKey: adminKeys.serverStatus() }),
       ]);
     },
     onError: (err) => {
@@ -233,6 +245,7 @@ export function useInstallJellyfinCompatWeb() {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: adminKeys.jellyfinCompatStatus() }),
         queryClient.invalidateQueries({ queryKey: adminKeys.serverSettings() }),
+        queryClient.invalidateQueries({ queryKey: adminKeys.serverStatus() }),
       ]);
     },
     onError: (err) => {
@@ -254,6 +267,7 @@ export function useRemoveJellyfinCompatWeb() {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: adminKeys.jellyfinCompatStatus() }),
         queryClient.invalidateQueries({ queryKey: adminKeys.serverSettings() }),
+        queryClient.invalidateQueries({ queryKey: adminKeys.serverStatus() }),
       ]);
     },
     onError: (err) => {

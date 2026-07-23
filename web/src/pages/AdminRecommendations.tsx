@@ -416,8 +416,8 @@ export default function AdminRecommendations() {
       });
       setLocalValues((prev) => ({
         ...prev,
-        [EMBEDDING_BASE_URL_KEY]: preset.baseUrl,
-        [EMBEDDING_MODEL_KEY]: preset.model,
+        [EMBEDDING_BASE_URL_KEY]: result.values[EMBEDDING_BASE_URL_KEY] ?? preset.baseUrl,
+        [EMBEDDING_MODEL_KEY]: result.values[EMBEDDING_MODEL_KEY] ?? preset.model,
       }));
       setDirtyKeys((prev) => {
         const next = new Set(prev);

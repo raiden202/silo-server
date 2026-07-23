@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -14,6 +16,7 @@ import (
 
 	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/config"
+	"github.com/Silo-Server/silo-server/internal/diagnostics"
 	"github.com/Silo-Server/silo-server/internal/s3client"
 )
 
@@ -288,6 +291,72 @@ func TestAdminUpdateSettingsRejectsWholeBatchBeforeWrite(t *testing.T) {
 	if settings.values["branding.server_name"] != "Silo" {
 		t.Fatalf("valid sibling value was partially persisted: %#v", settings.values)
 	}
+}
+
+func TestAdminUpdateSettingsValidatesProspectiveDiagnosticsLimits(t *testing.T) {
+	const (
+		mib = 1024 * 1024
+	)
+
+	t.Run("rejects invalid final relationship", func(t *testing.T) {
+		settings := &fakeServerSettingsStore{values: map[string]string{
+			diagnostics.KeyMaxBundleBytes:       strconv.Itoa(10 * mib),
+			diagnostics.KeyMaxUncompressedBytes: strconv.Itoa(64 * mib),
+			diagnostics.KeyMaxBytesPerUser:      strconv.Itoa(200 * mib),
+		}}
+		handler := &AdminHandler{SettingsRepo: settings}
+		req := httptest.NewRequest(
+			http.MethodPut,
+			"/admin/settings",
+			strings.NewReader(fmt.Sprintf(
+				`{"values":{"%s":"%d","%s":"%d"}}`,
+				diagnostics.KeyMaxBundleBytes,
+				50*mib,
+				diagnostics.KeyMaxUncompressedBytes,
+				20*mib,
+			)),
+		)
+		rec := httptest.NewRecorder()
+
+		handler.HandleUpdateSettings(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+		}
+		if settings.setManyCalls != 0 {
+			t.Fatalf("invalid diagnostics batch wrote settings: SetMany=%d", settings.setManyCalls)
+		}
+	})
+
+	t.Run("accepts valid paired repair", func(t *testing.T) {
+		settings := &fakeServerSettingsStore{values: map[string]string{
+			diagnostics.KeyMaxBundleBytes:       strconv.Itoa(64 * mib),
+			diagnostics.KeyMaxUncompressedBytes: strconv.Itoa(128 * mib),
+			diagnostics.KeyMaxBytesPerUser:      strconv.Itoa(200 * mib),
+		}}
+		handler := &AdminHandler{SettingsRepo: settings}
+		req := httptest.NewRequest(
+			http.MethodPut,
+			"/admin/settings",
+			strings.NewReader(fmt.Sprintf(
+				`{"values":{"%s":"%d","%s":"%d"}}`,
+				diagnostics.KeyMaxBundleBytes,
+				50*mib,
+				diagnostics.KeyMaxUncompressedBytes,
+				60*mib,
+			)),
+		)
+		rec := httptest.NewRecorder()
+
+		handler.HandleUpdateSettings(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		if settings.setManyCalls != 1 {
+			t.Fatalf("valid diagnostics batch SetMany=%d, want 1", settings.setManyCalls)
+		}
+	})
 }
 
 func TestAdminGenericSettingsRoutesRejectUnsafeRateLimitValues(t *testing.T) {

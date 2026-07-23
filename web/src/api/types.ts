@@ -4110,6 +4110,15 @@ export interface AdminSettingsUpdateResponse {
   restart_required_keys?: string[];
 }
 
+export interface AdminServerStatus {
+  started_at: string;
+  restart_required: boolean;
+  restart_required_at?: string;
+  restart_required_reason?: string;
+  restart_requested: boolean;
+  restart_requested_at?: string;
+}
+
 // IP visibility
 export interface UserIPEntry {
   client_ip: string;

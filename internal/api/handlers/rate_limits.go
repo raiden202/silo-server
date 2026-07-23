@@ -356,12 +356,18 @@ func boundedBurst(name string, value int) error {
 func redisConfiguredSettings(values map[string]string, redisBootstrapAvailable bool) bool {
 	// Sentinel addresses are bootstrap-only and intentionally have no flat
 	// server_settings representation (see config.LoadFromDB). A usable Sentinel
-	// deployment is therefore captured by redisBootstrapAvailable from startup
-	// config. redis.url is the only Redis transport that can become usable from
-	// a persisted Admin setting before the next restart.
+	// deployment or REDIS_URL override is therefore captured by
+	// redisBootstrapAvailable from startup config and takes precedence over any
+	// stale persisted redis.url row.
+	if redisBootstrapAvailable {
+		return true
+	}
+
+	// redis.url is the only Redis transport that can become usable from a
+	// persisted Admin setting before the next restart.
 	redisURL := values["redis.url"]
 	if redisURL == "" {
-		return redisBootstrapAvailable
+		return false
 	}
 	normalized, err := config.NormalizeRedisURL(redisURL)
 	// The startup loader consumes the persisted value verbatim. Require its

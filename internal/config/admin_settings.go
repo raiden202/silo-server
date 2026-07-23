@@ -164,6 +164,34 @@ var adminSettingDefaults = map[string]string{
 	"catalog.search.meilisearch.binary_quantized":         "false",
 }
 
+var legacyAdminSettingFallbacks = []struct {
+	canonical string
+	legacy    string
+}{
+	{"s3.public_endpoint", "s3.operational_endpoint"},             //nolint:goconst // Explicit compatibility pair.
+	{"s3.public_read_endpoint", "s3.operational_public_endpoint"}, //nolint:goconst // Explicit compatibility pair.
+	{"s3.public_region", "s3.operational_region"},                 //nolint:goconst // Explicit compatibility pair.
+	{"s3.public_path_style", "s3.operational_path_style"},         //nolint:goconst // Explicit compatibility pair.
+	{"s3.public_bucket", "s3.operational_bucket"},                 //nolint:goconst // Explicit compatibility pair.
+	{"s3.public_key_prefix", "s3.operational_key_prefix"},         //nolint:goconst // Explicit compatibility pair.
+	{"s3.public_access_key", "s3.operational_access_key"},         //nolint:goconst // Explicit compatibility pair.
+	{"s3.public_secret_key", "s3.operational_secret_key"},         //nolint:goconst // Explicit compatibility pair.
+	{"s3.public_url_auth", "s3.operational_url_auth"},
+	{"s3.public_token_secret", "s3.operational_token_secret"},
+	{"s3.public_token_param", "s3.operational_token_param"},
+	{"s3.public_token_ttl", "s3.operational_token_ttl"}, //nolint:goconst // Explicit compatibility pair.
+	{"s3.private_endpoint", "s3.operational_endpoint"},  //nolint:goconst // Explicit compatibility pair.
+	{"s3.private_region", "s3.operational_region"},
+	{"s3.private_path_style", "s3.operational_path_style"},
+	{"s3.private_bucket", "s3.operational_bucket"},
+	{"s3.private_key_prefix", "s3.operational_key_prefix"},
+	{"s3.private_access_key", "s3.operational_access_key"},
+	{"s3.private_secret_key", "s3.operational_secret_key"},
+	{"ai.base_url", "subtitle_ai.base_url"}, //nolint:goconst // Explicit compatibility pair.
+	{"ai.api_key", "subtitle_ai.api_key"},   //nolint:goconst // Explicit compatibility pair.
+	{"ai.chat_model", "subtitle_ai.chat_model"},
+}
+
 // EffectiveAdminSettings overlays persisted values onto the runtime defaults
 // used by the Admin UI. An empty persisted value means "use the default" for
 // keys that have one, matching stringOr/boolOr/intOr in LoadFromDB.
@@ -172,13 +200,6 @@ func EffectiveAdminSettings(stored map[string]string) map[string]string {
 	for key, value := range adminSettingDefaults {
 		effective[key] = value
 	}
-	// Preserve the same canonical-then-legacy precedence as LoadFromDB. These
-	// canonical keys have Admin UI defaults, so applying the defaults before
-	// resolving the legacy fallback would make an upgraded installation appear
-	// to use (and validate against) the default instead of its persisted value.
-	applyLegacyAdminSettingFallback(effective, stored, "s3.public_path_style", "s3.operational_path_style")
-	applyLegacyAdminSettingFallback(effective, stored, "s3.private_path_style", "s3.operational_path_style")
-	applyLegacyAdminSettingFallback(effective, stored, "s3.public_token_ttl", "s3.operational_token_ttl")
 	for key, value := range stored {
 		if value == "" {
 			if _, hasDefault := adminSettingDefaults[key]; hasDefault {
@@ -187,6 +208,23 @@ func EffectiveAdminSettings(stored map[string]string) map[string]string {
 		}
 		effective[key] = value
 	}
+	// Preserve the canonical-then-legacy precedence used by LoadFromDB. Apply
+	// aliases after the stored overlay so an explicitly empty canonical key
+	// cannot erase a configured legacy fallback.
+	for _, fallback := range legacyAdminSettingFallbacks {
+		applyLegacyAdminSettingFallback(
+			effective,
+			stored,
+			fallback.canonical,
+			fallback.legacy,
+		)
+	}
+	applyLegacyPositiveIntAdminSettingFallback(
+		effective,
+		stored,
+		"ai.max_concurrent_jobs",
+		"subtitle_ai.max_concurrent_jobs",
+	)
 	return effective
 }
 
@@ -196,6 +234,28 @@ func applyLegacyAdminSettingFallback(effective, stored map[string]string, canoni
 	}
 	if value := stored[legacy]; value != "" {
 		effective[canonical] = value
+	}
+}
+
+func applyLegacyPositiveIntAdminSettingFallback(
+	effective,
+	stored map[string]string,
+	canonical,
+	legacy string,
+) {
+	value := stored[canonical]
+	if value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err != nil || parsed > 0 {
+			return
+		}
+	}
+	if fallback := stored[legacy]; fallback != "" {
+		effective[canonical] = fallback
+		return
+	}
+	if fallback, ok := adminSettingDefaults[canonical]; ok {
+		effective[canonical] = fallback
 	}
 }
 
